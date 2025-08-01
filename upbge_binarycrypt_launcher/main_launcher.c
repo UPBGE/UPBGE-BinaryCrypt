@@ -4,7 +4,8 @@
 #include "aes.h"
 
 #define SALT_LEN 16
-#define PASSWORD_STR ENCRYPTION_PASSWORD
+
+static const char *PASSWORD_STR = ENCRYPTION_PASSWORD;
 static const uint8_t salt[] = { ENCRYPTION_SALT };
 
 void derive_key(uint8_t *key_out) {
