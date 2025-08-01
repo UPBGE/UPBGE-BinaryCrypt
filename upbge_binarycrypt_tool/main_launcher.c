@@ -6,15 +6,15 @@
 
 #define SALT_LEN 16
 #define PASSWORD_STR ENCRYPTION_PASSWORD
-static const uint8_t salt[] = { ENCRYPTION_SALT };
+static const uint8_t salt[] = {ENCRYPTION_SALT};
 
-void derive_key(uint8_t *key_out) {
+static void derive_key(uint8_t *key_out) {
     for (int i = 0; i < 32; i++) {
         key_out[i] = (uint8_t)(PASSWORD_STR[i % strlen(PASSWORD_STR)] ^ salt[i % SALT_LEN]);
     }
 }
 
-void encrypt_file(const char *input, const char *output) {
+static void encrypt_file(const char *input, const char *output) {
     FILE *fin = fopen(input, "rb");
     if (!fin) return;
     fseek(fin, 0, SEEK_END);

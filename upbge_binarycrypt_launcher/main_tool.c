@@ -45,7 +45,7 @@ int main(void) {
 
     decrypt_file(encrypted, decrypted);
 
-    execlp("blenderplayer", "blenderplayer", decrypted, NULL);
+    //execlp("blenderplayer", "blenderplayer", decrypted, NULL);
     return 0;
 }
 
