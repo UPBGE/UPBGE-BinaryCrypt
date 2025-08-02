@@ -1,6 +1,6 @@
 # UPBGE BinaryCrypt
 
-UPBGE BinaryCrypt is a dual-tool system for encrypting and decrypting `.blend` files to allow a secure deployment of UPBGE games.
+UPBGE BinaryCrypt is a dual-tool system for encrypting and decrypting `.blend` files allowing a secure deployment of UPBGE games.
 This system complies with the GPL license of UPBGE/Blender and, at the same time, avoids exposing the encryption password, 
 thus providing a way to protect .blend files in games, should the game developer choose to do so.
 
