@@ -4,33 +4,33 @@ project(UPBGE_BinaryCrypt C)
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/cmake")
 find_package(raylib REQUIRED)
 
-# -- Generate random password if not defined --
-if(NOT DEFINED ENV{UPBGE_BINARYCRYPT_PASSWORD})
-    execute_process(COMMAND openssl rand -hex 32
-                    OUTPUT_VARIABLE GENERATED_PW
-                    OUTPUT_STRIP_TRAILING_WHITESPACE)
-    set(ENV{UPBGE_BINARYCRYPT_PASSWORD} "${GENERATED_PW}")
-endif()
+# -- Generate random password --
+execute_process(COMMAND openssl rand -hex 32
+                OUTPUT_VARIABLE GENERATED_PW
+                OUTPUT_STRIP_TRAILING_WHITESPACE)
 
-# -- Generate random salt if not defined --
-if(NOT DEFINED ENV{UPBGE_BINARYCRYPT_SALT})
-    execute_process(COMMAND openssl rand -hex 16
-                    OUTPUT_VARIABLE GENERATED_SALT
-                    OUTPUT_STRIP_TRAILING_WHITESPACE)
-    set(ENV{UPBGE_BINARYCRYPT_SALT} ${GENERATED_SALT})
-endif()
+# -- Generate random salt --
+execute_process(COMMAND openssl rand -hex 16
+                OUTPUT_VARIABLE GENERATED_SALT
+                OUTPUT_STRIP_TRAILING_WHITESPACE)
 
-# -- Compilation definitions --
-set(PASSWORD "$ENV{UPBGE_BINARYCRYPT_PASSWORD}")
-set(SALT_HEX $ENV{UPBGE_BINARYCRYPT_SALT})
+# -- Show values --
+message(STATUS "Generated Password: ${GENERATED_PW}")
+message(STATUS "Generated Salt HEX: ${GENERATED_SALT}")
 
-string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1, " SALT_BYTES "${SALT_HEX}")
+# -- Convert salt hex string to comma-separated bytes --
+string(REGEX REPLACE "([0-9a-fA-F][0-9a-fA-F])" "0x\\1, " SALT_BYTES "${GENERATED_SALT}")
+string(REGEX REPLACE ", $" "" SALT_BYTES "${SALT_BYTES}")  # remove trailing comma
 
-#add_compile_definitions(ENCRYPTION_PASSWORD="${PASSWORD}")
-#add_compile_definitions(ENCRYPTION_SALT=${SALT_BYTES})
+add_compile_definitions(ENCRYPTION_PASSWORD="${GENERATED_PW}")
+add_compile_definitions(ENCRYPTION_SALT=${SALT_BYTES})
 
-add_compile_definitions(ENCRYPTION_PASSWORD="mi_contraseña_secreta")
-add_compile_definitions(ENCRYPTION_SALT="0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0A,0x0B,0x0C,0x0D,0x0E,0x0F")
+#add_compile_definitions(ENCRYPTION_PASSWORD="mi_contraseña_secreta")
+#add_compile_definitions(ENCRYPTION_SALT="0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0A,0x0B,0x0C,0x0D,0x0E,0x0F")
+
+message(STATUS "Salt bytes: ${SALT_BYTES}")
+message(STATUS "ENCRYPTION_PASSWORD: ${ENCRYPTION_PASSWORD}")
+message(STATUS "ENCRYPTION_SALT: ${ENCRYPTION_SALT}")
 
 add_subdirectory(aes)
 

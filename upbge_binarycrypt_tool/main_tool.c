@@ -7,7 +7,7 @@
 #define SALT_LEN 16
 
 static const char *PASSWORD_STR = ENCRYPTION_PASSWORD;
-static const uint8_t salt[] = {ENCRYPTION_SALT};
+static const uint8_t salt[16] = {ENCRYPTION_SALT};
 
 static void derive_key(uint8_t *key_out) {
     for (int i = 0; i < 32; i++) {
@@ -26,20 +26,32 @@ static void encrypt_file(const char *input, const char *output) {
     fread(buffer, 1, len, fin);
     fclose(fin);
 
+    // Calculate padding PKCS#7
+    int padding = 16 - (len % 16);
+    if (padding == 0) padding = 16;  // Add complete padding always
+    long padded_len = len + padding;
+
+    uint8_t *buffer_padded = malloc(padded_len);
+    memcpy(buffer_padded, buffer, len);
+    memset(buffer_padded + len, padding, padding); // Filled with value 'padding'
+
     struct AES_ctx ctx;
     uint8_t key[32];
     derive_key(key);
     AES_init_ctx(&ctx, key);
 
-    for (long i = 0; i < len; i += 16) {
-        AES_ECB_encrypt(&ctx, buffer + i);
+    for (long i = 0; i < padded_len; i += 16) {
+        AES_ECB_encrypt(&ctx, buffer_padded + i);
     }
 
     FILE *fout = fopen(output, "wb");
-    fwrite(buffer, 1, len, fout);
+    fwrite(buffer_padded, 1, padded_len, fout);
     fclose(fout);
+
     free(buffer);
+    free(buffer_padded);
 }
+
 
 int main(void) {
     const int screenWidth = 600;
