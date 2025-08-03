@@ -5,17 +5,17 @@
 
 #define SALT_LEN 16
 
-static const char *PASSWORD_STR = ENCRYPTION_PASSWORD;
+static const char* password = ENCRYPTION_PASSWORD;
 static const uint8_t salt[16] = {ENCRYPTION_SALT};
 
-void derive_key(uint8_t *key_out) {
+void derive_key(uint8_t* key_out) {
     for (int i = 0; i < 32; i++) {
-        key_out[i] = (uint8_t)(PASSWORD_STR[i % strlen(PASSWORD_STR)] ^ salt[i % SALT_LEN]);
+        key_out[i] = (uint8_t)(password[i % strlen(password)] ^ salt[i % SALT_LEN]);
     }
 }
 
-static int decrypt_file(const char *input, const char *output) {
-    FILE *fin = fopen(input, "rb");
+static int decrypt_file(const char* input, const char* output) {
+    FILE* fin = fopen(input, "rb");
     if (!fin) {
         fprintf(stderr, "Error opening input file '%s'\n", input);
         return 1;
@@ -26,21 +26,21 @@ static int decrypt_file(const char *input, const char *output) {
     rewind(fin);
 
     if (len <= 0) {
-        fprintf(stderr, "Archivo de entrada vacío o inválido\n");
+        fprintf(stderr, "Empty or invalid input file\n");
         fclose(fin);
         return 1;
     }
 
-    // Ajustar para múltiplos de 16 para AES ECB
+    // Adjust to 16-byte multiples for AES ECB
     if (len % 16 != 0) {
-        fprintf(stderr, "El archivo no es múltiplo de 16 bytes, AES ECB requiere múltiplos de 16\n");
+        fprintf(stderr, "File is not a multiple of 16 bytes, AES ECB requires multiples of 16\n");
         fclose(fin);
         return 1;
     }
 
-    uint8_t *buffer = malloc(len);
+    uint8_t* buffer = malloc(len);
     if (!buffer) {
-        fprintf(stderr, "Error asignando memoria\n");
+        fprintf(stderr, "Error allocating memory\n");
         fclose(fin);
         return 1;
     }
@@ -48,7 +48,7 @@ static int decrypt_file(const char *input, const char *output) {
     size_t read_bytes = fread(buffer, 1, len, fin);
     fclose(fin);
     if (read_bytes != len) {
-        fprintf(stderr, "Error leyendo archivo de entrada\n");
+        fprintf(stderr, "Error reading input file\n");
         free(buffer);
         return 1;
     }
@@ -62,18 +62,18 @@ static int decrypt_file(const char *input, const char *output) {
         AES_ECB_decrypt(&ctx, buffer + i);
     }
 
-    // Obtener valor de padding (último byte)
+    // Get padding value (last byte)
     uint8_t pad_val = buffer[len - 1];
     if (pad_val == 0 || pad_val > 16) {
-        fprintf(stderr, "Error: padding inválido\n");
+        fprintf(stderr, "Error: invalid padding\n");
         free(buffer);
         return 1;
     }
 
-    // Validar padding PKCS#7
+    // Validate PKCS#7 padding
     for (long i = len - pad_val; i < len; i++) {
         if (buffer[i] != pad_val) {
-            fprintf(stderr, "Error: padding corrupto\n");
+            fprintf(stderr, "Error: corrupt padding\n");
             free(buffer);
             return 1;
         }
@@ -81,16 +81,16 @@ static int decrypt_file(const char *input, const char *output) {
 
     long output_len = len - pad_val;
 
-    FILE *fout = fopen(output, "wb");
+    FILE* fout = fopen(output, "wb");
     if (!fout) {
-        fprintf(stderr, "Error al abrir archivo de salida '%s'\n", output);
+        fprintf(stderr, "Error opening output file '%s'\n", output);
         free(buffer);
         return 1;
     }
     fwrite(buffer, 1, output_len, fout);
     fclose(fout);
     free(buffer);
-    printf("Archivo desencriptado creado correctamente: %s\n", output);
+    printf("Decrypted file successfully created: %s\n", output);
     return 0;
 }
 
@@ -103,26 +103,25 @@ int launch_blenderplayer(const char *blend_file) {
     snprintf(cmd, sizeof(cmd), "./blenderplayer/blenderplayer \"%s\"", blend_file);
 #endif
 
-    printf("Ejecutando: %s\n", cmd);
+    printf("Executing: %s\n", cmd);
     int ret = system(cmd);
     if (ret != 0) {
-        fprintf(stderr, "Error ejecutando blenderplayer (code %d)\n", ret);
+        fprintf(stderr, "Error running blenderplayer (code %d)\n", ret);
     }
     return ret;
 }
 
 int main(void) {
-    const char *encrypted = "game_encrypted.block";
-    const char *decrypted = "game_decrypted.blend";
+    const char* encrypted = "game_encrypted.block";
+    const char* decrypted = "game_decrypted.blend";
 
     if (decrypt_file(encrypted, decrypted)) {
-        fprintf(stderr, "Error encriptando el archivo. No se lanza el blenderplayer\n");
+        fprintf(stderr, "Error decrypting file. blenderplayer will not be launched\n");
         return 1;
     }
 
-    printf("Ejecutando blenderplayer con archivo %s\n", decrypted);
+    printf("Launching blenderplayer with file %s\n", decrypted);
     return launch_blenderplayer(decrypted);
 
     return 0;
 }
-

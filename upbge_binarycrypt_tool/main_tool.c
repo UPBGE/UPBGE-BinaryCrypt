@@ -6,12 +6,12 @@
 
 #define SALT_LEN 16
 
-static const char *PASSWORD_STR = ENCRYPTION_PASSWORD;
+static const char* password = ENCRYPTION_PASSWORD;
 static const uint8_t salt[16] = {ENCRYPTION_SALT};
 
-static void derive_key(uint8_t *key_out) {
+static void derive_key(uint8_t* key_out) {
     for (int i = 0; i < 32; i++) {
-        key_out[i] = (uint8_t)(PASSWORD_STR[i % strlen(PASSWORD_STR)] ^ salt[i % SALT_LEN]);
+        key_out[i] = (uint8_t)(password[i % strlen(password)] ^ salt[i % SALT_LEN]);
     }
 }
 
@@ -104,8 +104,8 @@ int main(void) {
     const int screenHeight = 200;
     InitWindow(screenWidth, screenHeight, "UPBGE BinaryCrypt - Encryption Tool");
 
-    const char *inputFile = "game.blend";
-    const char *outputFile = "game_encrypted.block";
+    const char* inputFile = "game.blend";
+    const char* outputFile = "game_encrypted.block";
 
     Rectangle button = { (float)(screenWidth / 2 - 100), (float)(screenHeight / 2 - 25), 200.0f, 50.0f };
 
