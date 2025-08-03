@@ -15,39 +15,85 @@ static void derive_key(uint8_t *key_out) {
     }
 }
 
-static void encrypt_file(const char *input, const char *output) {
-    FILE *fin = fopen(input, "rb");
+static void encrypt_file(const char* input, const char* output) {
+    // Validate input parameters
+    if (!input || !output) return;
+
+    // Open input file
+    FILE* fin = fopen(input, "rb");
     if (!fin) return;
-    fseek(fin, 0, SEEK_END);
+
+    // Get file size with error checking
+    if (fseek(fin, 0, SEEK_END)) {
+        fclose(fin);
+        return;
+    }
+
     long len = ftell(fin);
     rewind(fin);
 
-    uint8_t *buffer = malloc(len);
-    fread(buffer, 1, len, fin);
-    fclose(fin);
+    // Validate file length (must be positive)
+    if (len <= 0) {
+        fclose(fin);
+        return;
+    }
 
-    // Calculate padding PKCS#7
+    // Allocate buffer for file content
+    uint8_t* buffer = malloc((size_t)len);
+    if (!buffer) {
+        fclose(fin);
+        return;
+    }
+
+    // Read entire file with complete verification
+    size_t bytes_read = fread(buffer, 1, (size_t)len, fin);
+    fclose(fin);
+    if (bytes_read != (size_t)len) {
+        free(buffer);
+        return;
+    }
+
+    // Calculate PKCS#7 padding
     int padding = 16 - (len % 16);
-    if (padding == 0) padding = 16;  // Add complete padding always
+    if (padding == 0) padding = 16;  // Always add full block when aligned
+
+    // Check for potential integer overflow
+    if (len > LONG_MAX - padding) {
+        free(buffer);
+        return;
+    }
     long padded_len = len + padding;
 
-    uint8_t *buffer_padded = malloc(padded_len);
-    memcpy(buffer_padded, buffer, len);
-    memset(buffer_padded + len, padding, padding); // Filled with value 'padding'
+    // Allocate and prepare padded buffer
+    uint8_t* buffer_padded = malloc((size_t)padded_len);
+    if (!buffer_padded) {
+        free(buffer);
+        return;
+    }
 
+    // Copy original data and apply padding
+    memcpy(buffer_padded, buffer, (size_t)len);
+    memset(buffer_padded + len, (uint8_t)padding, (size_t)padding);
+
+    // Initialize AES context
     struct AES_ctx ctx;
     uint8_t key[32];
     derive_key(key);
     AES_init_ctx(&ctx, key);
 
+    // Encrypt each 16-byte block
     for (long i = 0; i < padded_len; i += 16) {
         AES_ECB_encrypt(&ctx, buffer_padded + i);
     }
 
-    FILE *fout = fopen(output, "wb");
-    fwrite(buffer_padded, 1, padded_len, fout);
-    fclose(fout);
+    // Write encrypted data to output file
+    FILE* fout = fopen(output, "wb");
+    if (fout) {
+        fwrite(buffer_padded, 1, (size_t)padded_len, fout);
+        fclose(fout);
+    }
 
+    // Clean up allocated memory
     free(buffer);
     free(buffer_padded);
 }
@@ -61,7 +107,7 @@ int main(void) {
     const char *inputFile = "game.blend";
     const char *outputFile = "game_encrypted.block";
 
-    Rectangle button = { screenWidth/2 - 100, screenHeight/2 - 25, 200, 50 };
+    Rectangle button = { (float)(screenWidth / 2 - 100), (float)(screenHeight / 2 - 25), 200.0f, 50.0f };
 
     SetTargetFPS(60);
     while (!WindowShouldClose()) {
@@ -77,7 +123,7 @@ int main(void) {
         } else {
             DrawRectangleRec(button, GRAY);
         }
-        DrawText("Encrypt", button.x + 60, button.y + 15, 20, BLACK);
+        DrawText("Encrypt", (int)button.x + 60, (int)button.y + 15, 20, BLACK);
 
         EndDrawing();
     }

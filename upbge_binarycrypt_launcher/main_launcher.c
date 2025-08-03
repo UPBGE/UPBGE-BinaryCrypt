@@ -1,7 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <errno.h>
 #include "aes.h"
 
 #define SALT_LEN 16
@@ -18,9 +17,10 @@ void derive_key(uint8_t *key_out) {
 static int decrypt_file(const char *input, const char *output) {
     FILE *fin = fopen(input, "rb");
     if (!fin) {
-        fprintf(stderr, "Error al abrir archivo de entrada '%s': %s\n", input, strerror(errno));
+        fprintf(stderr, "Error opening input file '%s'\n", input);
         return 1;
     }
+
     fseek(fin, 0, SEEK_END);
     long len = ftell(fin);
     rewind(fin);
@@ -83,7 +83,7 @@ static int decrypt_file(const char *input, const char *output) {
 
     FILE *fout = fopen(output, "wb");
     if (!fout) {
-        fprintf(stderr, "Error al abrir archivo de salida '%s': %s\n", output, strerror(errno));
+        fprintf(stderr, "Error al abrir archivo de salida '%s'\n", output);
         free(buffer);
         return 1;
     }
@@ -116,7 +116,7 @@ int main(void) {
     const char *decrypted = "game_decrypted.blend";
 
     if (decrypt_file(encrypted, decrypted)) {
-        fprintf(stderr, "Error encriptando el archivo. No se lanza el blenderplayer: %s\n", strerror(errno));
+        fprintf(stderr, "Error encriptando el archivo. No se lanza el blenderplayer\n");
         return 1;
     }
 
