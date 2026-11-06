@@ -593,12 +593,23 @@ static void bc_gui_set_window_icon(void)
  * drawn later paints over it, and on one line that can run past the window. Controls register
  * their tooltip here instead; the one under the mouse is drawn last, wrapped to the window. */
 
+/* Seconds the mouse rests on a control before its tooltip shows: Blender's UI_TOOLTIP_DELAY, and
+ * the Windows default. */
+#define BC_TIP_DELAY 0.5
+
+/* Registered by the control under the mouse this frame. */
 static const char *g_tip_text = NULL;
 static Rectangle g_tip_anchor;
+/* Tooltip of the control under the mouse since g_tip_since, and whether it was clicked since. */
+static const char *g_tip_hover = NULL;
+static double g_tip_since = 0;
+static bool g_tip_clicked = false;
+/* Counting down to a tooltip: the main loop must not block on input meanwhile. */
+static bool g_tip_waiting = false;
 
 static void bc_tip(const Rectangle anchor, const char *text)
 {
-  if (text != NULL && !GuiIsLocked() && GuiGetState() != STATE_DISABLED &&
+  if (text != NULL && !GuiIsLocked() && GuiGetState() != STATE_DISABLED && IsCursorOnScreen() &&
       CheckCollisionPointRec(GetMousePosition(), anchor))
   {
     g_tip_text = text;
@@ -690,7 +701,18 @@ static void bc_draw_span(const BC_Span *span, const float x, const float y, cons
  * when there is no room, inside the window. */
 static void bc_gui_draw_tip(void)
 {
-  if (g_tip_text == NULL) {
+  const char *text = g_tip_text;
+  g_tip_text = NULL;
+  /* The delay counts from entering the control. A click hides the tooltip until the mouse leaves
+   * the control, as in Blender and Windows: it would cover what the click changes. */
+  if (text != g_tip_hover) {
+    g_tip_hover = text;
+    g_tip_since = GetTime();
+    g_tip_clicked = false;
+  }
+  g_tip_clicked = g_tip_clicked || IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+  g_tip_waiting = text != NULL && !g_tip_clicked && GetTime() - g_tip_since < BC_TIP_DELAY;
+  if (text == NULL || g_tip_clicked || g_tip_waiting) {
     return;
   }
   const float W = (float)GetScreenWidth();
@@ -699,7 +721,7 @@ static void bc_gui_draw_tip(void)
   const float line_h = BC_TEXT_SIZE + 4;
   const float max_w = (W - 2 * BC_MARGIN < 640 ? W - 2 * BC_MARGIN : 640) - 2 * BC_GAP;
   BC_Span spans[24];
-  const int n = bc_wrap(g_tip_text, max_w, spacing, spans, 24);
+  const int n = bc_wrap(text, max_w, spacing, spans, 24);
   float text_w = 0;
   for (int i = 0; i < n; i++) {
     char buffer[BC_SPAN_MAX];
@@ -722,7 +744,6 @@ static void bc_gui_draw_tip(void)
   for (int i = 0; i < n; i++) {
     bc_draw_span(&spans[i], box.x + BC_GAP, box.y + BC_GAP + (float)i * line_h, spacing, color);
   }
-  g_tip_text = NULL;
 }
 
 /** Plain text box mirroring \a value, trimmed when confirmed. Returns true when \a value changed. */
@@ -1435,8 +1456,9 @@ int bc_gui_run(const char *project_path)
                        IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER);
     eager_frames = eager_frames > 1 ? eager_frames - 1 : acted ? 1 : 0;
     /* Decided before EndDrawing: it polls the input of the next frame, blocking when waiting. A
-     * running job needs every frame. Idle, the editor costs no CPU. */
-    if (g.job != NULL || eager_frames > 0) {
+     * running job needs every frame, and so does a tooltip counting down (at most BC_TIP_DELAY,
+     * once per control entered). Idle, the editor costs no CPU. */
+    if (g.job != NULL || eager_frames > 0 || g_tip_waiting) {
       DisableEventWaiting();
     }
     else {
