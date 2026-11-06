@@ -475,6 +475,143 @@ static Rectangle bc_rect(float x, float y, float w, float h)
   return r;
 }
 
+/* -------------------------------------------------------------------------------------------- */
+/* Tooltips and wrapped text. raygui draws a tooltip together with its control, so every control
+ * drawn later paints over it, and on one line that can run past the window. Controls register
+ * their tooltip here instead; the one under the mouse is drawn last, wrapped to the window. */
+
+static const char *g_tip_text = NULL;
+static Rectangle g_tip_anchor;
+
+static void bc_tip(const Rectangle anchor, const char *text)
+{
+  if (text != NULL && !GuiIsLocked() && GuiGetState() != STATE_DISABLED &&
+      CheckCollisionPointRec(GetMousePosition(), anchor))
+  {
+    g_tip_text = text;
+    g_tip_anchor = anchor;
+  }
+}
+
+typedef struct BC_Span {
+  const char *start;
+  int length;
+} BC_Span;
+
+/* Longest text measured or drawn at once: tooltips and log lines are shorter. */
+#define BC_SPAN_MAX 1024
+
+/** \a span as a NUL-terminated string in \a buffer, for raylib's text functions. */
+static const char *bc_span_text(const BC_Span *span, char buffer[BC_SPAN_MAX])
+{
+  const int n = span->length < BC_SPAN_MAX ? span->length : BC_SPAN_MAX - 1;
+  memcpy(buffer, span->start, (size_t)n);
+  buffer[n] = '\0';
+  return buffer;
+}
+
+/** Split \a text into lines no wider than \a width, breaking at spaces (a word wider than a line
+ * is cut). Leading spaces of continuation lines are dropped. \return the number of spans. */
+static int bc_wrap(const char *text, const float width, const float spacing, BC_Span *spans, const int max_spans)
+{
+  const Font font = GuiGetFont();
+  char buffer[BC_SPAN_MAX];
+  int count = 0;
+  const char *p = text;
+  while (*p != '\0' && count < max_spans) {
+    if (count > 0) {
+      while (*p == ' ') {
+        p++;
+      }
+      if (*p == '\0') {
+        break;
+      }
+    }
+    int length = 0;
+    for (;;) {
+      int next = length;
+      while (p[next] == ' ') {
+        next++;
+      }
+      while (p[next] != '\0' && p[next] != ' ') {
+        next++;
+      }
+      if (next == length || next >= BC_SPAN_MAX) {
+        break;
+      }
+      memcpy(buffer, p, (size_t)next);
+      buffer[next] = '\0';
+      if (MeasureTextEx(font, buffer, BC_TEXT_SIZE, spacing).x > width) {
+        break;
+      }
+      length = next;
+    }
+    if (length == 0) {
+      /* One word wider than the line: as many characters as fit, at least one. */
+      length = 1;
+      while (p[length] != '\0' && p[length] != ' ' && length + 1 < BC_SPAN_MAX) {
+        memcpy(buffer, p, (size_t)length + 1);
+        buffer[length + 1] = '\0';
+        if (MeasureTextEx(font, buffer, BC_TEXT_SIZE, spacing).x > width) {
+          break;
+        }
+        length++;
+      }
+    }
+    spans[count].start = p;
+    spans[count].length = length;
+    count++;
+    p += length;
+  }
+  return count;
+}
+
+static void bc_draw_span(const BC_Span *span, const float x, const float y, const float spacing, const Color color)
+{
+  char buffer[BC_SPAN_MAX];
+  const Vector2 position = {x, y};
+  DrawTextEx(GuiGetFont(), bc_span_text(span, buffer), position, BC_TEXT_SIZE, spacing, color);
+}
+
+/** Draw the tooltip registered this frame on top of everything, below its control or above it
+ * when there is no room, inside the window. */
+static void bc_gui_draw_tip(void)
+{
+  if (g_tip_text == NULL) {
+    return;
+  }
+  const float W = (float)GetScreenWidth();
+  const float H = (float)GetScreenHeight();
+  const float spacing = (float)GuiGetStyle(DEFAULT, TEXT_SPACING);
+  const float line_h = BC_TEXT_SIZE + 4;
+  const float max_w = (W - 2 * BC_MARGIN < 640 ? W - 2 * BC_MARGIN : 640) - 2 * BC_GAP;
+  BC_Span spans[24];
+  const int n = bc_wrap(g_tip_text, max_w, spacing, spans, 24);
+  float text_w = 0;
+  for (int i = 0; i < n; i++) {
+    char buffer[BC_SPAN_MAX];
+    const float w = MeasureTextEx(GuiGetFont(), bc_span_text(&spans[i], buffer), BC_TEXT_SIZE, spacing).x;
+    text_w = w > text_w ? w : text_w;
+  }
+  Rectangle box = {g_tip_anchor.x, g_tip_anchor.y + g_tip_anchor.height + 4, text_w + 2 * BC_GAP, (float)n * line_h + 2 * BC_GAP - 4};
+  if (box.x + box.width > W - BC_MARGIN) {
+    box.x = W - BC_MARGIN - box.width;
+  }
+  if (box.x < BC_MARGIN) {
+    box.x = BC_MARGIN;
+  }
+  if (box.y + box.height > H - BC_MARGIN && g_tip_anchor.y - 4 - box.height >= BC_MARGIN) {
+    box.y = g_tip_anchor.y - 4 - box.height;
+  }
+  DrawRectangleRec(box, GetColor((unsigned int)GuiGetStyle(DEFAULT, BACKGROUND_COLOR)));
+  DrawRectangleLinesEx(box, 1, GetColor((unsigned int)GuiGetStyle(DEFAULT, BORDER_COLOR_NORMAL)));
+  const Color color = GetColor((unsigned int)GuiGetStyle(DEFAULT, TEXT_COLOR_NORMAL));
+  for (int i = 0; i < n; i++) {
+    bc_draw_span(&spans[i], box.x + BC_GAP, box.y + BC_GAP + (float)i * line_h, spacing, color);
+  }
+  g_tip_text = NULL;
+}
+
 /** Plain text box mirroring \a value, trimmed when confirmed. Returns true when \a value changed. */
 static bool bc_gui_text_field(Rectangle bounds,
                               const char *tooltip,
@@ -488,7 +625,7 @@ static bool bc_gui_text_field(Rectangle bounds,
     snprintf(text, text_size, "%s", value);
   }
   bool changed = false;
-  GuiSetTooltip(tooltip);
+  bc_tip(bounds, tooltip);
   if (GuiTextBox(bounds, text, (int)text_size - 1, *edit)) {
     if (*edit) {
       char *start = text;
@@ -508,7 +645,6 @@ static bool bc_gui_text_field(Rectangle bounds,
     }
     *edit = !*edit;
   }
-  GuiSetTooltip(NULL);
   return changed;
 }
 
@@ -526,7 +662,7 @@ static bool bc_gui_path_row(float y,
   const float x = BC_MARGIN + BC_GAP;
   const float box_w = width - BC_LABEL_W - BC_BUTTON_W - 4 * BC_GAP;
   GuiLabel(bc_rect(x, y, BC_LABEL_W, BC_ROW), label);
-  GuiSetTooltip(tooltip);
+  bc_tip(bc_rect(x + BC_LABEL_W, y, box_w, BC_ROW), tooltip);
   *r_committed = false;
   if (!*edit) {
     bc_fit_left(value, box_w - 16, text, BC_PATH_MAX);
@@ -541,7 +677,6 @@ static bool bc_gui_path_row(float y,
     }
     *edit = !*edit;
   }
-  GuiSetTooltip(NULL);
   return GuiButton(bc_rect(x + BC_LABEL_W + box_w + BC_GAP, y, BC_BUTTON_W, BC_ROW), "Browse...");
 }
 
@@ -583,9 +718,9 @@ static void bc_gui_draw(BC_Gui *g)
   x += BC_BUTTON_W + 2 * BC_GAP;
   char key_label[64];
   snprintf(key_label, sizeof(key_label), "Key %s", g->fingerprint);
-  GuiSetTooltip("Fingerprint of the key built into this tool: the launcher must come from the same build");
+  bc_tip(bc_rect(W - BC_MARGIN - 260, y, 260, BC_ROW),
+         "Fingerprint of the key built into this tool: the launcher must come from the same build");
   GuiLabel(bc_rect(W - BC_MARGIN - 260, y, 260, BC_ROW), key_label);
-  GuiSetTooltip(NULL);
   y += BC_ROW + 2 * BC_GAP;
 
   /* Settings. */
@@ -658,7 +793,7 @@ static void bc_gui_draw(BC_Gui *g)
   bc_gui_effective_game_name(g, game_name, sizeof(game_name), &game_is_default);
   GuiLabel(bc_rect(BC_MARGIN + BC_GAP, y, BC_LABEL_W, BC_ROW), "Game name");
   if (!g->game_edit) {
-    snprintf(g->game_text, sizeof(g->game_text), "%s%s", game_name, game_is_default ? "   (from the main file)" : "");
+    snprintf(g->game_text, sizeof(g->game_text), "%s%s", game_name, game_is_default ? "  (main file)" : "");
   }
   /* Manifest placement shares the row, right aligned with the path row buttons. */
   const float text_spacing = (float)GuiGetStyle(DEFAULT, TEXT_SPACING);
@@ -674,7 +809,9 @@ static void bc_gui_draw(BC_Gui *g)
                               combo_button_w + GuiGetStyle(COMBOBOX, COMBO_BUTTON_SPACING);
   const float check_x = manifest_x - manifest_label_w - BC_GAP - check_combo_w;
   const float game_box_w = check_x - check_label_w - BC_GAP - (BC_MARGIN + BC_GAP + BC_LABEL_W);
-  GuiSetTooltip("Name of the game executable (\".exe\" is added on Windows): the only executable in the game folder");
+  bc_tip(bc_rect(BC_MARGIN + BC_GAP + BC_LABEL_W, y, game_box_w, BC_ROW),
+         "Name of the game executable (\".exe\" is added on Windows): the only executable in the game folder. "
+         "Empty: the name of the main file");
   if (GuiTextBox(bc_rect(BC_MARGIN + BC_GAP + BC_LABEL_W, y, game_box_w, BC_ROW),
                  g->game_text,
                  BC_GAME_NAME_MAX - 1,
@@ -698,29 +835,28 @@ static void bc_gui_draw(BC_Gui *g)
     }
     g->game_edit = !g->game_edit;
   }
-  GuiSetTooltip(NULL);
   GuiLabel(bc_rect(check_x - check_label_w, y, check_label_w, BC_ROW), "Check");
-  GuiSetTooltip("What the game executable checks before every launch. Player: the player executable. + Libraries: "
-                "also every .dll, .so, .dylib, .pyd and .exe of the game folder (a proxy DLL would run inside the "
-                "player). + Python: also .py, .pth and .zip files, and Python bytecode is removed (the game then "
-                "compiles its scripts at every launch). Each level costs a hash of those files at every launch");
+  bc_tip(bc_rect(check_x, y, check_combo_w, BC_ROW),
+         "What the game executable checks before every launch. Player: the player executable. + Libraries: "
+         "also every .dll, .so, .dylib, .pyd and .exe of the game folder (a proxy DLL would run inside the "
+         "player). + Python: also .py, .pth and .zip files, and Python bytecode is removed (the game then "
+         "compiles its scripts at every launch). Each level costs a hash of those files at every launch");
   int integrity = (int)g->project.integrity;
   const int default_button_w = GuiGetStyle(COMBOBOX, COMBO_BUTTON_WIDTH);
   GuiSetStyle(COMBOBOX, COMBO_BUTTON_WIDTH, combo_button_w);
   GuiComboBox(bc_rect(check_x, y, check_combo_w, BC_ROW), "Player;+ Libraries;+ Python", &integrity);
   GuiSetStyle(COMBOBOX, COMBO_BUTTON_WIDTH, default_button_w);
-  GuiSetTooltip(NULL);
   if (integrity != (int)g->project.integrity) {
     g->project.integrity = (BC_Integrity)integrity;
     bc_gui_set_modified(g);
   }
   GuiLabel(bc_rect(manifest_x - manifest_label_w, y, manifest_label_w, BC_ROW), "Manifest");
-  GuiSetTooltip("Embedded: one self-contained game executable. Separate file: the game executable is an "
-                "untouched copy of bc_launcher and " BC_MANIFEST_FILENAME " goes next to it (sign "
-                "bc_launcher once; strip, UPX and codesign stay harmless)");
+  bc_tip(bc_rect(manifest_x, y, manifest_group_w, BC_ROW),
+         "Embedded: one self-contained game executable. Separate file: the game executable is an "
+         "untouched copy of bc_launcher and " BC_MANIFEST_FILENAME " goes next to it (sign "
+         "bc_launcher once; strip, UPX and codesign stay harmless)");
   int manifest_mode = (int)g->project.manifest_mode;
   GuiToggleGroup(bc_rect(manifest_x, y, manifest_item_w, BC_ROW), "Embedded;Separate file", &manifest_mode);
-  GuiSetTooltip(NULL);
   if (manifest_mode != (int)g->project.manifest_mode) {
     g->project.manifest_mode = (BC_ManifestMode)manifest_mode;
     bc_gui_set_modified(g);
@@ -840,7 +976,8 @@ static void bc_gui_draw(BC_Gui *g)
       cache_w *= (right - x0) / needed;
     }
     GuiLabel(bc_rect(BC_MARGIN + BC_GAP, y, BC_LABEL_W, BC_ROW), "Key");
-    GuiSetTooltip("Per project: a key of this project, from its key file, travels masked in the game executable (another game made with this tool has another key). Online: a key server gives it to players who own the game (Steam, Epic...) through the key provider; no shipped file holds it. Build key: the key compiled into this tool and the launcher");
+    bc_tip(bc_rect(x0, y, (float)key_count * key_w + (float)(key_count - 1) * padding, BC_ROW),
+           "Per project: a key of this project, from its key file, travels masked in the game executable (another game made with this tool has another key). Online: a key server gives it to players who own the game (Steam, Epic...) through the key provider; no shipped file holds it. Build key: the key compiled into this tool and the launcher");
     int key_mode = (int)g->project.key_mode;
     GuiToggleGroup(bc_rect(x0, y, key_w, BC_ROW), "Per project;Online;Build key", &key_mode);
     if (key_mode != (int)g->project.key_mode) {
@@ -848,16 +985,16 @@ static void bc_gui_draw(BC_Gui *g)
       bc_gui_set_modified(g);
     }
     if (online) {
-      GuiSetTooltip("Always online: the key server is asked at every launch. Offline after the first launch: the key stays on the player's computer (protected for that user) and the game also starts without a connection");
       int cache = g->project.key_cache ? 1 : 0;
       const float cache_x = right - 2 * cache_w - padding;
+      bc_tip(bc_rect(cache_x, y, 2 * cache_w + padding, BC_ROW),
+             "Always online: the key server is asked at every launch. Offline after the first launch: the key stays on the player's computer (protected for that user) and the game also starts without a connection");
       GuiToggleGroup(bc_rect(cache_x, y, cache_w, BC_ROW), "Always online;Offline after 1st launch", &cache);
       if (cache != (g->project.key_cache ? 1 : 0)) {
         g->project.key_cache = cache != 0;
         bc_gui_set_modified(g);
       }
     }
-    GuiSetTooltip(NULL);
     y += BC_ROW + BC_GAP;
   }
   if (key_file_row) {
@@ -912,10 +1049,10 @@ static void bc_gui_draw(BC_Gui *g)
      * (unchanged files keep theirs, so store patches stay small). */
     const float rotation_w = MeasureTextEx(GuiGetFont(), "New key per update", BC_TEXT_SIZE, text_spacing).x + 4 * BC_GAP;
     GuiLabel(bc_rect(BC_MARGIN + BC_GAP, y, BC_LABEL_W, BC_ROW), "Updates");
-    GuiSetTooltip("One key: every file of every update uses the same key. New key per update: files changed in an update get its new key, unchanged files keep their key and their bytes; a leaked key does not open later updates");
+    bc_tip(bc_rect(x0, y, 2 * rotation_w + (float)GuiGetStyle(TOGGLE, GROUP_PADDING), BC_ROW),
+           "One key: every file of every update uses the same key. New key per update: files changed in an update get its new key, unchanged files keep their key and their bytes; a leaked key does not open later updates");
     int rotation = g->project.key_rotation ? 1 : 0;
     GuiToggleGroup(bc_rect(x0, y, rotation_w, BC_ROW), "One key;New key per update", &rotation);
-    GuiSetTooltip(NULL);
     if (rotation != (g->project.key_rotation ? 1 : 0)) {
       g->project.key_rotation = rotation != 0;
       bc_gui_set_modified(g);
@@ -1066,21 +1203,27 @@ static void bc_gui_draw(BC_Gui *g)
                  1.0f);
   y += BC_ROW + BC_GAP;
 
-  /* Log: newest lines at the bottom, colored by level, clipped to the panel. */
+  /* Log: newest lines at the bottom, colored by level, wrapped to the panel. Filled bottom up, so
+   * only the visible messages are measured; the oldest one may show only its last rows. */
   const float log_h = (float)log_lines * 24 + BC_GAP;
   GuiPanel(bc_rect(BC_MARGIN, y, inner, log_h), NULL);
   BeginScissorMode((int)BC_MARGIN, (int)y, (int)inner, (int)log_h);
-  const int shown = g->log_count < log_lines ? g->log_count : log_lines;
-  for (int i = 0; i < shown; i++) {
-    const int index = (g->log_next - shown + i + BC_LOG_LINES) % BC_LOG_LINES;
-    const BC_LogLine *line = &g->log[index];
+  int row = log_lines;
+  for (int i = 0; i < g->log_count && row > 0; i++) {
+    const BC_LogLine *line = &g->log[(g->log_next - 1 - i + BC_LOG_LINES) % BC_LOG_LINES];
     const Color color = line->level == BC_LOG_ERROR   ? RED :
                         line->level == BC_LOG_WARNING ? ORANGE :
                                                         GetColor((unsigned int)GuiGetStyle(DEFAULT, TEXT_COLOR_NORMAL));
-    Vector2 position = {BC_MARGIN + BC_GAP, y + BC_GAP / 2 + (float)i * 24};
-    DrawTextEx(GuiGetFont(), line->text, position, BC_TEXT_SIZE, 2, color);
+    BC_Span spans[BC_LOG_VISIBLE];
+    const int n = bc_wrap(line->text, inner - 2 * BC_GAP, 2, spans, BC_LOG_VISIBLE);
+    for (int k = n - 1; k >= 0 && row > 0; k--) {
+      row--;
+      bc_draw_span(&spans[k], BC_MARGIN + BC_GAP, y + BC_GAP / 2 + (float)row * 24, 2, color);
+    }
   }
   EndScissorMode();
+
+  bc_gui_draw_tip();
 
   /* Confirmation dialog on top of everything. */
   if (modal) {
@@ -1130,7 +1273,6 @@ int bc_gui_run(const char *project_path)
   GuiSetStyle(LISTVIEW, LIST_ITEMS_HEIGHT, 28);
   GuiSetStyle(LISTVIEW, TEXT_ALIGNMENT, TEXT_ALIGN_LEFT);
   GuiSetStyle(LISTVIEW, TEXT_PADDING, 8);
-  GuiEnableTooltip();
 
   if (project_path != NULL) {
     bc_gui_load(&g, project_path);
