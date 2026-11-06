@@ -59,7 +59,10 @@ blendcache_*
 *.blend1
 *.blend2
 
-# Blend encryted files
+# Game data and BinaryCrypt outputs
 *.blend
-*.block
-*.blockdyn
+*.upbgebc
+*.tmp
+
+# Keys exported with bc_tool --export-key: never commit them
+*.key

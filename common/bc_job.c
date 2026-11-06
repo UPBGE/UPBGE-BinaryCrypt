@@ -1,0 +1,1057 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
+
+#include "bc_job.h"
+
+#include <stdarg.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "bc_brand.h"
+#include "bc_embed.h"
+#include "bc_key.h"
+#include "bc_keyring.h"
+#include "bc_native.h"
+#include "bc_seal.h"
+
+#define BC_HASH_READ_SIZE (1 << 20)
+
+typedef enum BC_JobPhase {
+  BC_PHASE_BRAND_PLAYER,
+  BC_PHASE_HASH_PLAYER,
+  BC_PHASE_SEAL,
+  BC_PHASE_GAME_EXE,
+  BC_PHASE_DONE,
+  BC_PHASE_FAILED,
+} BC_JobPhase;
+
+typedef struct BC_JobFile {
+  char *in;
+  char *out;
+  uint64_t size;
+  /** Plaintext hash: derives the nonce (bc_seal.h) and tells changed files from unchanged ones. */
+  uint8_t hash[BC_PLAIN_HASH_SIZE];
+  bool hashed;
+  /** Key ring index of the key sealing this file, -1 for the build key. */
+  int key;
+} BC_JobFile;
+
+struct BC_Job {
+  /** Build key: authenticates the manifest (and masks a project key); seals the files only in
+   * build key mode. */
+  const uint8_t *key;
+  /* Project or online key: the key file's keys. With a key per update (online only), files whose
+   * plaintext is unchanged since their record keep their earlier key (and stay byte for byte
+   * identical), the others get the key of this update. */
+  bool key_file_keys;
+  bool rotation;
+  /** What the game executable checks before every launch (bc_native.h). */
+  BC_Integrity integrity;
+  BC_KeyRing ring;
+  BC_KeyRecord *old_records; /* As loaded, sorted by path for bsearch. */
+  int old_record_count;
+  int current_key;
+  char key_file[BC_PATH_MAX];
+  bool key_file_single;
+  int changed_files;
+  int unchanged_files;
+  /** Outputs already up to date: not encrypted nor written again. */
+  int kept_files;
+  FILE *file_hash_in;
+  crypto_blake2b_ctx file_hash_ctx;
+  uint16_t key_flags;
+  char provider_rel[BC_PATH_MAX];
+  char key_url[BC_PROJECT_URL_MAX];
+  BC_LogFn log;
+  void *log_user;
+  BC_JobPhase phase;
+
+  char dist_root[BC_PATH_MAX];
+  char launcher_path[BC_PATH_MAX];
+  char game_exe[BC_PATH_MAX];
+  BC_ManifestMode manifest_mode;
+  char manifest_file[BC_PATH_MAX];
+  char player_rel[BC_PATH_MAX];
+  char player_abs[BC_PATH_MAX];
+  char main_out_rel[BC_PATH_MAX];
+
+  BC_JobFile *files;
+  int file_count;
+  int file_capacity;
+
+  int current;
+  bool sealing;
+  BC_Sealer sealer;
+  uint64_t current_base;
+
+  FILE *player_file;
+  crypto_blake2b_ctx hash_ctx;
+  uint8_t *hash_buffer;
+  uint8_t player_hash[BC_PLAYER_HASH_SIZE];
+
+  /* Windows branding (bc_brand.h); strings copied so the project may change while running. */
+  bool branding;
+  BC_Branding brand;
+  uint8_t *ico;
+  char brand_product[BC_GAME_NAME_MAX];
+  char brand_company[BC_PROJECT_TEXT_MAX];
+  char brand_copyright[BC_PROJECT_TEXT_MAX];
+
+  uint64_t total_bytes;
+  uint64_t done_bytes;
+  char status[BC_PATH_MAX];
+};
+
+static void bc_log(BC_Job *job, const BC_LogLevel level, const char *format, ...)
+{
+  char message[BC_PATH_MAX + 256];
+  va_list args;
+  va_start(args, format);
+  vsnprintf(message, sizeof(message), format, args);
+  va_end(args);
+  if (job->log) {
+    job->log(job->log_user, level, message);
+  }
+}
+
+static const char *bc_display(const BC_Job *job, const char *path)
+{
+  /* Paths below the distribution root are shown relative to it: shorter, and what ends up in
+   * the shipped game. Others are shown as they are. */
+  const size_t n = strlen(job->dist_root);
+  if (n > 0 && strncmp(path, job->dist_root, n) == 0 && path[n] == '/') {
+    return path + n + 1;
+  }
+  return path;
+}
+
+/* -------------------------------------------------------------------------------------------- */
+/* File list */
+
+static bool bc_job_add_file(BC_Job *job, const char *in)
+{
+  if (job->file_count == job->file_capacity) {
+    const int capacity = job->file_capacity ? job->file_capacity * 2 : 64;
+    BC_JobFile *files = (BC_JobFile *)realloc(job->files, sizeof(BC_JobFile) * (size_t)capacity);
+    if (files == NULL) {
+      return false;
+    }
+    job->files = files;
+    job->file_capacity = capacity;
+  }
+  BC_JobFile *file = &job->files[job->file_count];
+  memset(file, 0, sizeof(*file));
+  file->in = (char *)malloc(strlen(in) + 1);
+  if (file->in == NULL) {
+    return false;
+  }
+  strcpy(file->in, in);
+  job->file_count++;
+  return true;
+}
+
+typedef struct BC_ScanContext {
+  BC_Job *job;
+  const char *dir;
+  const char *skip_dir;
+  bool ok;
+} BC_ScanContext;
+
+static void bc_scan_dir(BC_Job *job, const char *dir, const char *skip_dir, bool *ok);
+
+static void bc_scan_entry(void *user, const char *name, bool is_dir)
+{
+  BC_ScanContext *ctx = (BC_ScanContext *)user;
+  char path[BC_PATH_MAX];
+  if (!ctx->ok || !bc_path_join(path, sizeof(path), ctx->dir, name)) {
+    return;
+  }
+  if (is_dir) {
+    /* Hidden folders (.git, .svn...) never hold game data. The mirror output folder may live
+     * inside the source tree and must not be encrypted again. */
+    if (name[0] != '.' && !(ctx->skip_dir && strcmp(path, ctx->skip_dir) == 0)) {
+      bc_scan_dir(ctx->job, path, ctx->skip_dir, &ctx->ok);
+    }
+  }
+  else if (bc_path_has_extension(name, ".blend")) {
+    /* Found by scanning, not listed: an encrypted .blend is most likely an old output (for
+     * example from an earlier output folder inside the sources). Skip it instead of failing the
+     * whole batch. Explicitly listed files still fail loudly in bc_seal_begin. */
+    if (bc_file_is_container(path)) {
+      bc_log(ctx->job, BC_LOG_WARNING, "Skipped '%s': already encrypted", path);
+    }
+    else {
+      ctx->ok = bc_job_add_file(ctx->job, path);
+    }
+  }
+}
+
+static void bc_scan_dir(BC_Job *job, const char *dir, const char *skip_dir, bool *ok)
+{
+  BC_ScanContext ctx = {job, dir, skip_dir, true};
+  if (!bc_list_dir(dir, bc_scan_entry, &ctx)) {
+    bc_log(job, BC_LOG_WARNING, "Cannot list folder '%s'", dir);
+  }
+  *ok = *ok && ctx.ok;
+}
+
+static int bc_compare_files(const void *a, const void *b)
+{
+  return strcmp(((const BC_JobFile *)a)->in, ((const BC_JobFile *)b)->in);
+}
+
+/** Output of one source file: same relative path below output_dir (mirror), or the same folder
+ * with the .upbgebc extension (in place). */
+static bool bc_output_path(const BC_Project *p, const char *in, char *out, size_t size)
+{
+  if (p->output_mode == BC_OUTPUT_MIRROR) {
+    char rel[BC_PATH_MAX];
+    return bc_path_relative(rel, sizeof(rel), p->source_root, in) &&
+           bc_path_join(out, size, p->output_dir, rel);
+  }
+  const size_t n = strlen(in);
+  const size_t stem = bc_path_has_extension(in, ".blend") ? n - 6 : n;
+  const int written = snprintf(out, size, "%.*s%s", (int)stem, in, BC_INPLACE_EXTENSION);
+  return written > 0 && (size_t)written < size;
+}
+
+/* -------------------------------------------------------------------------------------------- */
+/* Creation: everything that can be checked before touching any output. */
+
+/** A file name valid on every platform the game may be copied to: no separators, no characters
+ * Windows rejects, not "." or "..", no trailing dot or space (Windows silently strips them). */
+static bool bc_game_name_is_valid(const char *name)
+{
+  const size_t n = strlen(name);
+  if (n == 0 || n > 200 || strcmp(name, ".") == 0 || strcmp(name, "..") == 0 ||
+      name[n - 1] == '.' || name[n - 1] == ' ')
+  {
+    return false;
+  }
+  for (const char *c = name; *c != '\0'; c++) {
+    if ((unsigned char)*c < 32 || strchr("<>:\"/\\|?*", *c) != NULL) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** Same file, compared like the file system does (case-insensitive on Windows). */
+static bool bc_path_equal(const char *a, const char *b)
+{
+  return bc_path_is_inside(a, b) && bc_path_is_inside(b, a);
+}
+
+/** Whole small file in memory, at most \a max_size bytes. */
+static bool bc_read_small_file(const char *path, const size_t max_size, uint8_t **r_data, size_t *r_size)
+{
+  uint64_t size;
+  *r_data = NULL;
+  if (!bc_file_size(path, &size) || size > max_size) {
+    return false;
+  }
+  FILE *f = bc_fopen(path, "rb");
+  uint8_t *data = (uint8_t *)malloc((size_t)size + 1);
+  const bool ok = f != NULL && data != NULL && fread(data, 1, (size_t)size, f) == size;
+  if (f != NULL) {
+    fclose(f);
+  }
+  if (!ok) {
+    free(data);
+    return false;
+  }
+  *r_data = data;
+  *r_size = (size_t)size;
+  return true;
+}
+
+/** Icon and version information, validated now so a typo fails before any output is written. */
+static bool bc_job_setup_branding(BC_Job *job, const BC_Project *p, const char *game_name)
+{
+  if (p->icon[0] == '\0' && p->game_version[0] == '\0' && p->company[0] == '\0' &&
+      p->copyright[0] == '\0')
+  {
+    return true;
+  }
+  if (!bc_brand_supported()) {
+    bc_log(job, BC_LOG_WARNING, "Icon and version information only apply to Windows games: ignored");
+    return true;
+  }
+  BC_Branding *b = &job->brand;
+  if (p->game_version[0] == '\0') {
+    b->version[0] = 1;
+  }
+  else if (!bc_brand_parse_version(p->game_version, b->version)) {
+    bc_log(job, BC_LOG_ERROR, "'%s' is not a version: use up to four numbers, like 1.2.0", p->game_version);
+    return false;
+  }
+  if (p->icon[0] != '\0') {
+    char err[256];
+    if (!bc_read_small_file(p->icon, BC_BRAND_ICO_MAX_SIZE, &job->ico, &b->ico_size)) {
+      bc_log(job, BC_LOG_ERROR, "Cannot read the icon '%s'", p->icon);
+      return false;
+    }
+    if (!bc_brand_ico_check(job->ico, b->ico_size, err, sizeof(err))) {
+      bc_log(job, BC_LOG_ERROR, "Invalid icon '%s': %s", p->icon, err);
+      return false;
+    }
+    b->ico = job->ico;
+  }
+  snprintf(job->brand_product, sizeof(job->brand_product), "%s", game_name);
+  snprintf(job->brand_company, sizeof(job->brand_company), "%s", p->company);
+  snprintf(job->brand_copyright, sizeof(job->brand_copyright), "%s", p->copyright);
+  b->product = job->brand_product;
+  b->company = job->brand_company;
+  b->copyright = job->brand_copyright;
+  job->branding = true;
+  return true;
+}
+
+static int bc_record_compare(const void *a, const void *b)
+{
+  return strcmp(((const BC_KeyRecord *)a)->path, ((const BC_KeyRecord *)b)->path);
+}
+
+/** Project or online key: load the key file, or create it on the first export; with a key per
+ * update, add the key of a new update. A new key is saved before any file is sealed with it. */
+static bool bc_job_setup_key(BC_Job *job, const BC_Project *p)
+{
+  if (p->key_mode == BC_KEY_BUILD) {
+    return true;
+  }
+  const bool online = p->key_mode == BC_KEY_ONLINE;
+  if (!bc_project_key_file(p, job->key_file, sizeof(job->key_file))) {
+    bc_log(job, BC_LOG_ERROR, "Choose a key file, or save the project first (its key file then goes next to it)");
+    return false;
+  }
+  /* A shipped key file hands out the key: refuse it whatever the mode. */
+  if (bc_path_is_inside(job->dist_root, job->key_file)) {
+    bc_log(job, BC_LOG_ERROR, "The key file '%s' is inside the game folder: it would ship with the game", job->key_file);
+    return false;
+  }
+  char err[BC_PATH_MAX + 128];
+  if (bc_is_file(job->key_file) && !bc_keyring_load(&job->ring, job->key_file, err, sizeof(err))) {
+    bc_log(job, BC_LOG_ERROR, "%s", err);
+    return false;
+  }
+  job->key_file_keys = true;
+  job->rotation = online && p->key_rotation;
+  if (!online && p->key_rotation) {
+    bc_log(job, BC_LOG_WARNING, "A key per update needs an online key: the project key is used for every file");
+  }
+  const uint32_t newest = bc_keyring_newest(&job->ring);
+  uint32_t update = newest ? newest : 1;
+  if (job->rotation) {
+    update = p->key_update ? p->key_update : 1;
+    if (update < newest) {
+      bc_log(job,
+             BC_LOG_ERROR,
+             "The key file already holds the key of update %u: the update number cannot go back to %u",
+             newest,
+             update);
+      return false;
+    }
+  }
+  const bool add = update > newest;
+  if (add && !bc_keyring_add(&job->ring, update)) {
+    bc_log(job, BC_LOG_ERROR, "The key file holds %d keys, the most one game can use", BC_KEYS_MAX);
+    return false;
+  }
+  job->current_key = bc_keyring_find(&job->ring, update);
+  /* One key without records stays in the one key form; anything else needs the full form. */
+  job->key_file_single = !job->rotation && job->ring.key_count == 1 && job->ring.record_count == 0;
+  if (add) {
+    if (!bc_keyring_save(&job->ring, job->key_file, job->key_file_single, err, sizeof(err))) {
+      bc_log(job, BC_LOG_ERROR, "%s", err);
+      return false;
+    }
+    if (newest == 0 && online) {
+      bc_log(job,
+             BC_LOG_WARNING,
+             "Created the content key '%s'. Keep it private, back it up and install it on your key "
+             "server: without it the published game can never be updated",
+             job->key_file);
+    }
+    else if (newest == 0) {
+      bc_log(job,
+             BC_LOG_WARNING,
+             "Created the project key '%s'. Keep it private and back it up: updates of the game are "
+             "encrypted with it",
+             job->key_file);
+    }
+    else {
+      bc_log(job,
+             BC_LOG_WARNING,
+             "New key for update %u in '%s': install the updated key file on the key server before "
+             "publishing this update",
+             update,
+             job->key_file);
+    }
+  }
+  /* The loaded records become the lookup table; this export writes a fresh set. */
+  job->old_records = job->ring.records;
+  job->old_record_count = job->ring.record_count;
+  job->ring.records = NULL;
+  job->ring.record_count = job->ring.record_capacity = 0;
+  if (job->old_record_count > 1) {
+    qsort(job->old_records, (size_t)job->old_record_count, sizeof(BC_KeyRecord), bc_record_compare);
+  }
+  if (!online) {
+    job->key_flags = BC_MANIFEST_PROJECT_KEY;
+    return true;
+  }
+
+  snprintf(job->provider_rel, sizeof(job->provider_rel), "%s", p->key_provider);
+  char provider_abs[BC_PATH_MAX];
+  if (!bc_manifest_path_is_safe(job->provider_rel) || strlen(job->provider_rel) >= BC_MANIFEST_PATH_MAX) {
+    bc_log(job,
+           BC_LOG_ERROR,
+           "The key provider must be a relative path inside the game folder (for example "
+           "'engine/bc_provider_steam.exe')");
+    return false;
+  }
+  if (!bc_path_join(provider_abs, sizeof(provider_abs), job->dist_root, job->provider_rel) ||
+      !bc_is_file(provider_abs) || bc_path_equal(provider_abs, job->game_exe) ||
+      bc_path_equal(provider_abs, job->player_abs))
+  {
+    bc_log(job, BC_LOG_ERROR, "Key provider not found at '%s' (copy it into the game folder first)", provider_abs);
+    return false;
+  }
+  if (!bc_manifest_url_is_valid(p->key_url) || strlen(p->key_url) >= sizeof(job->key_url)) {
+    bc_log(job, BC_LOG_ERROR, "The key server URL is too long or holds control characters");
+    return false;
+  }
+  snprintf(job->key_url, sizeof(job->key_url), "%s", p->key_url);
+  job->key_flags = BC_MANIFEST_ONLINE_KEY | (p->key_cache ? BC_MANIFEST_KEY_CACHE : 0);
+  bc_log(job,
+         BC_LOG_INFO,
+         "Online key%s, provider '%s'%s",
+         job->rotation ? " per update" : "",
+         job->provider_rel,
+         p->key_cache ? ", kept after the first launch" : "");
+  return true;
+}
+
+static BC_Job *bc_job_fail_create(BC_Job *job)
+{
+  bc_job_destroy(job);
+  return NULL;
+}
+
+BC_Job *bc_job_create(const BC_Project *p,
+                      const uint8_t key[BC_KEY_SIZE],
+                      const char *launcher_path,
+                      BC_LogFn log,
+                      void *user)
+{
+  BC_Job *job = (BC_Job *)calloc(1, sizeof(BC_Job));
+  if (job == NULL) {
+    return NULL;
+  }
+  job->key = key;
+  job->log = log;
+  job->log_user = user;
+  job->phase = BC_PHASE_HASH_PLAYER;
+
+  if (p->source_root[0] == '\0' || !bc_is_dir(p->source_root)) {
+    bc_log(job, BC_LOG_ERROR, "The source folder is not set or does not exist");
+    return bc_job_fail_create(job);
+  }
+  if (p->output_mode == BC_OUTPUT_MIRROR) {
+    if (p->output_dir[0] == '\0') {
+      bc_log(job, BC_LOG_ERROR, "The output folder is not set");
+      return bc_job_fail_create(job);
+    }
+    /* Outputs inside the sources are fine (they are skipped while scanning); sources inside
+     * the outputs, or both being the same folder, would overwrite the originals. */
+    if (bc_path_is_inside(p->output_dir, p->source_root)) {
+      bc_log(job, BC_LOG_ERROR, "The output folder must not be, or contain, the source folder");
+      return bc_job_fail_create(job);
+    }
+  }
+  snprintf(job->dist_root, sizeof(job->dist_root), "%s", bc_project_dist_root(p));
+
+  /* Player: named relative to the distribution root, exactly as it will ship. */
+  snprintf(job->player_rel, sizeof(job->player_rel), "%s", p->player);
+  if (!bc_manifest_path_is_safe(job->player_rel)) {
+    bc_log(job,
+           BC_LOG_ERROR,
+           "The player must be a relative path inside the game folder "
+           "(for example 'engine/blenderplayer.exe')");
+    return bc_job_fail_create(job);
+  }
+  if (!bc_path_join(job->player_abs, sizeof(job->player_abs), job->dist_root, job->player_rel) ||
+      !bc_is_file(job->player_abs))
+  {
+    bc_log(job,
+           BC_LOG_ERROR,
+           "Player not found at '%s'. Copy the UPBGE runtime (the player with its DLLs, python and "
+           "datafiles folders) there before encrypting: the game only starts the exact player it "
+           "was encrypted for",
+           job->player_abs);
+    return bc_job_fail_create(job);
+  }
+
+  if (p->main[0] == '\0') {
+    bc_log(job, BC_LOG_ERROR, "The main .blend file is not set");
+    return bc_job_fail_create(job);
+  }
+
+  /* Game executable: the launcher under the game's name, by default the main file's name. */
+  char name[BC_PATH_MAX];
+  if (p->game_name[0] != '\0') {
+    snprintf(name, sizeof(name), "%s", p->game_name);
+  }
+  else {
+    snprintf(name, sizeof(name), "%s", bc_path_basename(p->main));
+    if (bc_path_has_extension(name, ".blend")) {
+      name[strlen(name) - 6] = '\0';
+    }
+  }
+  if (!bc_game_name_is_valid(name)) {
+    bc_log(job, BC_LOG_ERROR, "'%s' is not a valid game name for an executable file", name);
+    return bc_job_fail_create(job);
+  }
+  char exe_name[BC_PATH_MAX];
+  snprintf(exe_name, sizeof(exe_name), "%s%s", name, bc_exe_extension());
+  if (!bc_path_join(job->game_exe, sizeof(job->game_exe), job->dist_root, exe_name) ||
+      bc_is_dir(job->game_exe) || bc_path_equal(job->game_exe, job->player_abs))
+  {
+    bc_log(job, BC_LOG_ERROR, "The game name '%s' clashes with a folder or with the player", name);
+    return bc_job_fail_create(job);
+  }
+  if (!bc_job_setup_branding(job, p, name) || !bc_job_setup_key(job, p)) {
+    return bc_job_fail_create(job);
+  }
+  /* Checked in both modes: an embedded export deletes a stale manifest file at this path. */
+  if (!bc_path_join(job->manifest_file, sizeof(job->manifest_file), job->dist_root, BC_MANIFEST_FILENAME) ||
+      bc_path_equal(job->manifest_file, job->game_exe) ||
+      bc_path_equal(job->manifest_file, job->player_abs) || bc_is_dir(job->manifest_file))
+  {
+    bc_log(job, BC_LOG_ERROR, "The game executable or the player clashes with '%s'", BC_MANIFEST_FILENAME);
+    return bc_job_fail_create(job);
+  }
+  if (launcher_path == NULL || !bc_is_file(launcher_path)) {
+    bc_log(job,
+           BC_LOG_ERROR,
+           "Launcher not found at '%s': keep bc_launcher next to bc_tool, both come from the "
+           "same build",
+           launcher_path ? launcher_path : "?");
+    return bc_job_fail_create(job);
+  }
+  snprintf(job->launcher_path, sizeof(job->launcher_path), "%s", launcher_path);
+  job->manifest_mode = p->manifest_mode;
+  job->integrity = p->integrity;
+  if (p->input_count == 0) {
+    bc_log(job, BC_LOG_ERROR, "There are no input files");
+    return bc_job_fail_create(job);
+  }
+
+  /* Expand folders, then sort and drop duplicates (a file can be listed and also be found inside
+   * a listed folder). */
+  bool ok = true;
+  const char *skip_dir = p->output_mode == BC_OUTPUT_MIRROR ? p->output_dir : NULL;
+  for (int i = 0; ok && i < p->input_count; i++) {
+    const char *input = p->inputs[i];
+    if (!bc_path_is_inside(p->source_root, input)) {
+      bc_log(job, BC_LOG_ERROR, "'%s' is outside the source folder", input);
+      return bc_job_fail_create(job);
+    }
+    if (skip_dir != NULL && bc_path_is_inside(skip_dir, input)) {
+      bc_log(job, BC_LOG_ERROR, "'%s' is inside the output folder", input);
+      return bc_job_fail_create(job);
+    }
+    if (bc_is_dir(input)) {
+      bc_scan_dir(job, input, skip_dir, &ok);
+    }
+    else if (bc_is_file(input)) {
+      ok = bc_job_add_file(job, input);
+    }
+    else {
+      bc_log(job, BC_LOG_ERROR, "Input '%s' does not exist", input);
+      return bc_job_fail_create(job);
+    }
+  }
+  if (!ok) {
+    bc_log(job, BC_LOG_ERROR, "Out of memory while listing the input files");
+    return bc_job_fail_create(job);
+  }
+  if (job->file_count > 0) {
+    qsort(job->files, (size_t)job->file_count, sizeof(BC_JobFile), bc_compare_files);
+  }
+  int unique = 0;
+  for (int i = 0; i < job->file_count; i++) {
+    if (unique > 0 && strcmp(job->files[unique - 1].in, job->files[i].in) == 0) {
+      free(job->files[i].in);
+      continue;
+    }
+    job->files[unique++] = job->files[i];
+  }
+  job->file_count = unique;
+  if (job->file_count == 0) {
+    bc_log(job, BC_LOG_ERROR, "No .blend files found in the inputs");
+    return bc_job_fail_create(job);
+  }
+
+  /* Outputs, sizes and the main file. */
+  bool main_found = false;
+  for (int i = 0; i < job->file_count; i++) {
+    BC_JobFile *file = &job->files[i];
+    char out[BC_PATH_MAX];
+    if (!bc_output_path(p, file->in, out, sizeof(out)) ||
+        (file->out = (char *)malloc(strlen(out) + 1)) == NULL)
+    {
+      bc_log(job, BC_LOG_ERROR, "Invalid output path for '%s'", file->in);
+      return bc_job_fail_create(job);
+    }
+    strcpy(file->out, out);
+    if (!bc_file_size(file->in, &file->size)) {
+      bc_log(job, BC_LOG_ERROR, "Cannot read '%s'", file->in);
+      return bc_job_fail_create(job);
+    }
+    job->total_bytes += 2 * file->size; /* Hashed, then sealed. */
+    file->key = -1;
+    if (bc_path_equal(out, job->game_exe)) {
+      bc_log(job, BC_LOG_ERROR, "The game executable would overwrite '%s'", out);
+      return bc_job_fail_create(job);
+    }
+    if (strcmp(file->in, p->main) == 0) {
+      main_found = true;
+      if (!bc_path_relative(job->main_out_rel, sizeof(job->main_out_rel), job->dist_root, out)) {
+        bc_log(job, BC_LOG_ERROR, "The main file must end up inside the distribution folder");
+        return bc_job_fail_create(job);
+      }
+    }
+  }
+  if (!main_found) {
+    bc_log(job, BC_LOG_ERROR, "The main file '%s' is not among the files to encrypt", p->main);
+    return bc_job_fail_create(job);
+  }
+  /* Checked here, before any output exists, so the manifest can never hold a truncated path. */
+  if (strlen(job->player_rel) >= BC_MANIFEST_PATH_MAX ||
+      strlen(job->main_out_rel) >= BC_MANIFEST_PATH_MAX)
+  {
+    bc_log(job, BC_LOG_ERROR, "The player or main file path is too long for the manifest");
+    return bc_job_fail_create(job);
+  }
+
+  uint64_t player_size = 0;
+  bc_file_size(job->player_abs, &player_size);
+  job->total_bytes += player_size;
+
+  /* The player is opened by the hash phase: branding may replace the file before. */
+  job->hash_buffer = (uint8_t *)malloc(BC_HASH_READ_SIZE);
+  if (job->hash_buffer == NULL) {
+    bc_log(job, BC_LOG_ERROR, "Out of memory");
+    return bc_job_fail_create(job);
+  }
+  crypto_blake2b_init(&job->hash_ctx, BC_PLAYER_HASH_SIZE);
+  job->phase = job->branding ? BC_PHASE_BRAND_PLAYER : BC_PHASE_HASH_PLAYER;
+
+  bc_log(job,
+         BC_LOG_INFO,
+         "%d file(s), %.1f MiB to encrypt into '%s'",
+         job->file_count,
+         (double)(job->total_bytes - player_size) / (1024.0 * 1024.0),
+         job->dist_root);
+  snprintf(job->status, sizeof(job->status), job->branding ? "Branding the player" : "Hashing the player");
+  return job;
+}
+
+/* -------------------------------------------------------------------------------------------- */
+/* Execution */
+
+static void bc_job_set_failed(BC_Job *job)
+{
+  if (job->sealing) {
+    bc_seal_abort(&job->sealer);
+    job->sealing = false;
+  }
+  job->phase = BC_PHASE_FAILED;
+  snprintf(job->status, sizeof(job->status), "Failed");
+}
+
+/** Brand \a path, warning when that voids the signature of \a signed_source. Errors are logged. */
+static BC_BrandResult bc_job_brand(BC_Job *job, const char *path, const char *signed_source, const char *original_filename)
+{
+  char err[BC_PATH_MAX + 128];
+  job->brand.original_filename = original_filename;
+  /* Checked before: the update itself may drop the signature table. */
+  const bool was_signed = bc_exe_has_signature(signed_source);
+  const BC_BrandResult result = bc_brand_exe(path, &job->brand, err, sizeof(err));
+  if (result == BC_BRAND_ERROR) {
+    bc_log(job, BC_LOG_ERROR, "%s", err);
+    return result;
+  }
+  if (result == BC_BRAND_CHANGED && was_signed) {
+    bc_log(job,
+           BC_LOG_WARNING,
+           "'%s' is signed, but the icon or version information changed: sign %s",
+           bc_display(job, signed_source),
+           signed_source == path ? "it again, then export again (a player that is already "
+                                   "branded is left untouched)" :
+                                   "the exported game executable");
+  }
+  return result;
+}
+
+/* Before hashing: the manifest must authenticate the player as shipped. Blocking, but it only
+ * rewrites the player when the icon or version information differ. */
+static void bc_job_brand_player(BC_Job *job)
+{
+  uint64_t before = 0, after = 0;
+  bc_file_size(job->player_abs, &before);
+  const BC_BrandResult result = bc_job_brand(job, job->player_abs, job->player_abs, bc_path_basename(job->player_rel));
+  if (result == BC_BRAND_ERROR) {
+    bc_job_set_failed(job);
+    return;
+  }
+  if (result == BC_BRAND_CHANGED) {
+    bc_log(job, BC_LOG_INFO, "Player icon and version information updated");
+    if (bc_file_size(job->player_abs, &after)) {
+      job->total_bytes = job->total_bytes - before + after;
+    }
+  }
+  job->phase = BC_PHASE_HASH_PLAYER;
+  snprintf(job->status, sizeof(job->status), "Hashing the player");
+}
+
+static void bc_job_hash_player(BC_Job *job)
+{
+  if (job->player_file == NULL && (job->player_file = bc_fopen(job->player_abs, "rb")) == NULL) {
+    bc_log(job, BC_LOG_ERROR, "Cannot read the player '%s'", job->player_abs);
+    bc_job_set_failed(job);
+    return;
+  }
+  const size_t n = fread(job->hash_buffer, 1, BC_HASH_READ_SIZE, job->player_file);
+  crypto_blake2b_update(&job->hash_ctx, job->hash_buffer, n);
+  job->done_bytes += n;
+  if (n == BC_HASH_READ_SIZE) {
+    return;
+  }
+  const bool error = ferror(job->player_file) != 0;
+  fclose(job->player_file);
+  job->player_file = NULL;
+  if (error) {
+    bc_log(job, BC_LOG_ERROR, "Read error while hashing the player '%s'", job->player_abs);
+    bc_job_set_failed(job);
+    return;
+  }
+  crypto_blake2b_final(&job->hash_ctx, job->player_hash);
+  bc_log(job, BC_LOG_INFO, "Player '%s' registered", job->player_rel);
+  job->phase = BC_PHASE_SEAL;
+}
+
+/** Pick the key of a hashed file (see BC_Job): build key, the only online key, or with a key per
+ * update its earlier key when its plaintext did not change. */
+static bool bc_job_choose_key(BC_Job *job, BC_JobFile *file)
+{
+  if (!job->key_file_keys || !job->rotation) {
+    file->key = job->key_file_keys ? job->current_key : -1;
+    return true;
+  }
+  char rel[BC_PATH_MAX];
+  if (!bc_path_relative(rel, sizeof(rel), job->dist_root, file->out)) {
+    return false;
+  }
+  const BC_KeyRecord probe = {rel, {0}, 0};
+  const BC_KeyRecord *old = job->old_record_count > 0 ?
+                                (const BC_KeyRecord *)bsearch(&probe, job->old_records, (size_t)job->old_record_count, sizeof(BC_KeyRecord), bc_record_compare) :
+                                NULL;
+  int index = -1;
+  if (old != NULL && memcmp(old->hash, file->hash, BC_PLAIN_HASH_SIZE) == 0) {
+    index = bc_keyring_find(&job->ring, old->update);
+  }
+  if (index < 0) {
+    index = job->current_key;
+    job->changed_files++;
+  }
+  else {
+    job->unchanged_files++;
+  }
+  file->key = index;
+  return bc_keyring_set_record(&job->ring, rel, file->hash, job->ring.updates[index]);
+}
+
+/** One slice of the plaintext hash pass of the current file. */
+static void bc_job_hash_file(BC_Job *job, BC_JobFile *file)
+{
+  if (job->file_hash_in == NULL) {
+    job->file_hash_in = bc_fopen(file->in, "rb");
+    if (job->file_hash_in == NULL) {
+      bc_log(job, BC_LOG_ERROR, "Cannot read '%s'", file->in);
+      bc_job_set_failed(job);
+      return;
+    }
+    crypto_blake2b_init(&job->file_hash_ctx, BC_PLAIN_HASH_SIZE);
+    snprintf(job->status, sizeof(job->status), "%s", bc_display(job, file->in));
+  }
+  const size_t n = fread(job->hash_buffer, 1, BC_HASH_READ_SIZE, job->file_hash_in);
+  crypto_blake2b_update(&job->file_hash_ctx, job->hash_buffer, n);
+  job->done_bytes += n;
+  if (n == BC_HASH_READ_SIZE) {
+    return;
+  }
+  const bool error = ferror(job->file_hash_in) != 0;
+  fclose(job->file_hash_in);
+  job->file_hash_in = NULL;
+  crypto_blake2b_final(&job->file_hash_ctx, file->hash);
+  file->hashed = true;
+  if (error || !bc_job_choose_key(job, file)) {
+    bc_log(job, BC_LOG_ERROR, "Cannot read '%s'", file->in);
+    bc_job_set_failed(job);
+  }
+}
+
+static void bc_job_seal(BC_Job *job)
+{
+  if (job->current == job->file_count) {
+    job->phase = BC_PHASE_GAME_EXE;
+    return;
+  }
+  BC_JobFile *file = &job->files[job->current];
+  char err[BC_PATH_MAX + 128];
+  if (!file->hashed) {
+    bc_job_hash_file(job, file);
+    return;
+  }
+  if (!job->sealing) {
+    const uint8_t *key = file->key < 0 ? job->key : job->ring.keys[file->key];
+    /* Same key and plaintext as the existing output: its bytes would come out identical, so
+     * neither encrypt nor rewrite it. Re-exporting an unchanged game costs one hash pass. */
+    if (bc_seal_output_is_current(key, file->out, file->size, file->hash)) {
+      job->kept_files++;
+      job->done_bytes += file->size;
+      bc_log(job, BC_LOG_INFO, "Up to date %s", bc_display(job, file->out));
+      job->current++;
+      return;
+    }
+    if (!bc_seal_begin(&job->sealer, key, file->in, file->out, file->hash, err, sizeof(err))) {
+      bc_log(job, BC_LOG_ERROR, "%s", err);
+      bc_job_set_failed(job);
+      return;
+    }
+    job->sealing = true;
+    job->current_base = job->done_bytes;
+    snprintf(job->status, sizeof(job->status), "%s", bc_display(job, file->in));
+  }
+  const int result = bc_seal_step(&job->sealer, err, sizeof(err));
+  if (result < 0) {
+    job->sealing = false; /* The sealer already removed its partial output. */
+    bc_log(job, BC_LOG_ERROR, "%s", err);
+    bc_job_set_failed(job);
+    return;
+  }
+  job->done_bytes = job->current_base + bc_seal_bytes_done(&job->sealer);
+  if (result == 0) {
+    job->sealing = false;
+    job->done_bytes = job->current_base + file->size;
+    bc_log(job, BC_LOG_INFO, "Encrypted %s", bc_display(job, file->out));
+    job->current++;
+  }
+}
+
+static void bc_job_write_game_exe(BC_Job *job)
+{
+  BC_Manifest manifest;
+  memset(&manifest, 0, sizeof(manifest));
+  memcpy(manifest.player_hash, job->player_hash, BC_PLAYER_HASH_SIZE);
+  if (job->key_flags & BC_MANIFEST_ONLINE_KEY) {
+    /* Every key some file uses, oldest update first: the launcher fetches exactly these. */
+    bool used[BC_KEYS_MAX] = {false};
+    for (int i = 0; i < job->file_count; i++) {
+      used[job->files[i].key] = true;
+    }
+    for (int i = 0; i < job->ring.key_count; i++) {
+      if (used[i]) {
+        bc_key_id(job->ring.keys[i], manifest.key_ids[manifest.key_count++]);
+      }
+    }
+    manifest.flags = job->key_flags;
+    /* Lengths validated by bc_job_setup_key. */
+    memcpy(manifest.provider_path, job->provider_rel, strlen(job->provider_rel) + 1);
+    memcpy(manifest.key_url, job->key_url, strlen(job->key_url) + 1);
+  }
+  else if (job->key_flags & BC_MANIFEST_PROJECT_KEY) {
+    /* The project key travels in the manifest, masked: never 32 bytes of the file as itself. */
+    uint8_t mask[BC_KEY_SIZE];
+    manifest.flags = job->key_flags;
+    manifest.key_count = 1;
+    bc_key_id(job->ring.keys[job->current_key], manifest.key_ids[0]);
+    bc_manifest_key_mask(job->key, &manifest, mask);
+    for (int i = 0; i < BC_KEY_SIZE; i++) {
+      manifest.masked_key[i] = job->ring.keys[job->current_key][i] ^ mask[i];
+    }
+    crypto_wipe(mask, sizeof(mask));
+  }
+  /* Lengths validated by bc_job_create. */
+  memcpy(manifest.player_path, job->player_rel, strlen(job->player_rel) + 1);
+  memcpy(manifest.main_path, job->main_out_rel, strlen(job->main_out_rel) + 1);
+  char err[BC_PATH_MAX + 128];
+  if (job->integrity != BC_INTEGRITY_PLAYER) {
+    /* Last step before the executable itself, so every file the export wrote is in place. The
+     * executable (it carries this manifest) and the player (hashed on its own) are left out. The
+     * Python level also removes the bytecode left by test runs, so the game ships without any:
+     * installed where the player cannot write, none can ever appear (bc_native.h). */
+    const bool python = job->integrity == BC_INTEGRITY_PYTHON;
+    char exe_rel[BC_PATH_MAX];
+    const char *skip[2] = {exe_rel, job->player_rel};
+    static BC_NativeScan scan;
+    if (!bc_path_relative(exe_rel, sizeof(exe_rel), job->dist_root, job->game_exe) ||
+        !bc_native_digest(job->dist_root, skip, 2, python, manifest.native_digest, &scan))
+    {
+      if (scan.locked[0] != '\0') {
+        bc_log(job, BC_LOG_ERROR, "Cannot remove the Python bytecode file '%s'", scan.locked);
+      }
+      else {
+        bc_log(job, BC_LOG_ERROR, "Cannot read the code files (.dll, .so, .dylib, .pyd, .exe%s) of '%s'", python ? ", .py, .pth, .zip" : "", job->dist_root);
+      }
+      bc_job_set_failed(job);
+      return;
+    }
+    manifest.flags |= BC_MANIFEST_NATIVE_DIGEST | (python ? BC_MANIFEST_PYTHON_CHECK : 0);
+    if (scan.bytecode_removed > 0) {
+      bc_log(job, BC_LOG_INFO, "Removed %d Python bytecode file(s) from the game folder", scan.bytecode_removed);
+    }
+    bc_log(job,
+           BC_LOG_INFO,
+           "%s check: %d file(s), %.1f MB, verified at every launch. Export again after changing any of them",
+           python ? "Native code and Python" : "Native code",
+           scan.files,
+           (double)scan.bytes / (1024.0 * 1024.0));
+  }
+  const bool external = job->manifest_mode == BC_MANIFEST_EXTERNAL;
+  /* Branded games start from a branded copy of the launcher: resources first, manifest after. */
+  char branded[BC_PATH_MAX + 16];
+  const char *launcher = job->launcher_path;
+  if (job->branding) {
+    snprintf(branded, sizeof(branded), "%s.brand.tmp", job->game_exe);
+    if (!bc_embed_write(job->launcher_path, branded, NULL, job->key, err, sizeof(err))) {
+      bc_log(job, BC_LOG_ERROR, "%s", err);
+      bc_job_set_failed(job);
+      return;
+    }
+    if (bc_job_brand(job, branded, job->launcher_path, bc_path_basename(job->game_exe)) == BC_BRAND_ERROR) {
+      bc_remove(branded);
+      bc_job_set_failed(job);
+      return;
+    }
+    launcher = branded;
+  }
+  const bool written = bc_embed_write(launcher, job->game_exe, external ? NULL : &manifest, job->key, err, sizeof(err));
+  if (launcher != job->launcher_path) {
+    bc_remove(branded);
+  }
+  if (!written ||
+      (external && !bc_manifest_file_write(job->manifest_file, &manifest, job->key, err, sizeof(err))))
+  {
+    bc_log(job, BC_LOG_ERROR, "%s", err);
+    bc_job_set_failed(job);
+    return;
+  }
+  /* A file left by an earlier external export would be ignored by the launcher (the embedded
+   * manifest wins), but shipping it would only confuse: remove it. */
+  if (!external && bc_is_file(job->manifest_file) && bc_remove(job->manifest_file)) {
+    bc_log(job, BC_LOG_INFO, "Removed the old %s (the manifest is now inside the executable)", BC_MANIFEST_FILENAME);
+  }
+  bc_log(job,
+         BC_LOG_INFO,
+         "Game executable written: %s starts '%s' with '%s'%s",
+         bc_display(job, job->game_exe),
+         job->player_rel,
+         job->main_out_rel,
+         external ? " (manifest in " BC_MANIFEST_FILENAME ")" : "");
+  bc_log(job,
+         BC_LOG_INFO,
+         "%d file(s) encrypted, %d already up to date",
+         job->file_count - job->kept_files,
+         job->kept_files);
+  if (job->rotation) {
+    /* The records only decide which key unchanged files keep: failing to save them costs a larger
+     * next update, never a broken game (every key is already in the file). */
+    if (!bc_keyring_save(&job->ring, job->key_file, false, err, sizeof(err))) {
+      bc_log(job, BC_LOG_WARNING, "%s: the next update may encrypt unchanged files again", err);
+    }
+    bc_log(job,
+           BC_LOG_INFO,
+           "Update %u: %d file(s) with its key, %d unchanged with earlier keys; the game uses %d key(s)",
+           job->ring.updates[job->current_key],
+           job->changed_files,
+           job->unchanged_files,
+           manifest.key_count);
+  }
+  job->phase = BC_PHASE_DONE;
+  snprintf(job->status, sizeof(job->status), "Done");
+}
+
+int bc_job_step(BC_Job *job, const double budget_seconds)
+{
+  const double deadline = bc_time_seconds() + budget_seconds;
+  while (job->phase != BC_PHASE_DONE && job->phase != BC_PHASE_FAILED) {
+    switch (job->phase) {
+      case BC_PHASE_BRAND_PLAYER:
+        bc_job_brand_player(job);
+        break;
+      case BC_PHASE_HASH_PLAYER:
+        bc_job_hash_player(job);
+        break;
+      case BC_PHASE_SEAL:
+        bc_job_seal(job);
+        break;
+      case BC_PHASE_GAME_EXE:
+        bc_job_write_game_exe(job);
+        break;
+      default:
+        break;
+    }
+    /* One clock read per 64 KiB chunk or 1 MiB hash block: negligible next to the work. */
+    if (bc_time_seconds() >= deadline) {
+      break;
+    }
+  }
+  if (job->phase == BC_PHASE_DONE) {
+    return 0;
+  }
+  return job->phase == BC_PHASE_FAILED ? -1 : 1;
+}
+
+double bc_job_progress(const BC_Job *job)
+{
+  if (job->phase == BC_PHASE_DONE) {
+    return 1.0;
+  }
+  return job->total_bytes ? (double)job->done_bytes / (double)job->total_bytes : 0.0;
+}
+
+const char *bc_job_status(const BC_Job *job)
+{
+  return job->status;
+}
+
+void bc_job_destroy(BC_Job *job)
+{
+  if (job == NULL) {
+    return;
+  }
+  if (job->sealing) {
+    bc_seal_abort(&job->sealer);
+  }
+  if (job->player_file != NULL) {
+    fclose(job->player_file);
+  }
+  if (job->file_hash_in != NULL) {
+    fclose(job->file_hash_in);
+  }
+  for (int i = 0; i < job->old_record_count; i++) {
+    free(job->old_records[i].path);
+  }
+  free(job->old_records);
+  bc_keyring_free(&job->ring);
+  for (int i = 0; i < job->file_count; i++) {
+    free(job->files[i].in);
+    free(job->files[i].out);
+  }
+  free(job->files);
+  free(job->hash_buffer);
+  free(job->ico);
+  free(job);
+}

@@ -1,0 +1,20 @@
+{
+  "games": [
+    {
+      "name": "My Game",
+      "key_file": "keys/mygame.key",
+      "steam": {
+        "app_id": 480,
+        "ticket_key": "0000000000000000000000000000000000000000000000000000000000000000",
+        "library": "/opt/steamworks/sdk/public/steam/lib/linux64/libsdkencryptedappticket.so",
+        "max_age": 3600
+      },
+      "epic": {
+        "client_id": "xyza7891...",
+        "catalog_item_ids": ["4a8b..."],
+        "max_age": 600
+      },
+      "dev_tokens": []
+    }
+  ]
+}
