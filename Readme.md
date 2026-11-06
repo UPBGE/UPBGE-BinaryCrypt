@@ -366,7 +366,7 @@ forward them to the provider). The protected player also ignores `-p`.
 common/      core shared by the tool and the launcher (format, sealing, manifest, game executable, Windows branding, project, batch)
 keygen/      build-time key generator
 launcher/    bc_launcher
-tool/        bc_tool: command line, editor (raylib + raygui), native file dialogs
+tool/        bc_tool: command line, editor (raylib + raygui, Montserrat font), native file dialogs
 tests/       unit tests and an end-to-end test (tool -> launcher -> stand-in player)
 keyserver/   online keys: reference key server and providers (MIT)
 ```
@@ -374,7 +374,8 @@ keyserver/   online keys: reference key server and providers (MIT)
 ## License
 
 GPL-3.0 (see `LICENSE.txt`). The source files are GPL-2.0-or-later, as UPBGE, except `keyserver/`
-(MIT, see `keyserver/LICENSE`). Monocypher is BSD-2-Clause or CC0-1.0; raygui is zlib/libpng.
+(MIT, see `keyserver/LICENSE`). Monocypher is BSD-2-Clause or CC0-1.0; raygui is zlib/libpng; the
+editor's font, Montserrat, is SIL OFL 1.1 (`tool/fonts/OFL.txt`).
 
 **Your game's license.** BinaryCrypt does not change what the GPL asks of a game. The Blender
 Foundation considers `.blend` files program output, owned by their author, but Python scripts that

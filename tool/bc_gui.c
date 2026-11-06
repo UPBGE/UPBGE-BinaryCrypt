@@ -18,6 +18,7 @@
 #include "bc_brand.h"
 #include "bc_dialog.h"
 #include "bc_embed.h"
+#include "bc_font_data.h"
 #include "bc_gui.h"
 #include "bc_job.h"
 #include "bc_key.h"
@@ -476,6 +477,81 @@ static Rectangle bc_rect(float x, float y, float w, float h)
 }
 
 /* -------------------------------------------------------------------------------------------- */
+/* Theme: the palette of upbge.org (near black, UPBGE orange) over Blender's neutral grays, set in
+ * Montserrat, the typeface of upbge.org. */
+
+/* 0xRRGGBB as a raygui style value (0xRRGGBBAA in an int). */
+#define BC_RGB(rgb) ((int)(((unsigned)(rgb) << 8) | 0xffu))
+#define BC_RGB_ACCENT 0xf99543 /* UPBGE orange. */
+#define BC_RGB_ON_ACCENT 0x121212 /* Text on the accent: 8.9:1 contrast. */
+/* Log levels: yellow and red, so a warning never reads as the accent. */
+#define BC_RGB_WARNING 0xfbbf24
+#define BC_RGB_ERROR 0xf87171
+
+static void bc_gui_theme_upbge(void)
+{
+  /* DEFAULT colors are copied to every control when set: first the base, then the exceptions. */
+  GuiSetStyle(DEFAULT, BORDER_COLOR_NORMAL, BC_RGB(0x404040));
+  GuiSetStyle(DEFAULT, BASE_COLOR_NORMAL, BC_RGB(0x2a2a2a));
+  GuiSetStyle(DEFAULT, TEXT_COLOR_NORMAL, BC_RGB(0xd8d8d8));
+  GuiSetStyle(DEFAULT, BORDER_COLOR_FOCUSED, BC_RGB(BC_RGB_ACCENT));
+  GuiSetStyle(DEFAULT, BASE_COLOR_FOCUSED, BC_RGB(0x353535));
+  GuiSetStyle(DEFAULT, TEXT_COLOR_FOCUSED, BC_RGB(0xffffff));
+  GuiSetStyle(DEFAULT, BORDER_COLOR_PRESSED, BC_RGB(BC_RGB_ACCENT));
+  GuiSetStyle(DEFAULT, BASE_COLOR_PRESSED, BC_RGB(BC_RGB_ACCENT));
+  GuiSetStyle(DEFAULT, TEXT_COLOR_PRESSED, BC_RGB(BC_RGB_ON_ACCENT));
+  GuiSetStyle(DEFAULT, BORDER_COLOR_DISABLED, BC_RGB(0x2c2c2c));
+  GuiSetStyle(DEFAULT, BASE_COLOR_DISABLED, BC_RGB(0x1e1e1e));
+  GuiSetStyle(DEFAULT, TEXT_COLOR_DISABLED, BC_RGB(0x5c5c5c));
+  GuiSetStyle(DEFAULT, BACKGROUND_COLOR, BC_RGB(0x181818));
+  GuiSetStyle(DEFAULT, LINE_COLOR, BC_RGB(0x404040));
+  GuiSetStyle(DEFAULT, TEXT_SIZE, BC_TEXT_SIZE);
+  GuiSetStyle(DEFAULT, TEXT_SPACING, 0);
+  GuiSetStyle(DEFAULT, TEXT_LINE_SPACING, BC_TEXT_SIZE + 4);
+  GuiSetStyle(BUTTON, BORDER_WIDTH, 1);
+  /* Labels a step dimmer than the values they name. */
+  GuiSetStyle(LABEL, TEXT_COLOR_NORMAL, BC_RGB(0xa8a8a8));
+  /* A text being edited: dark field, accent border and cursor, as in Blender. */
+  GuiSetStyle(TEXTBOX, BASE_COLOR_PRESSED, BC_RGB(0x101010));
+  GuiSetStyle(TEXTBOX, TEXT_COLOR_PRESSED, BC_RGB(0xffffff));
+}
+
+/** raygui draws a group's frame and title in the same color: here the frame takes the line color
+ * and the title the accent. */
+static void bc_group_box(const Rectangle bounds, const char *title)
+{
+  GuiGroupBox(bounds, NULL);
+  const float spacing = (float)GuiGetStyle(DEFAULT, TEXT_SPACING);
+  const Vector2 size = MeasureTextEx(GuiGetFont(), title, BC_TEXT_SIZE, spacing);
+  const Rectangle gap = {bounds.x + 8, bounds.y, size.x + 8, 1};
+  DrawRectangleRec(gap, GetColor((unsigned int)GuiGetStyle(DEFAULT, BACKGROUND_COLOR)));
+  const int rgba = GuiGetState() == STATE_DISABLED ? GuiGetStyle(DEFAULT, TEXT_COLOR_DISABLED) : BC_RGB(BC_RGB_ACCENT);
+  const Vector2 position = {bounds.x + 12, bounds.y - size.y / 2};
+  DrawTextEx(GuiGetFont(), title, position, BC_TEXT_SIZE, spacing, GetColor((unsigned int)rgba));
+}
+
+/** Montserrat at the UI size, rasterized once and drawn 1:1 with point sampling: crisp, no
+ * scaling. raylib falls back to its own font when the data cannot be loaded. */
+static Font bc_gui_load_font(void)
+{
+  /* The glyphs of the embedded subset (CMakeLists.txt): ASCII, Latin-1 and Latin Extended-A, which
+   * cover the file names of most European languages, and typographic punctuation. */
+  static const int extra[] = {0x2013, 0x2014, 0x2018, 0x2019, 0x201c, 0x201d, 0x2022, 0x2026, 0x20ac};
+  int codepoints[(0x7e - 0x20 + 1) + (0x17f - 0xa0 + 1) + sizeof(extra) / sizeof(extra[0])];
+  int n = 0;
+  for (int c = 0x20; c <= 0x7e; c++) {
+    codepoints[n++] = c;
+  }
+  for (int c = 0xa0; c <= 0x17f; c++) {
+    codepoints[n++] = c;
+  }
+  for (size_t i = 0; i < sizeof(extra) / sizeof(extra[0]); i++) {
+    codepoints[n++] = extra[i];
+  }
+  return LoadFontFromMemory(".ttf", bc_font_montserrat, bc_font_montserrat_size, BC_TEXT_SIZE, codepoints, n);
+}
+
+/* -------------------------------------------------------------------------------------------- */
 /* Tooltips and wrapped text. raygui draws a tooltip together with its control, so every control
  * drawn later paints over it, and on one line that can run past the window. Controls register
  * their tooltip here instead; the one under the mouse is drawn last, wrapped to the window. */
@@ -603,8 +679,8 @@ static void bc_gui_draw_tip(void)
   if (box.y + box.height > H - BC_MARGIN && g_tip_anchor.y - 4 - box.height >= BC_MARGIN) {
     box.y = g_tip_anchor.y - 4 - box.height;
   }
-  DrawRectangleRec(box, GetColor((unsigned int)GuiGetStyle(DEFAULT, BACKGROUND_COLOR)));
-  DrawRectangleLinesEx(box, 1, GetColor((unsigned int)GuiGetStyle(DEFAULT, BORDER_COLOR_NORMAL)));
+  DrawRectangleRec(box, GetColor((unsigned int)GuiGetStyle(DEFAULT, BASE_COLOR_NORMAL)));
+  DrawRectangleLinesEx(box, 1, GetColor((unsigned int)GuiGetStyle(DEFAULT, BORDER_COLOR_FOCUSED)));
   const Color color = GetColor((unsigned int)GuiGetStyle(DEFAULT, TEXT_COLOR_NORMAL));
   for (int i = 0; i < n; i++) {
     bc_draw_span(&spans[i], box.x + BC_GAP, box.y + BC_GAP + (float)i * line_h, spacing, color);
@@ -727,7 +803,7 @@ static void bc_gui_draw(BC_Gui *g)
   const bool online = g->project.key_mode == BC_KEY_ONLINE;
   const bool key_file_row = g->project.key_mode != BC_KEY_BUILD;
   const float settings_h = (float)((online ? 13 : key_file_row ? 11 : 10) * (BC_ROW + BC_GAP) + 2 * BC_GAP);
-  GuiGroupBox(bc_rect(BC_MARGIN, y, inner, settings_h), "Settings");
+  bc_group_box(bc_rect(BC_MARGIN, y, inner, settings_h), "Settings");
   y += 2 * BC_GAP;
   bool committed;
   char resolved[BC_PATH_MAX];
@@ -1082,7 +1158,7 @@ static void bc_gui_draw(BC_Gui *g)
   const int label_color = GuiGetStyle(LABEL, TEXT_COLOR_NORMAL);
   char info[3 * BC_PATH_MAX];
   if (inplace) {
-    GuiSetStyle(LABEL, TEXT_COLOR_NORMAL, ColorToInt(ORANGE));
+    GuiSetStyle(LABEL, TEXT_COLOR_NORMAL, BC_RGB(BC_RGB_WARNING));
     snprintf(info, sizeof(info), "Linked libraries (//lib.blend) and getBlendFileList() only find .blend names: prefer mirror for multi-file games");
   }
   else {
@@ -1116,7 +1192,7 @@ static void bc_gui_draw(BC_Gui *g)
   log_lines = log_lines < 3 ? 3 : log_lines > BC_LOG_VISIBLE ? BC_LOG_VISIBLE : log_lines;
   const float bottom_h = BC_ROW + BC_GAP + (float)log_lines * 24 + 3 * BC_GAP;
   const float files_h = H - y - bottom_h - BC_MARGIN;
-  GuiGroupBox(bc_rect(BC_MARGIN, y, inner, files_h), "Files to encrypt (drop .blend files or folders here)");
+  bc_group_box(bc_rect(BC_MARGIN, y, inner, files_h), "Files to encrypt (drop .blend files or folders here)");
   const float list_x = BC_MARGIN + BC_GAP;
   const float list_y = y + 2 * BC_GAP;
   const float list_w = inner - BC_BUTTON_W - 4 * BC_GAP;
@@ -1203,31 +1279,40 @@ static void bc_gui_draw(BC_Gui *g)
                  1.0f);
   y += BC_ROW + BC_GAP;
 
-  /* Log: newest lines at the bottom, colored by level, wrapped to the panel. Filled bottom up, so
-   * only the visible messages are measured; the oldest one may show only its last rows. */
+  /* Log: newest lines at the bottom, colored by level, wrapped to the panel. Rows are gathered from
+   * the newest message back, so only the visible messages are measured (the oldest one may keep
+   * only its last rows), then drawn from the top. */
   const float log_h = (float)log_lines * 24 + BC_GAP;
   GuiPanel(bc_rect(BC_MARGIN, y, inner, log_h), NULL);
   BeginScissorMode((int)BC_MARGIN, (int)y, (int)inner, (int)log_h);
-  int row = log_lines;
-  for (int i = 0; i < g->log_count && row > 0; i++) {
+  BC_Span rows[BC_LOG_VISIBLE];
+  Color row_colors[BC_LOG_VISIBLE];
+  int row_count = 0;
+  for (int i = 0; i < g->log_count && row_count < log_lines; i++) {
     const BC_LogLine *line = &g->log[(g->log_next - 1 - i + BC_LOG_LINES) % BC_LOG_LINES];
-    const Color color = line->level == BC_LOG_ERROR   ? RED :
-                        line->level == BC_LOG_WARNING ? ORANGE :
-                                                        GetColor((unsigned int)GuiGetStyle(DEFAULT, TEXT_COLOR_NORMAL));
+    const int rgba = line->level == BC_LOG_ERROR   ? BC_RGB(BC_RGB_ERROR) :
+                     line->level == BC_LOG_WARNING ? BC_RGB(BC_RGB_WARNING) :
+                                                     GuiGetStyle(DEFAULT, TEXT_COLOR_NORMAL);
     BC_Span spans[BC_LOG_VISIBLE];
-    const int n = bc_wrap(line->text, inner - 2 * BC_GAP, 2, spans, BC_LOG_VISIBLE);
-    for (int k = n - 1; k >= 0 && row > 0; k--) {
-      row--;
-      bc_draw_span(&spans[k], BC_MARGIN + BC_GAP, y + BC_GAP / 2 + (float)row * 24, 2, color);
+    const int n = bc_wrap(line->text, inner - 2 * BC_GAP, text_spacing, spans, BC_LOG_VISIBLE);
+    for (int k = n - 1; k >= 0 && row_count < log_lines; k--) {
+      rows[row_count] = spans[k];
+      row_colors[row_count] = GetColor((unsigned int)rgba);
+      row_count++;
     }
+  }
+  for (int row = 0; row < row_count; row++) {
+    const int k = row_count - 1 - row;
+    bc_draw_span(&rows[k], BC_MARGIN + BC_GAP, y + BC_GAP / 2 + (float)row * 24, text_spacing, row_colors[k]);
   }
   EndScissorMode();
 
   bc_gui_draw_tip();
 
-  /* Confirmation dialog on top of everything. */
+  /* Confirmation dialog on top of everything, over a dimmed editor. */
   if (modal) {
     GuiUnlock();
+    DrawRectangleRec(bc_rect(0, 0, W, H), Fade(BLACK, 0.5f));
     const Rectangle box = bc_rect(W / 2 - 260, H / 2 - 90, 520, 180);
     if (g->pending == BC_PENDING_QUIT) {
       const int answer = GuiMessageBox(box, "Unsaved changes", "Save the project before closing?", "Save;Discard");
@@ -1269,7 +1354,9 @@ int bc_gui_run(const char *project_path)
   SetWindowMinSize(900, 860);
   SetExitKey(KEY_NULL);
   SetTargetFPS(60);
-  GuiSetStyle(DEFAULT, TEXT_SIZE, BC_TEXT_SIZE);
+  bc_gui_theme_upbge();
+  const Font font = bc_gui_load_font();
+  GuiSetFont(font);
   GuiSetStyle(LISTVIEW, LIST_ITEMS_HEIGHT, 28);
   GuiSetStyle(LISTVIEW, TEXT_ALIGNMENT, TEXT_ALIGN_LEFT);
   GuiSetStyle(LISTVIEW, TEXT_PADDING, 8);
@@ -1315,6 +1402,7 @@ int bc_gui_run(const char *project_path)
   }
   free(g.items);
   bc_project_free(&g.project);
+  UnloadFont(font); /* No-op for raylib's own font. */
   CloseWindow();
   return 0;
 }

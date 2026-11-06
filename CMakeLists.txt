@@ -147,7 +147,24 @@ if(BINARYCRYPT_BUILD_GUI)
   target_include_directories(raygui_impl PUBLIC tool/third_party)
   target_link_libraries(raygui_impl PUBLIC ${BC_RAYLIB})
 
-  target_sources(bc_tool PRIVATE tool/bc_dialog.c tool/bc_gui.c)
+  # Editor font: Montserrat Medium, the typeface of upbge.org (SIL OFL 1.1, tool/fonts/OFL.txt),
+  # embedded as data the way Blender embeds its UI fonts. Subset of github.com/JulietaUla/Montserrat
+  # (commit 555facf) to the glyphs the editor rasterizes (bc_gui_load_font):
+  #   pyftsubset Montserrat-Medium.ttf --unicodes="U+0020-007E,U+00A0-017F,U+2013,U+2014,U+2018,U+2019,U+201C,U+201D,U+2022,U+2026,U+20AC"
+  #              --no-hinting --layout-features='' --name-IDs='*'
+  set(BC_FONT_DIR ${CMAKE_BINARY_DIR}/generated/font)
+  add_custom_command(
+    OUTPUT ${BC_FONT_DIR}/bc_font_data.h
+    COMMAND ${CMAKE_COMMAND} -DIN=${CMAKE_CURRENT_SOURCE_DIR}/tool/fonts/Montserrat-Medium.ttf
+            -DOUT=${BC_FONT_DIR}/bc_font_data.h -DNAME=bc_font_montserrat
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/bc_bin2c.cmake
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tool/fonts/Montserrat-Medium.ttf ${CMAKE_CURRENT_SOURCE_DIR}/cmake/bc_bin2c.cmake
+    COMMENT "Embedding the editor font"
+    VERBATIM
+  )
+
+  target_sources(bc_tool PRIVATE tool/bc_dialog.c tool/bc_gui.c ${BC_FONT_DIR}/bc_font_data.h)
+  target_include_directories(bc_tool PRIVATE ${BC_FONT_DIR})
   target_compile_definitions(bc_tool PRIVATE BC_WITH_GUI)
   target_link_libraries(bc_tool PRIVATE raygui_impl)
   if(WIN32)
