@@ -116,6 +116,18 @@ add_executable(bc_tool tool/bc_tool_main.c)
 target_link_libraries(bc_tool PRIVATE bc_build_key)
 target_compile_options(bc_tool PRIVATE ${BC_WARNINGS})
 
+# Icon of bc_tool, and of game executables until the project sets one. res/binarycrypt.ico holds the
+# 256 px artwork and its Lanczos reductions to 16, 20, 24, 32, 40, 48 and 64 px, all PNG.
+if(WIN32)
+  target_sources(bc_launcher PRIVATE launcher/bc_launcher.rc)
+  target_sources(bc_tool PRIVATE tool/bc_tool.rc)
+  # The resource compiler finds the .ico through the include path; changing it rebuilds both.
+  target_include_directories(bc_launcher PRIVATE res)
+  target_include_directories(bc_tool PRIVATE res)
+  set_source_files_properties(launcher/bc_launcher.rc tool/bc_tool.rc PROPERTIES
+    OBJECT_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/res/binarycrypt.ico)
+endif()
+
 if(BINARYCRYPT_BUILD_GUI)
   # An installed raylib first (cmake/Findraylib.cmake also finds the prebuilt Windows package in
   # ../Libs/raylib-5.5_win64_msvc16), otherwise the pinned upstream release.
@@ -152,19 +164,34 @@ if(BINARYCRYPT_BUILD_GUI)
   # (commit 555facf) to the glyphs the editor rasterizes (bc_gui_load_font):
   #   pyftsubset Montserrat-Medium.ttf --unicodes="U+0020-007E,U+00A0-017F,U+2013,U+2014,U+2018,U+2019,U+201C,U+201D,U+2022,U+2026,U+20AC"
   #              --no-hinting --layout-features='' --name-IDs='*'
-  set(BC_FONT_DIR ${CMAKE_BINARY_DIR}/generated/font)
+  set(BC_DATA_DIR ${CMAKE_BINARY_DIR}/generated/data)
   add_custom_command(
-    OUTPUT ${BC_FONT_DIR}/bc_font_data.h
+    OUTPUT ${BC_DATA_DIR}/bc_font_data.h
     COMMAND ${CMAKE_COMMAND} -DIN=${CMAKE_CURRENT_SOURCE_DIR}/tool/fonts/Montserrat-Medium.ttf
-            -DOUT=${BC_FONT_DIR}/bc_font_data.h -DNAME=bc_font_montserrat
+            -DOUT=${BC_DATA_DIR}/bc_font_data.h -DNAME=bc_font_montserrat
             -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/bc_bin2c.cmake
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tool/fonts/Montserrat-Medium.ttf ${CMAKE_CURRENT_SOURCE_DIR}/cmake/bc_bin2c.cmake
     COMMENT "Embedding the editor font"
     VERBATIM
   )
+  target_sources(bc_tool PRIVATE ${BC_DATA_DIR}/bc_font_data.h)
 
-  target_sources(bc_tool PRIVATE tool/bc_dialog.c tool/bc_gui.c ${BC_FONT_DIR}/bc_font_data.h)
-  target_include_directories(bc_tool PRIVATE ${BC_FONT_DIR})
+  # Window icon (title bar, taskbar). Windows takes it from the GLFW_ICON resource instead.
+  if(NOT WIN32)
+    add_custom_command(
+      OUTPUT ${BC_DATA_DIR}/bc_icon_data.h
+      COMMAND ${CMAKE_COMMAND} -DIN=${CMAKE_CURRENT_SOURCE_DIR}/res/binarycrypt.ico
+              -DOUT=${BC_DATA_DIR}/bc_icon_data.h -DNAME=bc_icon_ico
+              -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/bc_bin2c.cmake
+      DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/res/binarycrypt.ico ${CMAKE_CURRENT_SOURCE_DIR}/cmake/bc_bin2c.cmake
+      COMMENT "Embedding the window icon"
+      VERBATIM
+    )
+    target_sources(bc_tool PRIVATE ${BC_DATA_DIR}/bc_icon_data.h)
+  endif()
+
+  target_sources(bc_tool PRIVATE tool/bc_dialog.c tool/bc_gui.c)
+  target_include_directories(bc_tool PRIVATE ${BC_DATA_DIR})
   target_compile_definitions(bc_tool PRIVATE BC_WITH_GUI)
   target_link_libraries(bc_tool PRIVATE raygui_impl)
   if(WIN32)

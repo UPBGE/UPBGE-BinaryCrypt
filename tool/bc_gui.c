@@ -24,6 +24,13 @@
 #include "bc_key.h"
 #include "bc_project.h"
 
+/* Window icon from the embedded .ico. Windows takes it from the GLFW_ICON resource (bc_tool.rc)
+ * instead; macOS windows have none. */
+#if !defined(_WIN32) && !defined(__APPLE__)
+#  define BC_WINDOW_ICON
+#  include "bc_icon_data.h"
+#endif
+
 #define BC_TEXT_SIZE 20
 #define BC_ROW 32
 #define BC_GAP 8
@@ -548,6 +555,38 @@ static Font bc_gui_load_font(void)
   }
   return LoadFontFromMemory(".ttf", bc_font_montserrat, bc_font_montserrat_size, BC_TEXT_SIZE, codepoints, n);
 }
+
+#ifdef BC_WINDOW_ICON
+/** Title bar and taskbar icon: every image of res/binarycrypt.ico (all PNG), so the window manager
+ * picks the size it draws instead of scaling a single one. */
+static void bc_gui_set_window_icon(void)
+{
+  char err[128];
+  if (!bc_brand_ico_check(bc_icon_ico, (size_t)bc_icon_ico_size, err, sizeof(err))) {
+    return;
+  }
+  Image images[16];
+  int count = 0;
+  const int n = bc_icon_ico[4] | (bc_icon_ico[5] << 8);
+  for (int i = 0; i < n && count < 16; i++) {
+    /* ICONDIRENTRY: u32 bytes at 8, u32 offset at 12; inside the file (checked above). */
+    const uint8_t *entry = bc_icon_ico + 6 + 16 * i;
+    const uint32_t size = entry[8] | (uint32_t)entry[9] << 8 | (uint32_t)entry[10] << 16 | (uint32_t)entry[11] << 24;
+    const uint32_t offset = entry[12] | (uint32_t)entry[13] << 8 | (uint32_t)entry[14] << 16 | (uint32_t)entry[15] << 24;
+    Image image = LoadImageFromMemory(".png", bc_icon_ico + offset, (int)size);
+    if (image.data != NULL) {
+      ImageFormat(&image, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8);
+      images[count++] = image;
+    }
+  }
+  if (count > 0) {
+    SetWindowIcons(images, count);
+  }
+  for (int i = 0; i < count; i++) {
+    UnloadImage(images[i]);
+  }
+}
+#endif
 
 /* -------------------------------------------------------------------------------------------- */
 /* Tooltips and wrapped text. raygui draws a tooltip together with its control, so every control
@@ -1349,6 +1388,9 @@ int bc_gui_run(const char *project_path)
 
   SetConfigFlags(FLAG_WINDOW_RESIZABLE);
   InitWindow(1100, 980, "UPBGE BinaryCrypt");
+#ifdef BC_WINDOW_ICON
+  bc_gui_set_window_icon();
+#endif
   SetWindowMinSize(900, 860);
   SetExitKey(KEY_NULL);
   SetTargetFPS(60);

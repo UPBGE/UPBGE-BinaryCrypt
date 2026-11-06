@@ -1,0 +1,5 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
+
+/* Icon of game executables without one of their own: bc_tool replaces the APPICON group with the
+ * game's icon when the project has one (bc_brand.h). */
+APPICON ICON "binarycrypt.ico"

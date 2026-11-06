@@ -1,0 +1,5 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
+
+/* GLFW gives its window class the icon named GLFW_ICON: title bar, taskbar and Alt-Tab, at the
+ * size each DPI asks for. Explorer shows the first icon group of the executable: this one. */
+GLFW_ICON ICON "binarycrypt.ico"

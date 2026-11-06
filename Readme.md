@@ -233,6 +233,8 @@ branded player untouched, byte for byte.
   signature.
 - Branding needs a Windows build of `bc_tool`, which is also what produces Windows games. Other
   builds ignore these settings with a warning.
+- Without an *Icon*, the game executable shows the BinaryCrypt icon, which `bc_launcher` carries
+  as its own `APPICON`; the player keeps UPBGE's.
 - Emptying the settings does not restore the UPBGE icon: copy the runtime into `engine/` again.
 - Explorer caches icons: a changed icon may take a while to show for the same file name.
 
@@ -369,6 +371,7 @@ launcher/    bc_launcher
 tool/        bc_tool: command line, editor (raylib + raygui, Montserrat font), native file dialogs
 tests/       unit tests and an end-to-end test (tool -> launcher -> stand-in player)
 keyserver/   online keys: reference key server and providers (MIT)
+res/         BinaryCrypt icon (bc_tool, and game executables without an icon of their own)
 ```
 
 ## License
