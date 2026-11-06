@@ -47,7 +47,9 @@ game executable ──runs──> key provider ──HTTPS──> key server
    *Offline after 1st launch* keeps the keys on the player's computer after one successful launch.
    Copy the provider and the store's libraries (`steam_api64.dll`, `EOSSDK-Win64-Shipping.dll`...)
    into the game folder **before exporting**: with the integrity check (libraries by default) the
-   game refuses libraries added or changed after the export.
+   game refuses libraries added or changed after the export. Shipping these libraries next to a
+   GPL game is mere aggregation, which the GPL permits: only the provider, a separate MIT program,
+   loads them, never the launcher or the player, and they are needed only with an online key.
    *New key per update* gives every published update its own key (see the main README).
 2. **Key server.** Copy the key file to the server and list the game in the configuration:
 
