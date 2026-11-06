@@ -420,7 +420,6 @@ static void bc_gui_start(BC_Gui *g)
   g->progress = 0.0f;
   if (g->job != NULL) {
     g->job_start = GetTime();
-    DisableEventWaiting();
   }
 }
 
@@ -428,7 +427,6 @@ static void bc_gui_stop(BC_Gui *g, const char *reason)
 {
   bc_job_destroy(g->job);
   g->job = NULL;
-  EnableEventWaiting();
   if (reason != NULL) {
     bc_gui_log(g, BC_LOG_WARNING, reason);
   }
@@ -1368,7 +1366,11 @@ int bc_gui_run(const char *project_path)
   bc_gui_update_title(&g);
   bc_gui_log(&g, BC_LOG_INFO, "Drop .blend files or folders on the window, copy the UPBGE runtime into the game folder's engine/, then Encrypt");
 
-  int startup_frames = 0;
+  /* Frames still to draw without waiting for input. The first ones: some systems send no expose
+   * event. And one after each click or Enter: immediate mode handles them while drawing, so what
+   * they change above their control (a dialog opening or closing, rows appearing) only shows in
+   * the next frame, which event waiting would hold until the next input event. */
+  int eager_frames = 3;
   while (!g.quit) {
     /* raylib keeps reporting the close request once made, so it is handled only when no dialog
      * is open; a failed save simply asks again. */
@@ -1387,11 +1389,18 @@ int bc_gui_run(const char *project_path)
     BeginDrawing();
     ClearBackground(GetColor((unsigned int)GuiGetStyle(DEFAULT, BACKGROUND_COLOR)));
     bc_gui_draw(&g);
-    EndDrawing();
-    /* Block on input only once the window has content: some systems send no expose event. */
-    if (startup_frames < 3 && ++startup_frames == 3 && g.job == NULL) {
+    const bool acted = IsMouseButtonPressed(MOUSE_BUTTON_LEFT) || IsMouseButtonReleased(MOUSE_BUTTON_LEFT) ||
+                       IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER);
+    eager_frames = eager_frames > 1 ? eager_frames - 1 : acted ? 1 : 0;
+    /* Decided before EndDrawing: it polls the input of the next frame, blocking when waiting. A
+     * running job needs every frame. Idle, the editor costs no CPU. */
+    if (g.job != NULL || eager_frames > 0) {
+      DisableEventWaiting();
+    }
+    else {
       EnableEventWaiting();
     }
+    EndDrawing();
   }
 
   if (g.job != NULL) {
