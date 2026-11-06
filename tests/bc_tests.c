@@ -475,8 +475,8 @@ static void test_embed(void)
   write_fake_exe(launcher, 9000, true);
   fake_sign(launcher);
   CHECK(bc_embed_write(launcher, game, NULL, bc_build_key(), err, sizeof(err)));
-  uint8_t *a, *b;
-  uint64_t na, nb;
+  uint8_t *a = NULL, *b = NULL;
+  uint64_t na = 0, nb = 0;
   CHECK(bc_test_read_file(launcher, &a, &na) && bc_test_read_file(game, &b, &nb));
   CHECK(na == nb && memcmp(a, b, (size_t)na) == 0);
   free(a);
@@ -912,8 +912,8 @@ static void test_seal(void)
   CHECK(bc_seal_begin(&s, OTHER_KEY, in, c2, hash, err, sizeof(err)));
   while (bc_seal_step(&s, err, sizeof(err)) == 1) {
   }
-  uint8_t *da, *db, *dc;
-  uint64_t na, nb, nc;
+  uint8_t *da = NULL, *db = NULL, *dc = NULL;
+  uint64_t na = 0, nb = 0, nc = 0;
   CHECK(bc_test_read_file(a, &da, &na) && bc_test_read_file(b, &db, &nb) && bc_test_read_file(c2, &dc, &nc));
   CHECK(na == nb && memcmp(da, db, (size_t)na) == 0);
   CHECK(na == nc && memcmp(da + BC_HEADER_SIZE, dc + BC_HEADER_SIZE, (size_t)na - BC_HEADER_SIZE) != 0);
@@ -1487,8 +1487,8 @@ static void test_job(void)
     p.manifest_mode = BC_MANIFEST_EXTERNAL;
     CHECK(run_job(&p, &c) == 0 && c.errors == 0);
     CHECK(bc_embed_read(path, bc_build_key(), &m) == BC_MANIFEST_MISSING);
-    uint8_t *exe, *launcher;
-    uint64_t exe_size, launcher_size;
+    uint8_t *exe = NULL, *launcher = NULL;
+    uint64_t exe_size = 0, launcher_size = 0;
     CHECK(bc_test_read_file(path, &exe, &exe_size) &&
           bc_test_read_file(g_launcher, &launcher, &launcher_size));
     CHECK(exe_size == launcher_size && memcmp(exe, launcher, (size_t)exe_size) == 0);

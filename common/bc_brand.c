@@ -298,7 +298,7 @@ static bool bc_scan(const wchar_t *path, const BC_Branding *br, const BC_Buffer 
   EnumResourceNamesW(m, BC_RT_ICON, bc_on_icon, (LONG_PTR)c);
   EnumResourceNamesW(m, BC_RT_VERSION, bc_on_version, (LONG_PTR)c);
 
-  DWORD size;
+  DWORD size = 0;
   const uint8_t *group = c->has_group ? (const uint8_t *)bc_find(m, BC_RT_GROUP_ICON, L"" BC_BRAND_ICON_GROUP, c->group_lang, &size) : NULL;
   if (group != NULL && size >= 6) {
     const int count = bc_ld16(group + 4);

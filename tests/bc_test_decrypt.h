@@ -48,7 +48,7 @@ static bool bc_test_decrypt(const char *path,
   if (!bc_test_read_file(path, &file, &file_size)) {
     return false;
   }
-  BC_Header header;
+  BC_Header header = {0};
   uint8_t key_id[BC_KEY_ID_SIZE];
   bc_key_id(key, key_id);
   bool ok = file_size >= BC_HEADER_SIZE && bc_header_read(file, &header) == BC_HEADER_OK &&

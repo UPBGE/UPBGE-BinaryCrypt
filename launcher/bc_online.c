@@ -133,7 +133,7 @@ static bool bc_run_provider(const char *provider,
 
   HANDLE read_end = NULL, write_end = NULL, null_in = INVALID_HANDLE_VALUE;
   SECURITY_ATTRIBUTES sa = {sizeof(sa), NULL, TRUE};
-  PROCESS_INFORMATION pi;
+  PROCESS_INFORMATION pi = {0};
   ok = ok && CreatePipe(&read_end, &write_end, &sa, 0) &&
        SetHandleInformation(read_end, HANDLE_FLAG_INHERIT, 0);
   if (ok) {

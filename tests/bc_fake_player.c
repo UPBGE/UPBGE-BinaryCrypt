@@ -91,8 +91,8 @@ int main(int argc, char **argv)
   if (key_count == 0) {
     return 11;
   }
-  uint8_t *plain = NULL, *expected;
-  uint64_t plain_size, expected_size;
+  uint8_t *plain = NULL, *expected = NULL;
+  uint64_t plain_size = 0, expected_size = 0;
   bool decrypted = false;
   for (int i = 0; i < key_count && !decrypted; i++) {
     decrypted = bc_test_decrypt(argv[1], keys[i], &plain, &plain_size); /* Checks the key id first. */

@@ -591,7 +591,7 @@ static void bc_gui_draw(BC_Gui *g)
   /* Settings. */
   const bool online = g->project.key_mode == BC_KEY_ONLINE;
   const bool key_file_row = g->project.key_mode != BC_KEY_BUILD;
-  const float settings_h = (online ? 13 : key_file_row ? 11 : 10) * (BC_ROW + BC_GAP) + 2 * BC_GAP;
+  const float settings_h = (float)((online ? 13 : key_file_row ? 11 : 10) * (BC_ROW + BC_GAP) + 2 * BC_GAP);
   GuiGroupBox(bc_rect(BC_MARGIN, y, inner, settings_h), "Settings");
   y += 2 * BC_GAP;
   bool committed;

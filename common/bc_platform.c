@@ -111,7 +111,7 @@ bool bc_file_size(const char *path, uint64_t *r_size)
 {
 #ifdef _WIN32
   wchar_t *wpath = bc_utf16(path);
-  WIN32_FILE_ATTRIBUTE_DATA data;
+  WIN32_FILE_ATTRIBUTE_DATA data = {0};
   const bool ok = wpath && GetFileAttributesExW(wpath, GetFileExInfoStandard, &data) &&
                   !(data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY);
   free(wpath);
