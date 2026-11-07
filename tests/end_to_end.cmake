@@ -66,9 +66,9 @@ file(WRITE "${SRC}/levels/__init__.py" "")
 file(WRITE "${SRC}/levels/stats.json" "{\"hp\": 10}")
 file(COPY "${BC_PLAYER}" DESTINATION "${DIST}/engine")
 
-# -- Mirror mode ------------------------------------------------------------------------------
+# -- Export into the game folder --------------------------------------------------------------
 file(WRITE "${BC_WORK}/game.bcproj"
-  "version = 1\nsource_root = src\noutput_mode = mirror\noutput_dir = dist\n"
+  "version = 1\nsource_root = src\noutput_dir = dist\n"
   "game_name = My Game\nplayer = engine/${player_name}\nmain = src/game.blend\ninput = src\n"
   "data_extensions = json\n")
 bc_run(TRUE "${BC_TOOL}" --batch "${BC_WORK}/game.bcproj")
@@ -392,25 +392,29 @@ endif()
 
 # A missing player is reported by the tool, not discovered by players of the game.
 file(WRITE "${BC_WORK}/broken.bcproj"
-  "version = 1\nsource_root = src\noutput_mode = mirror\noutput_dir = dist\n"
+  "version = 1\nsource_root = src\noutput_dir = dist\n"
   "player = engine/nothing_here\nmain = src/game.blend\ninput = src\n")
 bc_run(FALSE "${BC_TOOL}" --batch "${BC_WORK}/broken.bcproj")
 bc_expect_output("Player not found")
 
-# -- In place mode ----------------------------------------------------------------------------
-file(COPY "${BC_PLAYER}" DESTINATION "${SRC}/engine")
-file(WRITE "${BC_WORK}/inplace.bcproj"
-  "version = 1\nsource_root = src\noutput_mode = inplace\n"
-  "player = engine/${player_name}\nmain = src/game.blend\ninput = src\n")
-bc_run(TRUE "${BC_TOOL}" --batch "${BC_WORK}/inplace.bcproj")
-bc_expect_sealed("${SRC}/game.upbgebc")
-bc_expect_sealed("${SRC}/levels/level 1.upbgebc")
+# -- Output folder ----------------------------------------------------------------------------
+# Always another folder than the sources, which stay untouched; the source folder itself, or one
+# around it, is refused. No game_name: the executable is named after the main file.
+set(project_tail "player = engine/${player_name}\nmain = src/game.blend\ninput = src\n")
+file(WRITE "${BC_WORK}/same.bcproj" "version = 1\nsource_root = src\noutput_dir = src\n${project_tail}")
+bc_run(FALSE "${BC_TOOL}" --batch "${BC_WORK}/same.bcproj")
+bc_expect_output("must not be, or contain, the source folder")
+file(WRITE "${BC_WORK}/around.bcproj" "version = 1\nsource_root = src\noutput_dir = .\n${project_tail}")
+bc_run(FALSE "${BC_TOOL}" --batch "${BC_WORK}/around.bcproj")
+bc_expect_output("must not be, or contain, the source folder")
+file(COPY "${BC_PLAYER}" DESTINATION "${BC_WORK}/dist2/engine")
+file(WRITE "${BC_WORK}/default_name.bcproj" "version = 1\nsource_root = src\noutput_dir = dist2\n${project_tail}")
+bc_run(TRUE "${BC_TOOL}" --batch "${BC_WORK}/default_name.bcproj")
 file(READ "${SRC}/game.blend" head LIMIT 7 HEX)
 if(NOT head STREQUAL "424c454e444552")
-  message(FATAL_ERROR "in place mode modified a source file")
+  message(FATAL_ERROR "the export modified a source file")
 endif()
-# No game_name: the executable is named after the main file.
-bc_run(TRUE "${SRC}/game${BC_EXE_SUFFIX}")
+bc_run(TRUE "${BC_WORK}/dist2/game${BC_EXE_SUFFIX}")
 bc_expect_output("decrypted correctly")
 
 message(STATUS "end to end: all scenarios passed")

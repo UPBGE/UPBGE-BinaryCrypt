@@ -172,7 +172,7 @@ class ChainTest(unittest.TestCase):
         server = ks.KeyServer(("127.0.0.1", 0), {"games": []}, work, quiet=True)
         url = f"http://127.0.0.1:{server.server_address[1]}/key"
         with open(os.path.join(work, "game.bcproj"), "w") as f:
-            f.write(f"version = 1\nsource_root = src\noutput_mode = mirror\noutput_dir = dist\ngame_name = game\n"
+            f.write(f"version = 1\nsource_root = src\noutput_dir = dist\ngame_name = game\n"
                     f"player = engine/{player}\nmain = src/game.blend\ninput = src\n"
                     f"key = online\nkey_file = game.key\nkey_provider = engine/{provider}\nkey_url = {url}\n")
         self.export(work)

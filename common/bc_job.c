@@ -83,8 +83,7 @@ struct BC_Job {
   char player_rel[BC_PATH_MAX];
   char player_abs[BC_PATH_MAX];
   char main_out_rel[BC_PATH_MAX];
-  /** Mirror output: folders also give Python modules and the data files of these extensions. */
-  bool mirror;
+  /** Folders also give Python modules and the data files of these extensions. */
   char data_ext[BC_DATA_EXT_MAX][BC_DATA_EXT_SIZE];
   int data_ext_count;
 
@@ -176,16 +175,10 @@ typedef struct BC_ScanContext {
 
 static void bc_scan_dir(BC_Job *job, const char *dir, const char *skip_dir, bool *ok);
 
-/** What a folder gives: .blend files, and with the mirror output .py modules and data files. */
+/** What a folder gives: .blend files, Python modules and data files. */
 static bool bc_job_scans(const BC_Job *job, const char *name)
 {
-  if (bc_path_has_extension(name, ".blend")) {
-    return true;
-  }
-  if (!job->mirror) {
-    return false;
-  }
-  if (bc_path_has_extension(name, ".py")) {
+  if (bc_path_has_extension(name, ".blend") || bc_path_has_extension(name, ".py")) {
     return true;
   }
   for (int i = 0; i < job->data_ext_count; i++) {
@@ -204,9 +197,9 @@ static void bc_scan_entry(void *user, const char *name, bool is_dir)
     return;
   }
   if (is_dir) {
-    /* Hidden folders (.git, .svn...) never hold game data. The mirror output folder may live
-     * inside the source tree and must not be encrypted again. */
-    if (name[0] != '.' && !(ctx->skip_dir && strcmp(path, ctx->skip_dir) == 0)) {
+    /* Hidden folders (.git, .svn...) never hold game data. The output folder may live inside
+     * the source tree and must not be encrypted again. */
+    if (name[0] != '.' && strcmp(path, ctx->skip_dir) != 0) {
       bc_scan_dir(ctx->job, path, ctx->skip_dir, &ctx->ok);
     }
   }
@@ -237,19 +230,13 @@ static int bc_compare_files(const void *a, const void *b)
   return strcmp(((const BC_JobFile *)a)->in, ((const BC_JobFile *)b)->in);
 }
 
-/** Output of one source file: same relative path below output_dir (mirror), or the same folder
- * with the .upbgebc extension (in place). */
+/** Output of one source file: the same relative path below output_dir, so relative paths
+ * (//levels/a.blend), linked libraries, imports and data file names keep working. */
 static bool bc_output_path(const BC_Project *p, const char *in, char *out, size_t size)
 {
-  if (p->output_mode == BC_OUTPUT_MIRROR) {
-    char rel[BC_PATH_MAX];
-    return bc_path_relative(rel, sizeof(rel), p->source_root, in) &&
-           bc_path_join(out, size, p->output_dir, rel);
-  }
-  const size_t n = strlen(in);
-  const size_t stem = bc_path_has_extension(in, ".blend") ? n - 6 : n;
-  const int written = snprintf(out, size, "%.*s%s", (int)stem, in, BC_INPLACE_EXTENSION);
-  return written > 0 && (size_t)written < size;
+  char rel[BC_PATH_MAX];
+  return bc_path_relative(rel, sizeof(rel), p->source_root, in) &&
+         bc_path_join(out, size, p->output_dir, rel);
 }
 
 /* -------------------------------------------------------------------------------------------- */
@@ -494,17 +481,15 @@ BC_Job *bc_job_create(const BC_Project *p,
     bc_log(job, BC_LOG_ERROR, "The source folder is not set or does not exist");
     return bc_job_fail_create(job);
   }
-  if (p->output_mode == BC_OUTPUT_MIRROR) {
-    if (p->output_dir[0] == '\0') {
-      bc_log(job, BC_LOG_ERROR, "The output folder is not set");
-      return bc_job_fail_create(job);
-    }
-    /* Outputs inside the sources are fine (they are skipped while scanning); sources inside
-     * the outputs, or both being the same folder, would overwrite the originals. */
-    if (bc_path_is_inside(p->output_dir, p->source_root)) {
-      bc_log(job, BC_LOG_ERROR, "The output folder must not be, or contain, the source folder");
-      return bc_job_fail_create(job);
-    }
+  if (p->output_dir[0] == '\0') {
+    bc_log(job, BC_LOG_ERROR, "The output folder is not set");
+    return bc_job_fail_create(job);
+  }
+  /* Outputs inside the sources are fine (they are skipped while scanning); sources inside the
+   * outputs, or both being the same folder, would overwrite the originals. */
+  if (bc_path_is_inside(p->output_dir, p->source_root)) {
+    bc_log(job, BC_LOG_ERROR, "The output folder must not be, or contain, the source folder");
+    return bc_job_fail_create(job);
   }
   snprintf(job->dist_root, sizeof(job->dist_root), "%s", bc_project_dist_root(p));
 
@@ -579,17 +564,11 @@ BC_Job *bc_job_create(const BC_Project *p,
   snprintf(job->launcher_path, sizeof(job->launcher_path), "%s", launcher_path);
   job->manifest_mode = p->manifest_mode;
   job->integrity = p->integrity;
-  job->mirror = p->output_mode == BC_OUTPUT_MIRROR;
   char err[256];
   job->data_ext_count = bc_project_data_extensions(p, job->data_ext, BC_DATA_EXT_MAX, err, sizeof(err));
   if (job->data_ext_count < 0) {
     bc_log(job, BC_LOG_ERROR, "Data files: %s", err);
     return bc_job_fail_create(job);
-  }
-  if (job->data_ext_count > 0 && !job->mirror) {
-    /* Like the branding settings off Windows: kept in the project, ignored with a warning. */
-    bc_log(job, BC_LOG_WARNING, "Data files ignored: they need the mirror output, where their encrypted copies keep their names");
-    job->data_ext_count = 0;
   }
   if (p->input_count == 0) {
     bc_log(job, BC_LOG_ERROR, "There are no input files");
@@ -599,14 +578,14 @@ BC_Job *bc_job_create(const BC_Project *p,
   /* Expand folders, then sort and drop duplicates (a file can be listed and also be found inside
    * a listed folder). */
   bool ok = true;
-  const char *skip_dir = p->output_mode == BC_OUTPUT_MIRROR ? p->output_dir : NULL;
+  const char *skip_dir = p->output_dir;
   for (int i = 0; ok && i < p->input_count; i++) {
     const char *input = p->inputs[i];
     if (!bc_path_is_inside(p->source_root, input)) {
       bc_log(job, BC_LOG_ERROR, "'%s' is outside the source folder", input);
       return bc_job_fail_create(job);
     }
-    if (skip_dir != NULL && bc_path_is_inside(skip_dir, input)) {
+    if (bc_path_is_inside(skip_dir, input)) {
       bc_log(job, BC_LOG_ERROR, "'%s' is inside the output folder", input);
       return bc_job_fail_create(job);
     }
@@ -649,11 +628,6 @@ BC_Job *bc_job_create(const BC_Project *p,
     file->kind = bc_path_has_extension(file->in, ".blend") ? BC_KIND_BLEND :
                  bc_path_has_extension(file->in, ".py")    ? BC_KIND_PYTHON :
                                                              BC_KIND_DATA;
-    if (file->kind != BC_KIND_BLEND && !job->mirror) {
-      /* An import or a script names "module.py" or "level.json", never "level.upbgebc". */
-      bc_log(job, BC_LOG_ERROR, "'%s': only .blend files can be encrypted next to the sources, the others need the mirror output", file->in);
-      return bc_job_fail_create(job);
-    }
     char out[BC_PATH_MAX];
     if (!bc_output_path(p, file->in, out, sizeof(out)) ||
         (file->out = (char *)malloc(strlen(out) + 1)) == NULL)

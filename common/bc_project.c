@@ -9,7 +9,6 @@
 void bc_project_init(BC_Project *p)
 {
   memset(p, 0, sizeof(*p));
-  p->output_mode = BC_OUTPUT_MIRROR;
   p->key_mode = BC_KEY_PROJECT;
   p->integrity = BC_INTEGRITY_PYTHON;
 }
@@ -143,7 +142,7 @@ int bc_project_data_extensions(const BC_Project *p, char out[][BC_DATA_EXT_SIZE]
 
 const char *bc_project_dist_root(const BC_Project *p)
 {
-  return p->output_mode == BC_OUTPUT_MIRROR ? p->output_dir : p->source_root;
+  return p->output_dir;
 }
 
 /* -------------------------------------------------------------------------------------------- */
@@ -328,19 +327,6 @@ bool bc_project_load(BC_Project *p, const char *file_path, char *err, size_t err
       ok = (size_t)snprintf(p->player, sizeof(p->player), "%s", value) < sizeof(p->player);
       bc_path_normalize(p->player);
     }
-    else if (strcmp(key, "output_mode") == 0) {
-      if (strcmp(value, "mirror") == 0) {
-        p->output_mode = BC_OUTPUT_MIRROR;
-      }
-      else if (strcmp(value, "inplace") == 0) {
-        p->output_mode = BC_OUTPUT_INPLACE;
-      }
-      else {
-        snprintf(err, err_size, "line %d: output_mode must be 'mirror' or 'inplace'", line_number);
-        ok = false;
-        break;
-      }
-    }
     else if (strcmp(key, "data_extensions") == 0) {
       ok = (size_t)snprintf(p->data_extensions, sizeof(p->data_extensions), "%s", value) < sizeof(p->data_extensions);
     }
@@ -408,9 +394,6 @@ bool bc_project_save(const BC_Project *p, const char *file_path, char *err, size
   }
   fprintf(f, "# UPBGE-BinaryCrypt project\nversion = %d\n", BC_PROJECT_VERSION);
   bc_write_path(f, "source_root", project_dir, p->source_root);
-  fprintf(f,
-          "output_mode = %s\n",
-          p->output_mode == BC_OUTPUT_MIRROR ? "mirror" : "inplace");
   if (p->output_dir[0] != '\0') {
     bc_write_path(f, "output_dir", project_dir, p->output_dir);
   }

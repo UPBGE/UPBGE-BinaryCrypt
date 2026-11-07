@@ -5,8 +5,7 @@
  *
  *   version = 1
  *   source_root = .               # tree of the game sources (.blend files, Python modules...)
- *   output_mode = mirror          # mirror | inplace
- *   output_dir = dist             # mirror only: encrypted copy of the tree, same names
+ *   output_dir = dist             # the game folder: encrypted copy of the tree, same names
  *   game_name = MyGame            # game executable name (".exe" added on Windows); optional,
  *                                 # defaults to the main file name without ".blend"
  *   manifest = embedded           # embedded | external (binarycrypt.manifest next to the game
@@ -31,17 +30,17 @@
  *                                 # Python bytecode removed) (bc_native.h)
  *   player = engine/blenderplayer.exe  # relative to the distribution root, hashed by the tool
  *   main = game.blend             # the blend the game executable starts
- *   data_extensions = .json .txt  # mirror only: folders also give these files, read in the
- *                                 # game with bge.logic.decryptFile(); optional
+ *   data_extensions = .json .txt  # folders also give these files, read in the game with
+ *                                 # bge.logic.decryptFile(); optional
  *   input = game.blend            # a file of any kind, or a folder scanned recursively for
- *   input = levels                # *.blend, and in mirror mode *.py and data_extensions files
+ *   input = levels                # *.blend, *.py and data_extensions files
  *
  * A '#' preceded by a space or a tab starts a comment; double quotes keep it, and leading or
  * trailing spaces, in a value.
  *
  * Distribution root (where the game executable lives, with the runtime in engine/ by
- * convention): output_dir in mirror mode, source_root in inplace mode. Inplace writes
- * "name.upbgebc" next to each "name.blend". */
+ * convention): output_dir, always another folder than the sources, so a module or a data file
+ * keeps its name and the sources are never shipped. */
 
 #ifndef BC_PROJECT_H
 #define BC_PROJECT_H
@@ -57,7 +56,6 @@ extern "C" {
 
 #define BC_PROJECT_VERSION 1
 #define BC_PROJECT_EXTENSION ".bcproj"
-#define BC_INPLACE_EXTENSION ".upbgebc"
 #define BC_GAME_NAME_MAX 256
 #define BC_PROJECT_TEXT_MAX 256
 #define BC_PROJECT_VERSION_MAX 32
@@ -93,11 +91,6 @@ typedef enum BC_ManifestMode {
   BC_MANIFEST_EXTERNAL = 1,
 } BC_ManifestMode;
 
-typedef enum BC_OutputMode {
-  BC_OUTPUT_MIRROR = 0,
-  BC_OUTPUT_INPLACE = 1,
-} BC_OutputMode;
-
 /** In memory every path is absolute and normalized, except #player which is always relative to
  * the distribution root (it names the file as shipped next to the launcher). */
 typedef struct BC_Project {
@@ -105,7 +98,6 @@ typedef struct BC_Project {
    * goes next to it. Not stored in the file. */
   char project_file[BC_PATH_MAX];
   char source_root[BC_PATH_MAX];
-  BC_OutputMode output_mode;
   char output_dir[BC_PATH_MAX];
   char game_name[BC_GAME_NAME_MAX];
   BC_ManifestMode manifest_mode;

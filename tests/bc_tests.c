@@ -1216,7 +1216,6 @@ static void test_project(void)
              "# comment\n"
              "version = 1\n"
              "source_root = src\n"
-             "output_mode = inplace\n"
              "output_dir = \" dist with spaces \"\n"
              "player = engine/blenderplayer\n"
              "main = src/game.blend\n"
@@ -1231,7 +1230,6 @@ static void test_project(void)
   CHECK_STR(p.source_root, expected);
   work_path(expected, "proj/ dist with spaces ");
   CHECK_STR(p.output_dir, expected);
-  CHECK(p.output_mode == BC_OUTPUT_INPLACE);
   CHECK_STR(p.player, "engine/blenderplayer");
   CHECK(p.input_count == 2);
   work_path(expected, "proj/src/extra.blend");
@@ -1253,7 +1251,7 @@ static void test_project(void)
   CHECK_STR(q.source_root, p.source_root);
   CHECK_STR(q.output_dir, p.output_dir);
   CHECK_STR(q.main, p.main);
-  CHECK(q.input_count == p.input_count && q.output_mode == p.output_mode);
+  CHECK(q.input_count == p.input_count);
   uint8_t *text;
   uint64_t text_size;
   CHECK(bc_test_read_file(saved, &text, &text_size));
@@ -1274,7 +1272,7 @@ static void test_project(void)
   /* Branding keys, inline comments and values that need quoting. */
   write_text("proj/brand.bcproj",
              "version = 1   # format version\n"
-             "output_mode = mirror\t# mirror | inplace\n"
+             "manifest = embedded\t# embedded | external\n"
              "icon = art/game.ico\n"
              "game_version = 1.2.0 # optional\n"
              "company = Studio#1\n"
@@ -1363,10 +1361,13 @@ static void test_project(void)
     bc_project_free(&p);
   }
 
-  /* Strictness. */
+  /* Strictness. The output always mirrors into another folder: there is no output mode. */
   write_text("proj/typo.bcproj", "version = 1\nsource_rot = src\n");
   work_path(path, "proj/typo.bcproj");
   CHECK(!bc_project_load(&p, path, err, sizeof(err)) && strstr(err, "unknown key") != NULL);
+  write_text("proj/mode.bcproj", "version = 1\noutput_mode = inplace\n");
+  work_path(path, "proj/mode.bcproj");
+  CHECK(!bc_project_load(&p, path, err, sizeof(err)) && strstr(err, "unknown key 'output_mode'") != NULL);
   write_text("proj/version.bcproj", "version = 2\n");
   work_path(path, "proj/version.bcproj");
   CHECK(!bc_project_load(&p, path, err, sizeof(err)));
@@ -1841,30 +1842,14 @@ static void test_job(void)
     p.key_mode = BC_KEY_BUILD;
     p.key_file[0] = p.key_provider[0] = '\0';
     CHECK(run_job(&p, &c) == 0 && c.errors == 0);
-    /* Refusals: the main file is a scene, data extensions are data, the others need the mirror. */
+    /* Refusals: the main file is a scene, data extensions are data. */
     work_path(p.main, "job/src/scripts/menu.py");
     CHECK(run_job(&p, &c) == -2 && strstr(c.last_error, "must be a .blend") != NULL);
     work_path(p.main, "job/src/game.blend");
     snprintf(p.data_extensions, sizeof(p.data_extensions), "json py");
     CHECK(run_job(&p, &c) == -2 && strstr(c.last_error, "Data files:") != NULL);
-    snprintf(p.data_extensions, sizeof(p.data_extensions), "json");
-    p.output_mode = BC_OUTPUT_INPLACE;
-    write_text("job/src/engine/player", "player");
-    work_path(path, "job/src/data/listed.bin");
-    bc_remove(path);
-    bc_project_clear_inputs(&p);
-    work_path(path, "job/src");
-    bc_project_add_input(&p, path);
-    CHECK(run_job(&p, &c) == 0 && c.warnings == 1 && strstr(c.last_warning, "need the mirror output") != NULL);
-    work_path(path, "job/src/data/level.upbgebc");
-    CHECK(!bc_is_file(path));
-    write_text("job/src/data/listed.bin", "listed on its own");
-    work_path(path, "job/src/data/listed.bin");
-    bc_project_add_input(&p, path);
     p.data_extensions[0] = '\0';
-    CHECK(run_job(&p, &c) == -2 && strstr(c.last_error, "listed.bin") != NULL && strstr(c.last_error, "mirror output") != NULL);
-    p.output_mode = BC_OUTPUT_MIRROR;
-    const char *remove[] = {"job/src/scripts/__init__.py", "job/src/scripts/menu.py", "job/src/data/level.json", "job/src/data/empty.json", "job/src/data/notes.md", "job/src/data/listed.bin", "job/src/engine/player"};
+    const char *remove[] = {"job/src/scripts/__init__.py", "job/src/scripts/menu.py", "job/src/data/level.json", "job/src/data/empty.json", "job/src/data/notes.md", "job/src/data/listed.bin"};
     for (size_t i = 0; i < sizeof(remove) / sizeof(remove[0]); i++) {
       work_path(path, remove[i]);
       bc_remove(path);
@@ -1881,22 +1866,6 @@ static void test_job(void)
   work_path(path, "job/src/out_inside/out_inside/stale.blend");
   CHECK(!bc_is_file(path));
   CHECK(decrypts_to("job/src/out_inside/game.blend", "job/src/game.blend"));
-
-  /* In place: name.upbgebc next to each source, manifest in the source root. */
-  p.output_mode = BC_OUTPUT_INPLACE;
-  write_text("job/src/engine/player", "player");
-  bc_project_clear_inputs(&p);
-  work_path(path, "job/src/levels");
-  bc_project_add_input(&p, path);
-  work_path(path, "job/src/game.blend");
-  bc_project_add_input(&p, path);
-  CHECK(run_job(&p, &c) == 0);
-  CHECK(decrypts_to("job/src/game.upbgebc", "job/src/game.blend"));
-  CHECK(decrypts_to("job/src/levels/deep/two.upbgebc", "job/src/levels/deep/two.BLEND"));
-  snprintf(exe_name, sizeof(exe_name), "job/src/My Game%s", bc_exe_extension());
-  work_path(path, exe_name);
-  CHECK(bc_embed_read(path, bc_build_key(), &m) == BC_MANIFEST_OK);
-  CHECK_STR(m.main_path, "game.upbgebc");
 #ifndef _WIN32
   /* Branding settings only matter for Windows games: ignored with a warning elsewhere. */
   snprintf(p.company, sizeof(p.company), "Studio");
@@ -1904,8 +1873,10 @@ static void test_job(void)
   p.company[0] = '\0';
 #endif
 
-  /* Refusals with a precise reason. */
-  p.output_mode = BC_OUTPUT_MIRROR;
+  /* Refusals with a precise reason. Encrypting into the source folder itself is not possible: the
+   * outputs keep the sources' names. */
+  p.output_dir[0] = '\0';
+  CHECK(run_job(&p, &c) == -2 && strstr(c.last_error, "output folder is not set") != NULL);
   work_path(p.output_dir, "job/dist");
   snprintf(p.player, sizeof(p.player), "engine/missing");
   CHECK(run_job(&p, &c) == -2 && strstr(c.last_error, "Player not found") != NULL);
@@ -1916,6 +1887,8 @@ static void test_job(void)
   CHECK(run_job(&p, &c) == -2 && strstr(c.last_error, "not among") != NULL);
   work_path(p.main, "job/src/game.blend");
   work_path(p.output_dir, "job/src");
+  CHECK(run_job(&p, &c) == -2 && strstr(c.last_error, "must not be") != NULL);
+  work_path(p.output_dir, "job");
   CHECK(run_job(&p, &c) == -2 && strstr(c.last_error, "must not be") != NULL);
   work_path(p.output_dir, "job/dist");
   const char *bad_names[] = {"a/b", "x:y", "trailing.", "trailing ", "..", "q?"};

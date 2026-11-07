@@ -16,7 +16,7 @@ A shipped game looks like this: one executable, the encrypted data and the runti
 MyGame.exe          game executable (launcher + manifest)
                     (binarycrypt.manifest next to it with the external manifest option)
 game.blend          encrypted
-levels/...          encrypted (.blend files, and in mirror mode Python modules and data files)
+levels/...          encrypted (.blend files, Python modules, data files)
 engine/             UPBGE runtime: blenderplayer.exe, DLLs, <version>/python, <version>/datafiles
 ```
 
@@ -146,8 +146,9 @@ Platform notes:
    are hashed: export *after* placing the final runtime and any store library
    (`steam_api64.dll`, a key provider...), and export again whenever you change one.
 2. **Describe the batch** in `bc_tool` (or write a `.bcproj` file, below):
-   - *Source folder*: the root of your `.blend` tree.
-   - *Output*: mirror into an output folder (recommended), or next to the sources.
+   - *Source folder*: the root of your game sources (`.blend` files, Python modules, data files).
+   - *Output folder*: the game folder, always another folder than the sources (see *Output
+     folder*, below).
    - *Game name*: name of the game executable (`.exe` is added on Windows). Empty: the main file
      name.
    - *Check* (default *+ Python*): see *Integrity check*, below.
@@ -159,8 +160,8 @@ Platform notes:
    - *Player*: the player inside the game folder; `engine/blenderplayer(.exe)` by default.
    - *Main file*: the `.blend` the game starts.
    - *Files to encrypt*: files and folders, dragged and dropped on the window. Folders are scanned
-     recursively (hidden folders skipped) for `.blend` files and, with the mirror output, `.py`
-     modules and the files of the *Data files* extensions (for example `json csv`). A file listed
+     recursively (hidden folders skipped) for `.blend` files, `.py` modules and the files of the
+     *Data files* extensions (for example `json csv`). A file listed
      on its own is encrypted whatever its extension: `.blend` as a scene, `.py` as a module, any
      other as a data file.
 3. **Encrypt.** This writes the encrypted files and the game executable. Save the project to run
@@ -317,16 +318,14 @@ The provider runs as a separate process so it can link a store's proprietary SDK
 program cannot. Reference providers for Steam and Epic, a development provider, the key server and
 the protocol are in [`keyserver/`](keyserver/README.md), under the MIT license.
 
-### Output modes
+### Output folder
 
-- **Mirror** (recommended): the output folder receives an encrypted copy of the source tree with
-  the **same names**, so relative paths (`//levels/a.blend`), linked libraries, `LibLoad` and
-  `bge.logic.getBlendFileList()` keep working unchanged. The output folder is the game folder.
-- **Next to the sources**: each `name.blend` gets an encrypted `name.upbgebc` beside it, and the
-  source folder is the game folder. Linked libraries still point to `.blend` names and
-  `getBlendFileList()` only lists `.blend` files, so this mode suits single-file games, or games
-  that load their other files explicitly by their `.upbgebc` names. Only `.blend` files: a module
-  or a data file is opened by its own name, which an encrypted copy beside it cannot take.
+The output folder receives an encrypted copy of the source tree with the **same names**, so
+relative paths (`//levels/a.blend`), linked libraries, `LibLoad`, `bge.logic.getBlendFileList()`,
+`import` and the names of data files keep working unchanged. It is the game folder. It is always
+another folder than the sources: the source folder itself, or a folder that contains it, is
+refused, so an export never overwrites a source and the sources never ship by mistake. It may lie
+inside the source tree (its content is then skipped by the scan).
 
 Re-encrypting replaces outputs atomically: an interrupted batch never leaves a partial file. An
 output made from the same `.blend` with the same key is kept as it is: its header names the
@@ -351,8 +350,8 @@ Already compressed files (Blender's *Compress*, gzip) are sealed as they are.
 
 ### Python modules and data files
 
-With the mirror output, the `.py` files of the scanned folders are encrypted too, and so are the
-files of the *Data files* extensions (`data_extensions`): list the folders the game uses, not one
+The `.py` files of the scanned folders are encrypted too, and so are the files of the *Data
+files* extensions (`data_extensions`): list the folders the game uses, not one
 that also holds tools or add-ons. The game uses them as before:
 
 - **Modules** are imported with `import`, by Python components and by module mode Python
@@ -399,8 +398,7 @@ relative to the project file. Unknown keys are errors.
 ```ini
 version = 1
 source_root = src
-output_mode = mirror            # mirror | inplace
-output_dir = dist               # mirror only
+output_dir = dist               # the game folder; never the source folder or one around it
 game_name = MyGame              # optional, default: main file name
 manifest = embedded             # embedded | external (binarycrypt.manifest); default embedded
 icon = art/game.ico             # Windows, optional: icon of the game executable and window
@@ -418,9 +416,9 @@ key_update = 1                  # online, per_update: number of the update being
 integrity = python              # player | native (+ libraries) | python (default, + Python files)
 player = engine/blenderplayer.exe   # relative to the game folder
 main = src/game.blend
-data_extensions = json csv      # mirror, optional: folders also give these data files
-input = src                     # a folder (scanned for *.blend, and in mirror mode *.py and the
-                                #   data extensions) or a file of any kind; repeatable
+data_extensions = json csv      # optional: folders also give these data files
+input = src                     # a folder (scanned for *.blend, *.py and the data extensions)
+                                #   or a file of any kind; repeatable
 ```
 
 ## Game executable messages

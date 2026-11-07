@@ -858,13 +858,13 @@ static void bc_gui_draw(BC_Gui *g)
   /* Settings. */
   const bool online = g->project.key_mode == BC_KEY_ONLINE;
   const bool key_file_row = g->project.key_mode != BC_KEY_BUILD;
-  const float settings_h = (float)((online ? 13 : key_file_row ? 11 : 10) * (BC_ROW + BC_GAP) + 2 * BC_GAP);
+  const float settings_h = (float)((online ? 12 : key_file_row ? 10 : 9) * (BC_ROW + BC_GAP) + 2 * BC_GAP);
   bc_group_box(bc_rect(BC_MARGIN, y, inner, settings_h), "Settings");
   y += 2 * BC_GAP;
   bool committed;
   char resolved[BC_PATH_MAX];
 
-  if (bc_gui_path_row(y, inner, "Source folder", "Root of the source .blend tree", g->project.source_root, g->source_text, &g->source_edit, &committed)) {
+  if (bc_gui_path_row(y, inner, "Source folder", "Root of the game sources: .blend files, Python modules, data files", g->project.source_root, g->source_text, &g->source_edit, &committed)) {
     r = bc_dialog_pick_folder("Source folder", path, sizeof(path));
     if (r == BC_DIALOG_OK) {
       snprintf(g->project.source_root, sizeof(g->project.source_root), "%s", path);
@@ -883,22 +883,6 @@ static void bc_gui_draw(BC_Gui *g)
   }
   y += BC_ROW + BC_GAP;
 
-  GuiLabel(bc_rect(BC_MARGIN + BC_GAP, y, BC_LABEL_W, BC_ROW), "Output");
-  int mode = (int)g->project.output_mode;
-  const float toggle_w = (inner - BC_LABEL_W - 4 * BC_GAP) / 2;
-  GuiToggleGroup(bc_rect(BC_MARGIN + BC_GAP + BC_LABEL_W, y, toggle_w, BC_ROW),
-                 "Mirror into the output folder;Next to the sources (.upbgebc)",
-                 &mode);
-  if (mode != (int)g->project.output_mode) {
-    g->project.output_mode = (BC_OutputMode)mode;
-    bc_gui_set_modified(g);
-  }
-  y += BC_ROW + BC_GAP;
-
-  const bool inplace = g->project.output_mode == BC_OUTPUT_INPLACE;
-  if (inplace && !running) {
-    GuiDisable();
-  }
   if (bc_gui_path_row(y, inner, "Output folder", "Encrypted copy of the source tree, with the same names: this is the game folder you ship", g->project.output_dir, g->output_text, &g->output_edit, &committed)) {
     r = bc_dialog_pick_folder("Output folder", path, sizeof(path));
     if (r == BC_DIALOG_OK) {
@@ -913,9 +897,6 @@ static void bc_gui_draw(BC_Gui *g)
     bc_gui_resolve(g, g->output_text, resolved);
     snprintf(g->project.output_dir, sizeof(g->project.output_dir), "%s", resolved);
     bc_gui_set_modified(g);
-  }
-  if (inplace && !running) {
-    GuiEnable();
   }
   y += BC_ROW + BC_GAP;
 
@@ -1210,14 +1191,9 @@ static void bc_gui_draw(BC_Gui *g)
     y += BC_ROW + BC_GAP;
   }
 
-  /* Distribution root summary, or the inplace caveat. */
-  const int label_color = GuiGetStyle(LABEL, TEXT_COLOR_NORMAL);
-  char info[3 * BC_PATH_MAX];
-  if (inplace) {
-    GuiSetStyle(LABEL, TEXT_COLOR_NORMAL, BC_RGB(BC_RGB_WARNING));
-    snprintf(info, sizeof(info), "Linked libraries (//lib.blend) and getBlendFileList() only find .blend names: prefer mirror for multi-file games");
-  }
-  else {
+  /* Distribution root summary. */
+  {
+    char info[3 * BC_PATH_MAX];
     char folder[BC_PATH_MAX];
     char player_dir[BC_PATH_MAX];
     char contents[BC_PATH_MAX + BC_GAME_NAME_MAX + 64];
@@ -1235,9 +1211,8 @@ static void bc_gui_draw(BC_Gui *g)
                           MeasureTextEx(GuiGetFont(), "Game folder: ", BC_TEXT_SIZE, text_spacing_info).x;
     bc_fit_left(g->project.output_dir[0] ? g->project.output_dir : "-", inner - 4 * BC_GAP - fixed_w, folder, sizeof(folder));
     snprintf(info, sizeof(info), "Game folder: %s%s", folder, contents);
+    GuiLabel(bc_rect(BC_MARGIN + BC_GAP, y, inner - 2 * BC_GAP, BC_ROW), info);
   }
-  GuiLabel(bc_rect(BC_MARGIN + BC_GAP, y, inner - 2 * BC_GAP, BC_ROW), info);
-  GuiSetStyle(LABEL, TEXT_COLOR_NORMAL, label_color);
   y += BC_ROW + 3 * BC_GAP;
 
   /* Files. */
@@ -1260,17 +1235,12 @@ static void bc_gui_draw(BC_Gui *g)
                 &g->list_active,
                 &g->list_focus);
   {
-    /* Below the list, as wide: what else the folders give. Next to the sources a module or a data
-     * file would need another name, so the field only applies to the mirror output. */
+    /* Below the list, as wide: what else the folders give. */
     const float data_y = list_y + list_h + BC_GAP;
     const float label_w = MeasureTextEx(GuiGetFont(), "Data files", BC_TEXT_SIZE, text_spacing).x + 3 * BC_GAP;
-    const bool data_off = inplace && !running;
-    if (data_off) {
-      GuiDisable();
-    }
     GuiLabel(bc_rect(list_x, data_y, label_w, BC_ROW), "Data files");
     if (bc_gui_text_field(bc_rect(list_x + label_w, data_y, list_w - label_w, BC_ROW),
-                          "Extensions of the data files the folders also give, encrypted too (for example: json txt csv). The game reads them with bge.logic.decryptFile(path). Python modules (.py) are always encrypted. Mirror output only",
+                          "Extensions of the data files the folders also give, encrypted too (for example: json txt csv). The game reads them with bge.logic.decryptFile(path). Python modules (.py) are always encrypted",
                           g->data_text,
                           sizeof(g->data_text),
                           g->project.data_extensions,
@@ -1278,9 +1248,6 @@ static void bc_gui_draw(BC_Gui *g)
                           &g->data_edit))
     {
       bc_gui_set_modified(g);
-    }
-    if (data_off) {
-      GuiEnable();
     }
   }
   const float bx = list_x + list_w + BC_GAP;
