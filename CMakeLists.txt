@@ -10,6 +10,12 @@ set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/cmake")
 option(BINARYCRYPT_BUILD_GUI "Build the bc_tool editor (raylib + raygui). OFF: command line only" ON)
 option(BINARYCRYPT_FETCH_RAYLIB "Download and build raylib 5.5 when no installed raylib is found" ON)
 option(BINARYCRYPT_FETCH_ZSTD "Download and build zstd 1.5.7 when no installed zstd is found" ON)
+set(BINARYCRYPT_MANIFEST_FILENAME "binarycrypt.manifest" CACHE STRING
+  "File name of the external manifest next to the game executable (bc_tool and bc_launcher of one build share it)")
+# It becomes a C string literal and a file name in the game folder: a plain name, never a path.
+if(NOT BINARYCRYPT_MANIFEST_FILENAME MATCHES "^[A-Za-z0-9_][A-Za-z0-9._-]*$")
+  message(FATAL_ERROR "BINARYCRYPT_MANIFEST_FILENAME must be a plain file name: letters, digits, '.', '_' and '-', not starting with '.'")
+endif()
 set(BINARYCRYPT_KEY_FILE "" CACHE FILEPATH
   "File holding a fixed key (64 hex digits, see bc_tool --export-key). Empty: random key per clean build")
 
@@ -105,6 +111,8 @@ add_library(bc_core STATIC
   common/bc_seal.c
 )
 target_include_directories(bc_core PUBLIC common)
+# Public: the tool writes the external manifest under this name, the launcher reads it.
+target_compile_definitions(bc_core PUBLIC BC_MANIFEST_FILENAME="${BINARYCRYPT_MANIFEST_FILENAME}")
 target_link_libraries(bc_core PUBLIC monocypher blake3 PRIVATE ${BC_ZSTD})
 target_compile_options(bc_core PRIVATE ${BC_WARNINGS})
 if(WIN32)
@@ -299,6 +307,7 @@ if(BUILD_TESTING)
       -DBC_TESTS=$<TARGET_FILE:bc_tests>
       -DBC_PROVIDER=$<TARGET_FILE:bc_fake_provider>
       -DBC_EXE_SUFFIX=${CMAKE_EXECUTABLE_SUFFIX}
+      -DBC_MANIFEST_NAME=${BINARYCRYPT_MANIFEST_FILENAME}
       "-DBC_RUNNER=${CMAKE_CROSSCOMPILING_EMULATOR}"
       -DBC_WORK=${CMAKE_CURRENT_BINARY_DIR}/test_work/end_to_end
       -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/end_to_end.cmake

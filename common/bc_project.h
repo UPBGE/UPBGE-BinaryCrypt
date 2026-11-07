@@ -8,7 +8,7 @@
  *   output_dir = dist             # the game folder: encrypted copy of the tree, same names
  *   game_name = MyGame            # game executable name (".exe" added on Windows); optional,
  *                                 # defaults to the main file name without ".blend"
- *   manifest = embedded           # embedded | external (binarycrypt.manifest next to the game
+ *   manifest = embedded           # embedded | external (BC_MANIFEST_FILENAME next to the game
  *                                 # executable, which stays a byte-identical launcher copy)
  *   icon = game.ico               # Windows: icon of the game executable and window; optional
  *   game_version = 1.2.0          # Windows version information, all three optional. Setting

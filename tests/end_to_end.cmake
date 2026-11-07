@@ -5,8 +5,8 @@
 # the decrypted main file. bc_tool finds bc_launcher next to itself.
 # Inputs: BC_TOOL, BC_PLAYER (bc_fake_player), BC_TESTS (writes a test icon, scans files for a
 # key), BC_PROVIDER
-# (bc_fake_provider), BC_EXE_SUFFIX, BC_WORK, and BC_RUNNER (the cross compiling emulator, e.g.
-# wine; empty for native builds).
+# (bc_fake_provider), BC_EXE_SUFFIX, BC_MANIFEST_NAME (BINARYCRYPT_MANIFEST_FILENAME), BC_WORK,
+# and BC_RUNNER (the cross compiling emulator, e.g. wine; empty for native builds).
 
 cmake_minimum_required(VERSION 3.16)
 
@@ -204,7 +204,9 @@ file(WRITE "${BC_WORK}/external.bcproj" "${project}manifest = external\n")
 bc_run(TRUE "${BC_TOOL}" --batch "${BC_WORK}/external.bcproj")
 file(GLOB root_entries RELATIVE "${DIST}" "${DIST}/*")
 list(SORT root_entries)
-if(NOT root_entries STREQUAL "${game};binarycrypt.manifest;engine;game.blend;levels")
+set(expected_entries "${game};${BC_MANIFEST_NAME};engine;game.blend;levels")
+list(SORT expected_entries)
+if(NOT root_entries STREQUAL expected_entries)
   message(FATAL_ERROR "unexpected external manifest game folder: ${root_entries}")
 endif()
 file(SHA256 "${DIST}/${game}" game_hash)
@@ -214,18 +216,18 @@ if(NOT game_hash STREQUAL launcher_hash)
 endif()
 bc_run(TRUE "${DIST}/${game}")
 bc_expect_output("decrypted correctly")
-file(RENAME "${DIST}/binarycrypt.manifest" "${BC_WORK}/saved.manifest")
+file(RENAME "${DIST}/${BC_MANIFEST_NAME}" "${BC_WORK}/saved.manifest")
 bc_run(FALSE "${DIST}/${game}")
-bc_expect_output("no binarycrypt.manifest")
-file(WRITE "${DIST}/binarycrypt.manifest" "UPBGEBCM forged")
+bc_expect_output("no ${BC_MANIFEST_NAME}")
+file(WRITE "${DIST}/${BC_MANIFEST_NAME}" "UPBGEBCM forged")
 bc_run(FALSE "${DIST}/${game}")
 bc_expect_output("manifest is corrupt")
-file(RENAME "${BC_WORK}/saved.manifest" "${DIST}/binarycrypt.manifest")
+file(RENAME "${BC_WORK}/saved.manifest" "${DIST}/${BC_MANIFEST_NAME}")
 bc_run(TRUE "${DIST}/${game}")
 # Back to embedded: the stale manifest file is removed.
 bc_run(TRUE "${BC_TOOL}" --batch "${BC_WORK}/game.bcproj")
-if(EXISTS "${DIST}/binarycrypt.manifest")
-  message(FATAL_ERROR "embedded export left the old binarycrypt.manifest")
+if(EXISTS "${DIST}/${BC_MANIFEST_NAME}")
+  message(FATAL_ERROR "embedded export left the old ${BC_MANIFEST_NAME}")
 endif()
 bc_run(TRUE "${DIST}/${game}")
 

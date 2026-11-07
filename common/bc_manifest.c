@@ -207,7 +207,7 @@ const char *bc_manifest_result_string(const BC_ManifestResult result)
     case BC_MANIFEST_IO_ERROR:
       return "the game executable or its manifest cannot be read";
     case BC_MANIFEST_MISSING:
-      return "this executable carries no game and there is no binarycrypt.manifest next to it: "
+      return "this executable carries no game and there is no " BC_MANIFEST_FILENAME " next to it: "
              "export the game with bc_tool";
     case BC_MANIFEST_BAD_FORMAT:
       return "the game manifest is corrupt";

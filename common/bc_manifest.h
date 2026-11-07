@@ -75,6 +75,13 @@ extern "C" {
 /* Domain separation: the MAC key is the build key, so the input is prefixed with a context that
  * no other keyed BLAKE2b in the system uses. */
 #define BC_MANIFEST_CONTEXT "UPBGE-BinaryCrypt manifest v1"
+/* External manifest next to the game executable. Chosen at build time
+ * (BINARYCRYPT_MANIFEST_FILENAME): the launcher must find it before it has read anything, and with
+ * the external manifest the game executable is a byte-identical launcher copy, so the name cannot
+ * travel with the game. */
+#ifndef BC_MANIFEST_FILENAME
+#  define BC_MANIFEST_FILENAME "binarycrypt.manifest"
+#endif
 
 typedef struct BC_Manifest {
   uint8_t player_hash[BC_PLAYER_HASH_SIZE];

@@ -31,7 +31,6 @@
 extern "C" {
 #endif
 
-#define BC_MANIFEST_FILENAME "binarycrypt.manifest"
 #define BC_EMBED_MAGIC "UPBGEBCX"
 #define BC_EMBED_TRAILER_SIZE 16
 #define BC_EMBED_ALIGNMENT 8

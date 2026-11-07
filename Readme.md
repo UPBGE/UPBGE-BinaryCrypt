@@ -108,6 +108,7 @@ Platform notes:
 | `BINARYCRYPT_BUILD_GUI` | `ON` | `OFF` builds a command-line-only `bc_tool` (no raylib), e.g. for CI. |
 | `BINARYCRYPT_FETCH_RAYLIB` | `ON` | Download raylib 5.5 when it is not installed. |
 | `BINARYCRYPT_FETCH_ZSTD` | `ON` | Download zstd 1.5.7 when it is not installed. |
+| `BINARYCRYPT_MANIFEST_FILENAME` | `binarycrypt.manifest` | Name of the external manifest file. `bc_tool` and `bc_launcher` of one build share it; a plain file name. |
 | `BINARYCRYPT_KEY_FILE` | empty | Build with a fixed key instead of a random one (see below). |
 | `BINARYCRYPT_HOST_KEYGEN` | empty | Host `bc_keygen` executable, required when cross compiling. |
 
@@ -224,7 +225,7 @@ scripts at every launch, as it already does in a read-only one.
 | Game folder | one executable | executable + `binarycrypt.manifest` |
 | Code signing | sign every exported game executable | sign `bc_launcher` once, before exporting (unless the game has an icon or version information) |
 | `strip`, UPX, macOS `codesign` on the exported executable | drop or reject the appended manifest: apply them to `bc_launcher` before exporting | harmless: the executable is a plain launcher |
-| Games per folder | any | one (the file name is fixed, so renaming the executable keeps working) |
+| Games per folder | any | one (the file name is fixed by the build, `BINARYCRYPT_MANIFEST_FILENAME`, so renaming the executable keeps working) |
 
 Both are equally protected: the manifest is authenticated with the key either way, so it can be
 neither edited nor forged. The launcher looks inside itself first and only reads
