@@ -1141,7 +1141,8 @@ static void test_compress(void)
                              (uint32_t)table[8 * i + 2] << 16 | (uint32_t)table[8 * i + 3] << 24;
       const uint32_t usize = (uint32_t)table[8 * i + 4] | (uint32_t)table[8 * i + 5] << 8 |
                              (uint32_t)table[8 * i + 6] << 16 | (uint32_t)table[8 * i + 7] << 24;
-      CHECK(usize == (i < 2 ? BC_COMPRESS_FRAME_SIZE : BC_COMPRESS_FRAME_SIZE / 2));
+      const uint32_t expected = i < 2 ? BC_COMPRESS_FRAME_SIZE : BC_COMPRESS_FRAME_SIZE / 2;
+      CHECK(usize == expected);
       const size_t n1 = ZSTD_decompress(unpacked, size, z + offset, csize);
       CHECK(!ZSTD_isError(n1) && n1 == usize && memcmp(unpacked, src + plain_offset, usize) == 0);
       offset += csize;
