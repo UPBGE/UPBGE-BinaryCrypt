@@ -25,9 +25,9 @@
  *   key_cache = none              # online: none | permanent (kept after the first launch)
  *   key_rotation = off            # online: off (one key) | per_update (a new key per update,
  *   key_update = 1                # unchanged files keep theirs); key_update numbers the update
- *   integrity = native            # what the game executable checks before every launch:
- *                                 # player | native (default: + every .dll, .so, .dylib, .pyd,
- *                                 # .exe of the game folder) | python (+ .py, .pyw, .pth, .zip;
+ *   integrity = python            # what the game executable checks before every launch:
+ *                                 # player | native (+ every .dll, .so, .dylib, .pyd, .exe of the
+ *                                 # game folder) | python (default: + .py, .pyw, .pth, .zip;
  *                                 # Python bytecode removed) (bc_native.h)
  *   player = engine/blenderplayer.exe  # relative to the distribution root, hashed by the tool
  *   main = game.blend             # the blend the game executable starts

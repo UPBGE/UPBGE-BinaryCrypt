@@ -3,7 +3,8 @@
 /* Test stand-in for the UPBGE player. Follows the player side of the launcher contract
  * (binarycrypt_format.h): reads the keys from the pipe named by UPBGE_BC_KEY_PIPE up to end of
  * file, then checks that the main file it was given decrypts, with the key its header names, to
- * the file named by BC_TEST_EXPECTED.
+ * the file named by BC_TEST_EXPECTED (decompressed first when the export compressed it, as
+ * Blender's reader does).
  *
  * Exit codes: 0 ok, 10 no key pipe, 11 key read failed, 12 decryption failed, 13 unexpected
  * arguments (the launcher must pass exactly one: the main file), 14 content mismatch, 15 a handle
@@ -24,6 +25,8 @@
 #endif
 
 #include "bc_test_decrypt.h"
+
+#include <zstd.h>
 
 /** \return the number of whole keys read, 0 on a malformed hand-off. */
 static int bc_read_keys(const char *value, uint8_t keys[BC_KEYS_MAX][BC_KEY_SIZE])
@@ -104,6 +107,14 @@ int main(int argc, char **argv)
   const char *expected_path = getenv("BC_TEST_EXPECTED");
   const bool loaded = expected_path != NULL &&
                       bc_test_read_file(expected_path, &expected, &expected_size);
+  if (loaded && plain_size >= 4 && plain[0] == 0x28 && plain[1] == 0xb5 && plain[2] == 0x2f && plain[3] == 0xfd) {
+    /* Every frame and the skippable seek table frame, in one call. */
+    uint8_t *unpacked = (uint8_t *)malloc((size_t)expected_size + 1);
+    const size_t n = unpacked ? ZSTD_decompress(unpacked, (size_t)expected_size + 1, plain, (size_t)plain_size) : 0;
+    free(plain);
+    plain = unpacked;
+    plain_size = (unpacked != NULL && !ZSTD_isError(n)) ? n : 0;
+  }
   const bool match = loaded && expected_size == plain_size &&
                      memcmp(expected, plain, (size_t)plain_size) == 0;
   free(plain);

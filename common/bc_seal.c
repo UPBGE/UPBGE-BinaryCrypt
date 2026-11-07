@@ -59,12 +59,14 @@ bool bc_seal_begin(BC_Sealer *s,
                    const char *in_path,
                    const char *out_path,
                    const uint8_t plain_hash[BC_PLAIN_HASH_SIZE],
+                   const uint8_t source_hash[BC_PLAIN_HASH_SIZE],
                    char *err,
                    size_t err_size)
 {
   memset(s, 0, sizeof(*s));
   s->key = key;
   memcpy(s->plain_hash, plain_hash, BC_PLAIN_HASH_SIZE);
+  memcpy(s->source_hash, source_hash, BC_PLAIN_HASH_SIZE);
   crypto_blake2b_init(&s->hash, BC_PLAIN_HASH_SIZE);
   snprintf(s->in_path, sizeof(s->in_path), "%s", in_path);
 
@@ -100,7 +102,7 @@ bool bc_seal_begin(BC_Sealer *s,
   rewind(s->in);
   setvbuf(s->in, NULL, _IOFBF, BC_IO_BUFFER_SIZE);
 
-  bc_seal_header(key, plain_size, plain_hash, &s->header);
+  bc_seal_header(key, plain_size, plain_hash, source_hash, &s->header);
   bc_header_write(&s->header, s->header_raw);
   s->chunk_count = bc_chunk_count(&s->header);
 
@@ -216,9 +218,21 @@ bool bc_hash_file(const char *path, uint8_t r_hash[BC_PLAIN_HASH_SIZE])
   return ok;
 }
 
+static void bc_source_id(const uint8_t key[BC_KEY_SIZE],
+                         const uint8_t source_hash[BC_PLAIN_HASH_SIZE],
+                         uint8_t r_id[BC_SOURCE_ID_SIZE])
+{
+  crypto_blake2b_ctx ctx;
+  crypto_blake2b_keyed_init(&ctx, BC_SOURCE_ID_SIZE, key, BC_KEY_SIZE);
+  crypto_blake2b_update(&ctx, (const uint8_t *)BC_SOURCE_ID_CONTEXT, sizeof(BC_SOURCE_ID_CONTEXT) - 1);
+  crypto_blake2b_update(&ctx, source_hash, BC_PLAIN_HASH_SIZE);
+  crypto_blake2b_final(&ctx, r_id);
+}
+
 void bc_seal_header(const uint8_t key[BC_KEY_SIZE],
                     const uint64_t plain_size,
                     const uint8_t plain_hash[BC_PLAIN_HASH_SIZE],
+                    const uint8_t source_hash[BC_PLAIN_HASH_SIZE],
                     BC_Header *r_header)
 {
   memset(r_header, 0, sizeof(*r_header));
@@ -226,6 +240,7 @@ void bc_seal_header(const uint8_t key[BC_KEY_SIZE],
   r_header->chunk_log2 = BC_CHUNK_LOG2_DEFAULT;
   r_header->plain_size = plain_size;
   bc_key_id(key, r_header->key_id);
+  bc_source_id(key, source_hash, r_header->source_id);
   /* Nonce prefix = keyed BLAKE2b over every header field (nonce still zero) and the plaintext
    * hash: equal only for the same plaintext sealed the same way. */
   uint8_t raw[BC_HEADER_SIZE];
@@ -240,24 +255,27 @@ void bc_seal_header(const uint8_t key[BC_KEY_SIZE],
 
 bool bc_seal_output_is_current(const uint8_t key[BC_KEY_SIZE],
                                const char *out_path,
-                               const uint64_t plain_size,
-                               const uint8_t plain_hash[BC_PLAIN_HASH_SIZE])
+                               const uint8_t source_hash[BC_PLAIN_HASH_SIZE])
 {
-  BC_Header expected;
-  uint8_t expected_raw[BC_HEADER_SIZE], raw[BC_HEADER_SIZE];
+  uint8_t raw[BC_HEADER_SIZE], key_id[BC_KEY_ID_SIZE], source_id[BC_SOURCE_ID_SIZE];
   uint64_t size;
-  bc_seal_header(key, plain_size, plain_hash, &expected);
-  bc_header_write(&expected, expected_raw);
-  if (!bc_file_size(out_path, &size) || size != bc_container_size(&expected)) {
-    return false;
-  }
   FILE *f = bc_fopen(out_path, "rb");
   if (f == NULL) {
     return false;
   }
   const size_t n = fread(raw, 1, sizeof(raw), f);
   fclose(f);
-  return n == sizeof(raw) && memcmp(raw, expected_raw, sizeof(raw)) == 0;
+  BC_Header header;
+  if (n != sizeof(raw) || bc_header_read(raw, &header) != BC_HEADER_OK ||
+      header.chunk_log2 != BC_CHUNK_LOG2_DEFAULT || !bc_file_size(out_path, &size) ||
+      size != bc_container_size(&header))
+  {
+    return false;
+  }
+  bc_key_id(key, key_id);
+  bc_source_id(key, source_hash, source_id);
+  return memcmp(header.key_id, key_id, BC_KEY_ID_SIZE) == 0 &&
+         memcmp(header.source_id, source_id, BC_SOURCE_ID_SIZE) == 0;
 }
 
 bool bc_file_is_container(const char *path)

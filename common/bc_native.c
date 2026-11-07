@@ -6,7 +6,14 @@
 #include <string.h>
 
 #include "bc_platform.h"
-#include "monocypher.h"
+#include "blake3.h"
+
+#ifdef _WIN32
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  include <windows.h>
+#endif
 
 /* Deep enough for any real install (Python packages nest about 10 levels), shallow enough that a
  * crafted tree cannot exhaust the stack. */
@@ -109,31 +116,71 @@ static bool bc_same_path(const char *a, const char *b)
 }
 
 typedef struct BC_NativeWalk {
-  crypto_blake2b_ctx ctx;
+  blake3_hasher digest;
+  blake3_hasher file;
   const char *const *skip;
   int skip_count;
   /** NULL: removal only, nothing is hashed. */
   uint8_t *buffer;
   bool python;
+  BC_NativeHold *hold;
   BC_NativeScan scan;
 } BC_NativeWalk;
 
+#ifdef _WIN32
+/** Hash through a handle that denies writing and deleting to everyone, and keep it in the hold:
+ * the file cannot change between this check and the player loading it. */
+static bool bc_native_file_hash_held(BC_NativeWalk *w, const char *path, uint8_t r_hash[32])
+{
+  if (w->hold->count == w->hold->capacity) {
+    const int capacity = w->hold->capacity ? 2 * w->hold->capacity : 256;
+    void **handles = (void **)realloc(w->hold->handles, (size_t)capacity * sizeof(void *));
+    if (handles == NULL) {
+      return false;
+    }
+    w->hold->handles = handles;
+    w->hold->capacity = capacity;
+  }
+  wchar_t *wpath = bc_utf16(path);
+  HANDLE h = wpath ? CreateFileW(wpath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, NULL) :
+                     INVALID_HANDLE_VALUE;
+  free(wpath);
+  if (h == INVALID_HANDLE_VALUE) {
+    return false;
+  }
+  w->hold->handles[w->hold->count++] = h;
+  blake3_hasher_init(&w->file);
+  DWORD n = 0;
+  bool ok;
+  while ((ok = ReadFile(h, w->buffer, BC_NATIVE_READ_SIZE, &n, NULL) != 0) && n > 0) {
+    blake3_hasher_update(&w->file, w->buffer, n);
+    w->scan.bytes += n;
+  }
+  blake3_hasher_finalize(&w->file, r_hash, 32);
+  return ok;
+}
+#endif
+
 static bool bc_native_file_hash(BC_NativeWalk *w, const char *path, uint8_t r_hash[32])
 {
+#ifdef _WIN32
+  if (w->hold != NULL) {
+    return bc_native_file_hash_held(w, path, r_hash);
+  }
+#endif
   FILE *f = bc_fopen(path, "rb");
   if (f == NULL) {
     return false;
   }
-  crypto_blake2b_ctx ctx;
-  crypto_blake2b_init(&ctx, 32);
+  blake3_hasher_init(&w->file);
   size_t n;
   while ((n = fread(w->buffer, 1, BC_NATIVE_READ_SIZE, f)) > 0) {
-    crypto_blake2b_update(&ctx, w->buffer, n);
+    blake3_hasher_update(&w->file, w->buffer, n);
     w->scan.bytes += n;
   }
   const bool ok = ferror(f) == 0;
   fclose(f);
-  crypto_blake2b_final(&ctx, r_hash);
+  blake3_hasher_finalize(&w->file, r_hash, 32);
   return ok;
 }
 
@@ -185,8 +232,8 @@ static bool bc_native_walk(BC_NativeWalk *w, const char *dir, const char *rel, c
     ok = bc_native_file_hash(w, path, hash);
     if (ok) {
       /* The NUL ends the path, so "a" + hash can never read as a longer path. */
-      crypto_blake2b_update(&w->ctx, (const uint8_t *)sub, strlen(sub) + 1);
-      crypto_blake2b_update(&w->ctx, hash, sizeof(hash));
+      blake3_hasher_update(&w->digest, sub, strlen(sub) + 1);
+      blake3_hasher_update(&w->digest, hash, sizeof(hash));
       w->scan.files++;
     }
   }
@@ -197,6 +244,35 @@ static bool bc_native_walk(BC_NativeWalk *w, const char *dir, const char *rel, c
   return ok;
 }
 
+bool bc_native_digest_held(const char *root,
+                           const char *const *skip,
+                           const int skip_count,
+                           const bool python,
+                           uint8_t r_digest[BC_NATIVE_DIGEST_SIZE],
+                           BC_NativeScan *r_scan,
+                           BC_NativeHold *hold)
+{
+  /* Its scan holds a path and its hashers about 4 KiB: keep it off the stack. Single threaded. */
+  static BC_NativeWalk w;
+  memset(&w, 0, sizeof(w));
+  w.skip = skip;
+  w.skip_count = skip_count;
+  w.python = python;
+  w.hold = hold;
+  w.buffer = (uint8_t *)malloc(BC_NATIVE_READ_SIZE);
+  if (w.buffer == NULL) {
+    return false;
+  }
+  blake3_hasher_init_derive_key(&w.digest, BC_NATIVE_CONTEXT);
+  const bool ok = bc_native_walk(&w, root, "", 0);
+  blake3_hasher_finalize(&w.digest, r_digest, BC_NATIVE_DIGEST_SIZE);
+  free(w.buffer);
+  if (r_scan != NULL) {
+    *r_scan = w.scan;
+  }
+  return ok;
+}
+
 bool bc_native_digest(const char *root,
                       const char *const *skip,
                       const int skip_count,
@@ -204,24 +280,20 @@ bool bc_native_digest(const char *root,
                       uint8_t r_digest[BC_NATIVE_DIGEST_SIZE],
                       BC_NativeScan *r_scan)
 {
-  static BC_NativeWalk w; /* Its scan holds a path: keep it off the stack. Single threaded. */
-  memset(&w, 0, sizeof(w));
-  w.skip = skip;
-  w.skip_count = skip_count;
-  w.python = python;
-  w.buffer = (uint8_t *)malloc(BC_NATIVE_READ_SIZE);
-  if (w.buffer == NULL) {
-    return false;
+  return bc_native_digest_held(root, skip, skip_count, python, r_digest, r_scan, NULL);
+}
+
+void bc_native_release(BC_NativeHold *hold)
+{
+#ifdef _WIN32
+  for (int i = 0; i < hold->count; i++) {
+    CloseHandle((HANDLE)hold->handles[i]);
   }
-  crypto_blake2b_init(&w.ctx, BC_NATIVE_DIGEST_SIZE);
-  crypto_blake2b_update(&w.ctx, (const uint8_t *)BC_NATIVE_CONTEXT, sizeof(BC_NATIVE_CONTEXT) - 1);
-  const bool ok = bc_native_walk(&w, root, "", 0);
-  crypto_blake2b_final(&w.ctx, r_digest);
-  free(w.buffer);
-  if (r_scan != NULL) {
-    *r_scan = w.scan;
-  }
-  return ok;
+#endif
+  free(hold->handles);
+  hold->handles = NULL;
+  hold->count = 0;
+  hold->capacity = 0;
 }
 
 bool bc_remove_bytecode(const char *root, BC_NativeScan *r_scan)

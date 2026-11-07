@@ -10,7 +10,7 @@ void bc_project_init(BC_Project *p)
   memset(p, 0, sizeof(*p));
   p->output_mode = BC_OUTPUT_MIRROR;
   p->key_mode = BC_KEY_PROJECT;
-  p->integrity = BC_INTEGRITY_NATIVE;
+  p->integrity = BC_INTEGRITY_PYTHON;
 }
 
 bool bc_project_key_file(const BC_Project *p, char *out, const size_t size)

@@ -60,7 +60,7 @@ extern "C" {
  * 8 byte magic is validated by #bc_header_read. */
 #define BC_MAGIC_SNIFF_SIZE 7
 
-#define BC_FORMAT_VERSION 1
+#define BC_FORMAT_VERSION 2
 
 #define BC_HEADER_SIZE 64
 #define BC_KEY_SIZE 32
@@ -68,6 +68,7 @@ extern "C" {
 #define BC_NONCE_SIZE 24
 #define BC_NONCE_PREFIX_SIZE 16
 #define BC_KEY_ID_SIZE 8
+#define BC_SOURCE_ID_SIZE 16
 /** Keys one launch can hand over: the player keeps them in a fixed table, searched per file open. */
 #define BC_KEYS_MAX 64
 
@@ -97,7 +98,10 @@ extern "C" {
 #define BC_OFS_PLAIN_SIZE 16   /* u64 */
 #define BC_OFS_KEY_ID 24       /* 8 bytes */
 #define BC_OFS_NONCE_PREFIX 32 /* 16 bytes */
-#define BC_OFS_RESERVED1 48    /* 16 bytes, must be 0 */
+/* 16 bytes, opaque to readers (authenticated like every header byte): the writer's commitment to
+ * the file it sealed, which may differ from the plaintext (a .blend compressed while sealing). It
+ * lets the writer tell an up-to-date container from its source without reading the payload. */
+#define BC_OFS_SOURCE_ID 48
 
 typedef struct BC_Header {
   uint16_t version;
@@ -106,6 +110,7 @@ typedef struct BC_Header {
   uint64_t plain_size;
   uint8_t key_id[BC_KEY_ID_SIZE];
   uint8_t nonce_prefix[BC_NONCE_PREFIX_SIZE];
+  uint8_t source_id[BC_SOURCE_ID_SIZE];
 } BC_Header;
 
 typedef enum BC_HeaderResult {
@@ -168,11 +173,13 @@ static inline void bc_header_write(const BC_Header *header, uint8_t out[BC_HEADE
   bc_store_u64(out + BC_OFS_PLAIN_SIZE, header->plain_size);
   memcpy(out + BC_OFS_KEY_ID, header->key_id, BC_KEY_ID_SIZE);
   memcpy(out + BC_OFS_NONCE_PREFIX, header->nonce_prefix, BC_NONCE_PREFIX_SIZE);
+  memcpy(out + BC_OFS_SOURCE_ID, header->source_id, BC_SOURCE_ID_SIZE);
 }
 
 /**
- * Parse and validate a stored header. Strict on every field: reserved bytes and flags must be
- * zero so a future version can give them meaning without old readers misinterpreting files.
+ * Parse and validate a stored header. Strict on every field but the source id: reserved bytes and
+ * flags must be zero so a future version can give them meaning without old readers
+ * misinterpreting files.
  * An empty payload is rejected because the header is only authenticated through the chunks.
  */
 static inline BC_HeaderResult bc_header_read(const uint8_t in[BC_HEADER_SIZE], BC_Header *header)
@@ -189,10 +196,11 @@ static inline BC_HeaderResult bc_header_read(const uint8_t in[BC_HEADER_SIZE], B
   header->plain_size = bc_load_u64(in + BC_OFS_PLAIN_SIZE);
   memcpy(header->key_id, in + BC_OFS_KEY_ID, BC_KEY_ID_SIZE);
   memcpy(header->nonce_prefix, in + BC_OFS_NONCE_PREFIX, BC_NONCE_PREFIX_SIZE);
+  memcpy(header->source_id, in + BC_OFS_SOURCE_ID, BC_SOURCE_ID_SIZE);
 
   if (header->chunk_log2 < BC_CHUNK_LOG2_MIN || header->chunk_log2 > BC_CHUNK_LOG2_MAX ||
       header->flags != 0 || header->plain_size == 0 || header->plain_size > BC_PLAIN_SIZE_MAX ||
-      !bc_is_zero(in + BC_OFS_RESERVED0, 4) || !bc_is_zero(in + BC_OFS_RESERVED1, 16))
+      !bc_is_zero(in + BC_OFS_RESERVED0, 4))
   {
     return BC_HEADER_CORRUPT;
   }

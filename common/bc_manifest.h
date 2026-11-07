@@ -2,7 +2,7 @@
 
 /* Manifest: written by the tool into the game executable (see bc_embed.h), read by the launcher.
  *
- * It names the player executable to run, its expected BLAKE2b hash and the main blend file, says
+ * It names the player executable to run, its expected BLAKE3 hash and the main blend file, says
  * where the content key comes from (the project key stored here, a key server through a provider
  * (bc_envelope.h), or the build key itself), and is authenticated with the build key. Editing it
  * (for example to accept a modified player that dumps decrypted data) requires the key, so the
@@ -17,7 +17,7 @@
  *   14   2  flags (BC_MANIFEST_ONLINE_KEY, BC_MANIFEST_KEY_CACHE, BC_MANIFEST_PROJECT_KEY,
  *           BC_MANIFEST_NATIVE_DIGEST, BC_MANIFEST_PYTHON_CHECK)
  *   16   8  key id of the build key (see bc_key_id)
- *   24  32  BLAKE2b-256 of the player executable
+ *   24  32  BLAKE3-256 of the player executable
  *   56   2  number K of content keys (online: 1..BC_KEYS_MAX, project key: 1, build key: 0)
  *   58   6  reserved, 0
  *   64   2  provider path length V (online key only, else 0)

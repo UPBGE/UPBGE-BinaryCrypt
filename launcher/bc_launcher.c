@@ -29,6 +29,7 @@
 #include "bc_native.h"
 #include "bc_online.h"
 #include "bc_platform.h"
+#include "blake3.h"
 
 #ifdef _WIN32
 #  ifndef WIN32_LEAN_AND_MEAN
@@ -121,8 +122,9 @@ static bool bc_player_hash(BC_PlayerFile file, uint8_t hash[BC_PLAYER_HASH_SIZE]
   if (buffer == NULL) {
     return false;
   }
-  crypto_blake2b_ctx ctx;
-  crypto_blake2b_init(&ctx, BC_PLAYER_HASH_SIZE);
+  /* Static: the hasher's chunk stack is about 2 KiB. Single threaded. */
+  static blake3_hasher hasher;
+  blake3_hasher_init(&hasher);
   bool ok = true;
   for (;;) {
 #ifdef _WIN32
@@ -144,9 +146,9 @@ static bool bc_player_hash(BC_PlayerFile file, uint8_t hash[BC_PLAYER_HASH_SIZE]
     if (n == 0) {
       break;
     }
-    crypto_blake2b_update(&ctx, buffer, (size_t)n);
+    blake3_hasher_update(&hasher, buffer, (size_t)n);
   }
-  crypto_blake2b_final(&ctx, hash);
+  blake3_hasher_finalize(&hasher, hash, BC_PLAYER_HASH_SIZE);
   free(buffer);
   return ok;
 }
@@ -567,6 +569,8 @@ int main(int argc, char **argv)
                    player_path);
   }
   const bool python_check = (manifest.flags & BC_MANIFEST_PYTHON_CHECK) != 0;
+  /* Every checked file stays open until the player exits (Windows: nobody can replace it). */
+  BC_NativeHold hold = {NULL, 0, 0};
   if (manifest.flags & BC_MANIFEST_NATIVE_DIGEST) {
     /* The player loads more code from this folder (its libraries, Python extension modules and,
      * at the Python level, Python modules), all of it running with the keys in memory. */
@@ -575,8 +579,9 @@ int main(int argc, char **argv)
     uint8_t digest[BC_NATIVE_DIGEST_SIZE];
     static BC_NativeScan scan;
     if (!bc_path_relative(exe_rel, sizeof(exe_rel), dir, exe) ||
-        !bc_native_digest(dir, skip, 2, python_check, digest, &scan))
+        !bc_native_digest_held(dir, skip, 2, python_check, digest, &scan, &hold))
     {
+      bc_native_release(&hold);
       bc_player_close(player);
       if (scan.locked[0] != '\0') {
         /* The export left no bytecode and the player could not have written this one here. */
@@ -587,6 +592,7 @@ int main(int argc, char **argv)
       return bc_fail("cannot read the game folder '%s'", dir);
     }
     if (crypto_verify32(digest, manifest.native_digest) != 0) {
+      bc_native_release(&hold);
       bc_player_close(player);
       return bc_fail("cannot start the game: a %s of the game folder was changed, added or removed "
                      "since the game was exported",
@@ -597,6 +603,7 @@ int main(int argc, char **argv)
   /* The keys of every file of the game, in one write: the player picks per file by key id. */
   uint8_t(*keys)[BC_KEY_SIZE] = bc_key_table_alloc();
   if (keys == NULL) {
+    bc_native_release(&hold);
     bc_player_close(player);
     return bc_fail("cannot start the game: out of memory");
   }
@@ -606,6 +613,7 @@ int main(int argc, char **argv)
     key_count = manifest.key_count;
     if (!bc_online_keys(dir, &manifest, argc, argv, keys, err, sizeof(err))) {
       crypto_wipe(keys, BC_KEY_TABLE_SIZE);
+      bc_native_release(&hold);
       bc_player_close(player);
       return bc_fail("cannot start the game: %s", err);
     }
@@ -620,6 +628,7 @@ int main(int argc, char **argv)
     bc_key_id(keys[0], id);
     if (memcmp(id, manifest.key_ids[0], BC_KEY_ID_SIZE) != 0) {
       crypto_wipe(keys, BC_KEY_TABLE_SIZE);
+      bc_native_release(&hold);
       bc_player_close(player);
       return bc_fail("cannot start the game: %s", bc_manifest_result_string(BC_MANIFEST_BAD_FORMAT));
     }
@@ -630,6 +639,7 @@ int main(int argc, char **argv)
   bc_build_key_forget();
   const int exit_code = bc_run_player(player, player_path, main_path, dir, &keys[0][0], (size_t)key_count * BC_KEY_SIZE);
   crypto_wipe(keys, BC_KEY_TABLE_SIZE);
+  bc_native_release(&hold);
   bc_player_close(player);
   if (python_check) {
     /* Leave no bytecode behind: a test run followed by an upload must not ship any (the next

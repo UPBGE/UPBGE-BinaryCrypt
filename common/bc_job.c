@@ -7,11 +7,13 @@
 #include <string.h>
 
 #include "bc_brand.h"
+#include "bc_compress.h"
 #include "bc_embed.h"
 #include "bc_key.h"
 #include "bc_keyring.h"
 #include "bc_native.h"
 #include "bc_seal.h"
+#include "blake3.h"
 
 #define BC_HASH_READ_SIZE (1 << 20)
 
@@ -28,9 +30,12 @@ typedef struct BC_JobFile {
   char *in;
   char *out;
   uint64_t size;
-  /** Plaintext hash: derives the nonce (bc_seal.h) and tells changed files from unchanged ones. */
+  /** Hash of the source: its container's source id (bc_seal.h), and tells changed files from
+   * unchanged ones. Also the plaintext hash when the file is sealed as it is. */
   uint8_t hash[BC_PLAIN_HASH_SIZE];
   bool hashed;
+  /** A .blend Blender did not compress: compressed before sealing (bc_compress.h). */
+  bool compress;
   /** Key ring index of the key sealing this file, -1 for the build key. */
   int key;
 } BC_JobFile;
@@ -79,12 +84,16 @@ struct BC_Job {
   int file_capacity;
 
   int current;
+  bool compressing;
+  BC_Compressor compressor;
+  /** The compressed copy being sealed, next to the output; removed once sealed. Empty: none. */
+  char compressed[BC_PATH_MAX];
   bool sealing;
   BC_Sealer sealer;
   uint64_t current_base;
 
   FILE *player_file;
-  crypto_blake2b_ctx hash_ctx;
+  blake3_hasher hash_ctx;
   uint8_t *hash_buffer;
   uint8_t player_hash[BC_PLAYER_HASH_SIZE];
 
@@ -644,7 +653,7 @@ BC_Job *bc_job_create(const BC_Project *p,
     bc_log(job, BC_LOG_ERROR, "Out of memory");
     return bc_job_fail_create(job);
   }
-  crypto_blake2b_init(&job->hash_ctx, BC_PLAYER_HASH_SIZE);
+  blake3_hasher_init(&job->hash_ctx);
   job->phase = job->branding ? BC_PHASE_BRAND_PLAYER : BC_PHASE_HASH_PLAYER;
 
   bc_log(job,
@@ -660,12 +669,26 @@ BC_Job *bc_job_create(const BC_Project *p,
 /* -------------------------------------------------------------------------------------------- */
 /* Execution */
 
-static void bc_job_set_failed(BC_Job *job)
+/** Stop compressing or sealing the current file and remove what it left on disk. */
+static void bc_job_abort_file(BC_Job *job)
 {
+  if (job->compressing) {
+    bc_compress_end(&job->compressor, true);
+    job->compressing = false;
+  }
   if (job->sealing) {
     bc_seal_abort(&job->sealer);
     job->sealing = false;
   }
+  if (job->compressed[0] != '\0') {
+    bc_remove(job->compressed);
+    job->compressed[0] = '\0';
+  }
+}
+
+static void bc_job_set_failed(BC_Job *job)
+{
+  bc_job_abort_file(job);
   job->phase = BC_PHASE_FAILED;
   snprintf(job->status, sizeof(job->status), "Failed");
 }
@@ -723,7 +746,7 @@ static void bc_job_hash_player(BC_Job *job)
     return;
   }
   const size_t n = fread(job->hash_buffer, 1, BC_HASH_READ_SIZE, job->player_file);
-  crypto_blake2b_update(&job->hash_ctx, job->hash_buffer, n);
+  blake3_hasher_update(&job->hash_ctx, job->hash_buffer, n);
   job->done_bytes += n;
   if (n == BC_HASH_READ_SIZE) {
     return;
@@ -736,7 +759,7 @@ static void bc_job_hash_player(BC_Job *job)
     bc_job_set_failed(job);
     return;
   }
-  crypto_blake2b_final(&job->hash_ctx, job->player_hash);
+  blake3_hasher_finalize(&job->hash_ctx, job->player_hash, BC_PLAYER_HASH_SIZE);
   bc_log(job, BC_LOG_INFO, "Player '%s' registered", job->player_rel);
   job->phase = BC_PHASE_SEAL;
 }
@@ -775,7 +798,8 @@ static bool bc_job_choose_key(BC_Job *job, BC_JobFile *file)
 /** One slice of the plaintext hash pass of the current file. */
 static void bc_job_hash_file(BC_Job *job, BC_JobFile *file)
 {
-  if (job->file_hash_in == NULL) {
+  const bool first = job->file_hash_in == NULL;
+  if (first) {
     job->file_hash_in = bc_fopen(file->in, "rb");
     if (job->file_hash_in == NULL) {
       bc_log(job, BC_LOG_ERROR, "Cannot read '%s'", file->in);
@@ -788,6 +812,9 @@ static void bc_job_hash_file(BC_Job *job, BC_JobFile *file)
   const size_t n = fread(job->hash_buffer, 1, BC_HASH_READ_SIZE, job->file_hash_in);
   crypto_blake2b_update(&job->file_hash_ctx, job->hash_buffer, n);
   job->done_bytes += n;
+  if (first) {
+    file->compress = bc_blend_is_uncompressed(job->hash_buffer, n);
+  }
   if (n == BC_HASH_READ_SIZE) {
     return;
   }
@@ -814,25 +841,69 @@ static void bc_job_seal(BC_Job *job)
     bc_job_hash_file(job, file);
     return;
   }
-  if (!job->sealing) {
-    const uint8_t *key = file->key < 0 ? job->key : job->ring.keys[file->key];
-    /* Same key and plaintext as the existing output: its bytes would come out identical, so
-     * neither encrypt nor rewrite it. Re-exporting an unchanged game costs one hash pass. */
-    if (bc_seal_output_is_current(key, file->out, file->size, file->hash)) {
+  const uint8_t *key = file->key < 0 ? job->key : job->ring.keys[file->key];
+  if (!job->sealing && !job->compressing) {
+    /* Made from the same source with the same key: the container stands (byte for byte, even if
+     * this zstd would compress differently), so neither compress, encrypt nor rewrite it.
+     * Re-exporting an unchanged game costs one hash pass. */
+    if (bc_seal_output_is_current(key, file->out, file->hash)) {
       job->kept_files++;
       job->done_bytes += file->size;
       bc_log(job, BC_LOG_INFO, "Up to date %s", bc_display(job, file->out));
       job->current++;
       return;
     }
-    if (!bc_seal_begin(&job->sealer, key, file->in, file->out, file->hash, err, sizeof(err))) {
+    job->current_base = job->done_bytes;
+    snprintf(job->status, sizeof(job->status), "%s", bc_display(job, file->in));
+    if (file->compress) {
+      const int n = snprintf(job->compressed, sizeof(job->compressed), "%s.zst.tmp", file->out);
+      char dir[BC_PATH_MAX];
+      bc_path_dirname(dir, sizeof(dir), file->out);
+      if (n < 0 || (size_t)n >= sizeof(job->compressed) || !bc_mkdir_p(dir)) {
+        job->compressed[0] = '\0';
+        bc_log(job, BC_LOG_ERROR, "Cannot write '%s'", file->out);
+        bc_job_set_failed(job);
+        return;
+      }
+      if (!bc_compress_begin(&job->compressor, file->in, job->compressed, err, sizeof(err))) {
+        job->compressed[0] = '\0';
+        bc_log(job, BC_LOG_ERROR, "%s", err);
+        bc_job_set_failed(job);
+        return;
+      }
+      job->compressing = true;
+      job->total_bytes += file->size; /* One more pass over the source. */
+      return;
+    }
+    if (!bc_seal_begin(&job->sealer, key, file->in, file->out, file->hash, file->hash, err, sizeof(err))) {
       bc_log(job, BC_LOG_ERROR, "%s", err);
       bc_job_set_failed(job);
       return;
     }
     job->sealing = true;
+  }
+  if (job->compressing) {
+    const int result = bc_compress_step(&job->compressor, err, sizeof(err));
+    if (result < 0) {
+      job->compressing = false; /* The compressor already removed its output. */
+      job->compressed[0] = '\0';
+      bc_log(job, BC_LOG_ERROR, "%s", err);
+      bc_job_set_failed(job);
+      return;
+    }
+    job->done_bytes = job->current_base + job->compressor.in_done;
+    if (result == 1) {
+      return;
+    }
+    job->compressing = false;
     job->current_base = job->done_bytes;
-    snprintf(job->status, sizeof(job->status), "%s", bc_display(job, file->in));
+    /* The compressed copy is the plaintext; the source id still names the source. */
+    if (!bc_seal_begin(&job->sealer, key, job->compressed, file->out, job->compressor.out_hash, file->hash, err, sizeof(err))) {
+      bc_log(job, BC_LOG_ERROR, "%s", err);
+      bc_job_set_failed(job);
+      return;
+    }
+    job->sealing = true;
   }
   const int result = bc_seal_step(&job->sealer, err, sizeof(err));
   if (result < 0) {
@@ -841,11 +912,22 @@ static void bc_job_seal(BC_Job *job)
     bc_job_set_failed(job);
     return;
   }
-  job->done_bytes = job->current_base + bc_seal_bytes_done(&job->sealer);
+  /* Progress in source bytes, also while sealing a compressed copy of another size. */
+  const uint64_t sealed = bc_seal_bytes_done(&job->sealer);
+  const uint64_t plain = job->sealer.header.plain_size;
+  job->done_bytes = job->current_base + (plain ? (uint64_t)((double)sealed / (double)plain * (double)file->size) : 0);
   if (result == 0) {
     job->sealing = false;
     job->done_bytes = job->current_base + file->size;
-    bc_log(job, BC_LOG_INFO, "Encrypted %s", bc_display(job, file->out));
+    if (job->compressed[0] != '\0') {
+      bc_remove(job->compressed);
+      job->compressed[0] = '\0';
+      bc_log(job, BC_LOG_INFO, "Encrypted %s (compressed to %.0f%%)", bc_display(job, file->out),
+             100.0 * (double)plain / (double)(file->size ? file->size : 1));
+    }
+    else {
+      bc_log(job, BC_LOG_INFO, "Encrypted %s", bc_display(job, file->out));
+    }
     job->current++;
   }
 }
@@ -1032,9 +1114,7 @@ void bc_job_destroy(BC_Job *job)
   if (job == NULL) {
     return;
   }
-  if (job->sealing) {
-    bc_seal_abort(&job->sealer);
-  }
+  bc_job_abort_file(job);
   if (job->player_file != NULL) {
     fclose(job->player_file);
   }

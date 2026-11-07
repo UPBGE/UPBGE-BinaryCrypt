@@ -20,8 +20,8 @@
  * cannot write (Program Files, /opt) none can appear, because the export left none; one that
  * cannot be removed was put there by someone else, and the launch is refused.
  *
- * digest = BLAKE2b-256(BC_NATIVE_CONTEXT || for each covered file, in walk order:
- *                      relative path (UTF-8, '/' separators) || 0x00 || BLAKE2b-256(contents))
+ * digest = BLAKE3 in key derivation mode, context BC_NATIVE_CONTEXT, over: for each covered file,
+ *          in walk order, relative path (UTF-8, '/' separators) || 0x00 || BLAKE3-256(contents)
  * Walk order: depth first, the entries of each folder sorted bytewise by name. Symbolic links to
  * folders and reparse points are not followed (bc_list_dir); links to files are hashed through. */
 
@@ -38,7 +38,7 @@
 extern "C" {
 #endif
 
-#define BC_NATIVE_CONTEXT "UPBGE-BinaryCrypt native code v1"
+#define BC_NATIVE_CONTEXT "UPBGE-BinaryCrypt native code v2"
 #define BC_NATIVE_DIGEST_SIZE 32
 
 /** True when \a name (a file name, not a path) is native code by the rule above. */
@@ -69,6 +69,28 @@ bool bc_native_digest(const char *root,
                       bool python,
                       uint8_t r_digest[BC_NATIVE_DIGEST_SIZE],
                       BC_NativeScan *r_scan);
+
+/** Files bc_native_digest_held hashed and keeps open. Windows: shared for reading only, so nobody
+ * can write, replace or delete them until they are released; the player loads exactly the code
+ * that was checked, even a module it imports long after the start. Elsewhere it stays empty: a
+ * file can be renamed over while open, so holding it would prove nothing. */
+typedef struct BC_NativeHold {
+  void **handles;
+  int count;
+  int capacity;
+} BC_NativeHold;
+
+/** bc_native_digest that keeps every hashed file open in \a hold (released by bc_native_release,
+ * also on failure). */
+bool bc_native_digest_held(const char *root,
+                           const char *const *skip,
+                           int skip_count,
+                           bool python,
+                           uint8_t r_digest[BC_NATIVE_DIGEST_SIZE],
+                           BC_NativeScan *r_scan,
+                           BC_NativeHold *hold);
+
+void bc_native_release(BC_NativeHold *hold);
 
 /** Remove every Python bytecode file under \a root (after the player exits). */
 bool bc_remove_bytecode(const char *root, BC_NativeScan *r_scan);

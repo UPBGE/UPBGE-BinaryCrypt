@@ -1,0 +1,6 @@
+BLAKE3 1.8.7 (https://github.com/BLAKE3-team/BLAKE3), unmodified.
+Upstream: tag 1.8.7, files c/blake3.c, c/blake3.h, c/blake3_impl.h, c/blake3_dispatch.c,
+c/blake3_portable.c, the SSE2, SSE4.1, AVX2, AVX-512 and NEON intrinsics kernels
+(c/blake3_*.c) and LICENSE_CC0, LICENSE_A2. Licensed CC0-1.0 or Apache-2.0.
+Hashes the player and the game folder's code at every launch: the kernel is picked at run time
+from the CPU's features (blake3_dispatch.c).

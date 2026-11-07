@@ -18,6 +18,7 @@
 #endif
 
 #include "bc_brand.h"
+#include "bc_compress.h"
 #include "bc_embed.h"
 #include "bc_envelope.h"
 #include "bc_job.h"
@@ -28,7 +29,10 @@
 #include "bc_project.h"
 #include "bc_seal.h"
 #include "bc_test_decrypt.h"
+#include "blake3.h"
 #include "monocypher.h"
+
+#include <zstd.h>
 
 static int g_failures = 0;
 static char g_work[BC_PATH_MAX];
@@ -95,13 +99,24 @@ static bool decrypts_to(const char *sealed_rel, const char *plain_rel)
   if (!bc_test_decrypt(sealed, bc_build_key(), &plain, &plain_size)) {
     return false;
   }
-  const bool ok = bc_test_read_file(plain_path, &expected, &expected_size) &&
-                  expected_size == plain_size &&
+  if (!bc_test_read_file(plain_path, &expected, &expected_size)) {
+    free(plain);
+    return false;
+  }
+  /* A .blend the export compressed: compare what Blender's reader would unwrap. */
+  if (plain_size >= 4 && memcmp(plain, "\x28\xb5\x2f\xfd", 4) == 0 && expected_size >= 7 &&
+      memcmp(expected, "BLENDER", 7) == 0)
+  {
+    uint8_t *unpacked = (uint8_t *)malloc((size_t)expected_size + 1);
+    const size_t n = unpacked ? ZSTD_decompress(unpacked, (size_t)expected_size + 1, plain, (size_t)plain_size) : 0;
+    free(plain);
+    plain = unpacked;
+    plain_size = (unpacked != NULL && !ZSTD_isError(n)) ? n : 0;
+  }
+  const bool ok = expected_size == plain_size && plain != NULL &&
                   memcmp(expected, plain, (size_t)plain_size) == 0;
   free(plain);
-  if (ok) {
-    free(expected);
-  }
+  free(expected);
   return ok;
 }
 
@@ -866,6 +881,52 @@ static void test_native(void)
     CHECK(bc_remove_bytecode(root, NULL));
   }
 #endif
+
+  /* Held files: same digest. Windows: nobody can write, replace or delete them until released. */
+  BC_NativeHold hold = {NULL, 0, 0};
+  CHECK(bc_native_digest_held(root, skip, 2, true, d, &scan, &hold) && memcmp(d, py, sizeof(d)) == 0);
+  work_path(path, "native/engine/python311.dll");
+#ifdef _WIN32
+  CHECK(hold.count == scan.files);
+  {
+    char moved[BC_PATH_MAX];
+    work_path(moved, "native/engine/python311.old");
+    FILE *f = bc_fopen(path, "r+b");
+    CHECK(f == NULL);
+    if (f != NULL) {
+      fclose(f);
+    }
+    CHECK(!bc_rename_replace(path, moved) && !bc_remove(path));
+    bc_native_release(&hold);
+    f = bc_fopen(path, "r+b");
+    CHECK(f != NULL);
+    if (f != NULL) {
+      fclose(f);
+    }
+  }
+#else
+  CHECK(hold.count == 0);
+#endif
+  bc_native_release(&hold);
+  CHECK(hold.handles == NULL && hold.count == 0);
+
+  /* BLAKE3 kernels (SIMD picked at run time) against the Rust reference implementation, on an
+   * input large enough to take the widest path the CPU has. */
+  {
+    static uint8_t data[1 << 20];
+    for (size_t i = 0; i < sizeof(data); i++) {
+      data[i] = (uint8_t)(i % 251);
+    }
+    static const uint8_t expected[32] = {0x74, 0xcb, 0x44, 0x1f, 0xd0, 0x87, 0x76, 0x4c, 0xa9, 0xc3, 0x69,
+                                         0x4d, 0xa7, 0x42, 0xeb, 0xe3, 0x0c, 0xbe, 0xb3, 0x06, 0x0a, 0x17,
+                                         0x00, 0x9c, 0xa8, 0x18, 0x25, 0xc7, 0xa8, 0xd1, 0x03, 0x43};
+    uint8_t hash[32];
+    blake3_hasher hasher;
+    blake3_hasher_init(&hasher);
+    blake3_hasher_update(&hasher, data, sizeof(data));
+    blake3_hasher_finalize(&hasher, hash, sizeof(hash));
+    CHECK(memcmp(hash, expected, sizeof(hash)) == 0);
+  }
 }
 
 static void test_seal(void)
@@ -882,7 +943,7 @@ static void test_seal(void)
     BC_Sealer s;
     uint8_t hash[BC_PLAIN_HASH_SIZE];
     CHECK(bc_hash_file(in, hash));
-    CHECK(bc_seal_begin(&s, bc_build_key(), in, out, hash, err, sizeof(err)));
+    CHECK(bc_seal_begin(&s, bc_build_key(), in, out, hash, hash, err, sizeof(err)));
     int r;
     while ((r = bc_seal_step(&s, err, sizeof(err))) == 1) {
     }
@@ -903,13 +964,13 @@ static void test_seal(void)
   work_path(c2, "seal/other_key.blend");
   CHECK(bc_hash_file(in, hash));
   BC_Sealer s;
-  CHECK(bc_seal_begin(&s, bc_build_key(), in, a, hash, err, sizeof(err)));
+  CHECK(bc_seal_begin(&s, bc_build_key(), in, a, hash, hash, err, sizeof(err)));
   while (bc_seal_step(&s, err, sizeof(err)) == 1) {
   }
-  CHECK(bc_seal_begin(&s, bc_build_key(), in, b, hash, err, sizeof(err)));
+  CHECK(bc_seal_begin(&s, bc_build_key(), in, b, hash, hash, err, sizeof(err)));
   while (bc_seal_step(&s, err, sizeof(err)) == 1) {
   }
-  CHECK(bc_seal_begin(&s, OTHER_KEY, in, c2, hash, err, sizeof(err)));
+  CHECK(bc_seal_begin(&s, OTHER_KEY, in, c2, hash, hash, err, sizeof(err)));
   while (bc_seal_step(&s, err, sizeof(err)) == 1) {
   }
   uint8_t *da = NULL, *db = NULL, *dc = NULL;
@@ -921,35 +982,151 @@ static void test_seal(void)
   free(db);
   free(dc);
 
+  /* Up to date: made from this source with this key, recognized from the header alone. */
+  CHECK(bc_seal_output_is_current(bc_build_key(), a, hash));
+  CHECK(!bc_seal_output_is_current(OTHER_KEY, a, hash));
+  {
+    uint8_t other[BC_PLAIN_HASH_SIZE];
+    memcpy(other, hash, sizeof(other));
+    other[5] ^= 1;
+    CHECK(!bc_seal_output_is_current(bc_build_key(), a, other));
+    /* Sealed from a transform of the source (another plaintext hash): still current for the
+     * source, with another nonce than the source sealed as it is. */
+    CHECK(bc_seal_begin(&s, bc_build_key(), in, c2, hash, other, err, sizeof(err)));
+    while (bc_seal_step(&s, err, sizeof(err)) == 1) {
+    }
+    CHECK(bc_seal_output_is_current(bc_build_key(), c2, other) && !bc_seal_output_is_current(bc_build_key(), c2, hash));
+    uint8_t *x = NULL, *y = NULL;
+    uint64_t nx = 0, ny = 0;
+    CHECK(bc_test_read_file(a, &x, &nx) && bc_test_read_file(c2, &y, &ny));
+    CHECK(nx == ny && memcmp(x + BC_OFS_NONCE_PREFIX, y + BC_OFS_NONCE_PREFIX, BC_NONCE_PREFIX_SIZE) != 0);
+    free(x);
+    free(y);
+    /* A truncated container or a damaged header is not current. */
+    FILE *f = bc_fopen(c2, "r+b");
+    if (f != NULL) {
+      fseek(f, BC_OFS_SOURCE_ID, SEEK_SET);
+      fputc(0, f);
+      fclose(f);
+    }
+    CHECK(!bc_seal_output_is_current(bc_build_key(), c2, other));
+  }
+
   /* The plaintext must still match the hash the nonce came from: otherwise the output is dropped
    * (a nonce derived from other data must never encrypt this one). */
   uint8_t wrong[BC_PLAIN_HASH_SIZE];
   memcpy(wrong, hash, sizeof(wrong));
   wrong[0] ^= 1;
   bc_remove(b);
-  CHECK(bc_seal_begin(&s, bc_build_key(), in, b, wrong, err, sizeof(err)));
+  CHECK(bc_seal_begin(&s, bc_build_key(), in, b, wrong, hash, err, sizeof(err)));
   int result;
   while ((result = bc_seal_step(&s, err, sizeof(err))) == 1) {
   }
   CHECK(result < 0 && strstr(err, "changed while") != NULL && !bc_is_file(b));
 
   /* Refusals: already sealed, not a blend, empty. */
-  CHECK(!bc_seal_begin(&s, bc_build_key(), a, b, hash, err, sizeof(err)));
+  CHECK(!bc_seal_begin(&s, bc_build_key(), a, b, hash, hash, err, sizeof(err)));
   CHECK(strstr(err, "already encrypted") != NULL);
   write_text("seal/notes.blend", "just text");
   work_path(in, "seal/notes.blend");
-  CHECK(!bc_seal_begin(&s, bc_build_key(), in, b, hash, err, sizeof(err)));
+  CHECK(!bc_seal_begin(&s, bc_build_key(), in, b, hash, hash, err, sizeof(err)));
   CHECK(strstr(err, "not a .blend") != NULL);
   write_text("seal/empty.blend", "");
   work_path(in, "seal/empty.blend");
-  CHECK(!bc_seal_begin(&s, bc_build_key(), in, b, hash, err, sizeof(err)));
+  CHECK(!bc_seal_begin(&s, bc_build_key(), in, b, hash, hash, err, sizeof(err)));
 
   /* zstd compressed blend files (Blender's "Compress" option) are accepted as they are. */
   char zstd_like[32] = "\x28\xb5\x2f\xfd" "compressed payload";
   write_text("seal/compressed.blend", zstd_like);
   work_path(in, "seal/compressed.blend");
-  CHECK(bc_seal_begin(&s, bc_build_key(), in, b, hash, err, sizeof(err)));
+  CHECK(bc_seal_begin(&s, bc_build_key(), in, b, hash, hash, err, sizeof(err)));
   bc_seal_abort(&s);
+}
+
+/** "BLENDER" then \a size bytes of text-like data: compresses like real .blend data does. */
+static void write_compressible_blend(const char *rel, size_t size)
+{
+  char path[BC_PATH_MAX], dir[BC_PATH_MAX];
+  work_path(path, rel);
+  bc_path_dirname(dir, sizeof(dir), path);
+  bc_mkdir_p(dir);
+  FILE *f = bc_fopen(path, "wb");
+  fputs("BLENDER-v405", f);
+  for (size_t i = 0; i < size; i++) {
+    fputc("vertex normal uv material object mesh "[(i * 7 + i / 64) % 38], f);
+  }
+  fclose(f);
+}
+
+static bool compress_file(const char *in, const char *out, BC_Compressor *c)
+{
+  char err[512];
+  if (!bc_compress_begin(c, in, out, err, sizeof(err))) {
+    return false;
+  }
+  int r;
+  while ((r = bc_compress_step(c, err, sizeof(err))) == 1) {
+  }
+  return r == 0;
+}
+
+static void test_compress(void)
+{
+  CHECK(bc_blend_is_uncompressed((const uint8_t *)"BLENDER-v405", 12));
+  CHECK(!bc_blend_is_uncompressed((const uint8_t *)"\x28\xb5\x2f\xfd", 4));
+  CHECK(!bc_blend_is_uncompressed((const uint8_t *)"BLEND", 5));
+
+  /* 2.5 frames: what Blender's reader expects of a compressed .blend, frame by frame. */
+  const size_t size = 2 * BC_COMPRESS_FRAME_SIZE + BC_COMPRESS_FRAME_SIZE / 2;
+  write_compressible_blend("compress/in.blend", size - 12);
+  char in[BC_PATH_MAX], out[BC_PATH_MAX], again[BC_PATH_MAX];
+  work_path(in, "compress/in.blend");
+  work_path(out, "compress/out.zst");
+  work_path(again, "compress/again.zst");
+  BC_Compressor c;
+  CHECK(compress_file(in, out, &c));
+  uint8_t *src = NULL, *z = NULL, *z2 = NULL;
+  uint64_t src_size = 0, z_size = 0, z2_size = 0;
+  CHECK(bc_test_read_file(in, &src, &src_size) && bc_test_read_file(out, &z, &z_size));
+  CHECK(src_size == size && z_size == c.out_size && z_size < src_size / 4);
+  uint8_t hash[BC_PLAIN_HASH_SIZE];
+  CHECK(bc_hash_file(out, hash) && memcmp(hash, c.out_hash, sizeof(hash)) == 0);
+  /* Whole stream: every frame, the seek table skipped. */
+  uint8_t *unpacked = (uint8_t *)malloc(size + 1);
+  CHECK(unpacked != NULL);
+  if (unpacked != NULL && src != NULL && z != NULL) {
+    const size_t n = ZSTD_decompress(unpacked, size + 1, z, (size_t)z_size);
+    CHECK(!ZSTD_isError(n) && n == size && memcmp(unpacked, src, size) == 0);
+    /* Seek table at the end: 3 frames, flags 0, magic; then each frame alone. */
+    const uint8_t *footer = z + z_size - 9;
+    CHECK(footer[0] == 3 && footer[4] == 0 && memcmp(footer + 5, "\xb1\xea\x92\x8f", 4) == 0);
+    const uint8_t *table = z + z_size - 9 - 3 * 8;
+    CHECK(memcmp(table - 8, "\x5e\x2a\x4d\x18", 4) == 0);
+    size_t offset = 0, plain_offset = 0;
+    for (int i = 0; i < 3; i++) {
+      const uint32_t csize = (uint32_t)table[8 * i] | (uint32_t)table[8 * i + 1] << 8 |
+                             (uint32_t)table[8 * i + 2] << 16 | (uint32_t)table[8 * i + 3] << 24;
+      const uint32_t usize = (uint32_t)table[8 * i + 4] | (uint32_t)table[8 * i + 5] << 8 |
+                             (uint32_t)table[8 * i + 6] << 16 | (uint32_t)table[8 * i + 7] << 24;
+      CHECK(usize == (i < 2 ? BC_COMPRESS_FRAME_SIZE : BC_COMPRESS_FRAME_SIZE / 2));
+      const size_t n1 = ZSTD_decompress(unpacked, size, z + offset, csize);
+      CHECK(!ZSTD_isError(n1) && n1 == usize && memcmp(unpacked, src + plain_offset, usize) == 0);
+      offset += csize;
+      plain_offset += usize;
+    }
+  }
+  free(unpacked);
+  /* Deterministic: the same bytes again. */
+  CHECK(compress_file(in, again, &c));
+  CHECK(bc_test_read_file(again, &z2, &z2_size) && z2_size == z_size && memcmp(z, z2, (size_t)z_size) == 0);
+  free(src);
+  free(z);
+  free(z2);
+  /* A missing input leaves no output. */
+  char err[256], missing[BC_PATH_MAX];
+  work_path(missing, "compress/missing.blend");
+  bc_remove(again);
+  CHECK(!bc_compress_begin(&c, missing, again, err, sizeof(err)) && !bc_is_file(again));
 }
 
 static void test_keyring(void)
@@ -1049,7 +1226,7 @@ static void test_project(void)
   CHECK(bc_test_read_file(saved, &text, &text_size));
   CHECK(text_size > 0 && strstr((char *)text, "source_root = src\n") != NULL);
   CHECK(strstr((char *)text, "key = project\n") != NULL);
-  CHECK(strstr((char *)text, "integrity = native\n") != NULL);
+  CHECK(strstr((char *)text, "integrity = python\n") != NULL);
   free(text);
   CHECK(q.key_mode == BC_KEY_PROJECT);
   CHECK(q.manifest_mode == BC_MANIFEST_EMBEDDED);
@@ -1141,6 +1318,7 @@ typedef struct LogCapture {
   bool player_branded;
   int encrypted;
   int up_to_date;
+  char last_encrypted[1024];
   char last_error[1024];
   char last_warning[1024];
 } LogCapture;
@@ -1151,7 +1329,10 @@ static void capture_log(void *user, BC_LogLevel level, const char *message)
   if (strstr(message, "Player icon and version information updated") != NULL) {
     c->player_branded = true;
   }
-  c->encrypted += strncmp(message, "Encrypted ", 10) == 0;
+  if (strncmp(message, "Encrypted ", 10) == 0) {
+    c->encrypted++;
+    snprintf(c->last_encrypted, sizeof(c->last_encrypted), "%s", message);
+  }
   c->up_to_date += strncmp(message, "Up to date ", 11) == 0;
   if (level == BC_LOG_WARNING) {
     c->warnings++;
@@ -1213,18 +1394,47 @@ static void test_job(void)
   CHECK(decrypts_to("job/dist/game.blend", "job/src/game.blend"));
   CHECK(decrypts_to("job/dist/levels/one.blend", "job/src/levels/one.blend"));
   CHECK(decrypts_to("job/dist/levels/deep/two.BLEND", "job/src/levels/deep/two.BLEND"));
-  /* Deterministic sealing: exporting again writes the very same bytes. */
+  /* Uncompressed .blend files are compressed before sealing. */
+  {
+    uint8_t *plain = NULL;
+    uint64_t plain_size = 0;
+    work_path(path, "job/dist/game.blend");
+    CHECK(bc_test_decrypt(path, bc_build_key(), &plain, &plain_size) && plain_size >= 4 &&
+          memcmp(plain, "\x28\xb5\x2f\xfd", 4) == 0);
+    free(plain);
+  }
+  /* Deterministic: exporting again keeps the outputs (up to date, not even compressed again),
+   * and sealing one again from scratch writes the very same bytes. */
   {
     uint8_t *first, *second;
     uint64_t first_size, second_size;
     work_path(path, "job/dist/levels/deep/two.BLEND");
     CHECK(bc_test_read_file(path, &first, &first_size));
-    CHECK(run_job(&p, &c) == 0);
+    CHECK(run_job(&p, &c) == 0 && c.encrypted == 0 && c.up_to_date > 0);
+    const int files = c.up_to_date;
+    bc_remove(path);
+    CHECK(run_job(&p, &c) == 0 && c.encrypted == 1 && c.up_to_date == files - 1);
     CHECK(bc_test_read_file(path, &second, &second_size));
     CHECK(first_size == second_size && memcmp(first, second, (size_t)first_size) == 0);
     free(first);
     free(second);
+    char tmp[BC_PATH_MAX + 16];
+    snprintf(tmp, sizeof(tmp), "%s.zst.tmp", path);
+    CHECK(!bc_is_file(tmp));
   }
+  /* Typical .blend data shrinks; the log says by how much. */
+  write_compressible_blend("job/src/levels/text.blend", 300000);
+  CHECK(run_job(&p, &c) == 0 && c.encrypted == 1 && strstr(c.last_encrypted, "compressed to") != NULL);
+  CHECK(decrypts_to("job/dist/levels/text.blend", "job/src/levels/text.blend"));
+  {
+    uint64_t sealed_size = 0;
+    work_path(path, "job/dist/levels/text.blend");
+    CHECK(bc_file_size(path, &sealed_size) && sealed_size < 300000 / 4);
+  }
+  work_path(path, "job/src/levels/text.blend");
+  bc_remove(path);
+  work_path(path, "job/dist/levels/text.blend");
+  bc_remove(path);
   work_path(path, "job/dist/levels/readme.txt");
   CHECK(!bc_is_file(path));
   work_path(path, "job/dist/.git/ignored.blend");
@@ -1377,14 +1587,19 @@ static void test_job(void)
     CHECK(!decrypts_to("job/dist/game.blend", "job/src/game.blend"));
     CHECK(bc_embed_read(path, bc_build_key(), &m) == BC_MANIFEST_OK);
     CHECK((m.flags & BC_MANIFEST_KEY_FLAGS) == BC_MANIFEST_PROJECT_KEY && m.key_count == 1);
-    /* The native code check is on by default: the digest of the game folder, without the game
-     * executable and the player. */
+    /* The Python level is the default: the digest of the game folder's code and Python files,
+     * without the game executable and the player. */
     {
       char dist[BC_PATH_MAX], exe_rel[BC_PATH_MAX];
       uint8_t digest[BC_NATIVE_DIGEST_SIZE];
       work_path(dist, "job/dist");
       CHECK(bc_path_relative(exe_rel, sizeof(exe_rel), dist, path));
       const char *skip[2] = {exe_rel, m.player_path};
+      CHECK((m.flags & BC_MANIFEST_NATIVE_DIGEST) && (m.flags & BC_MANIFEST_PYTHON_CHECK));
+      CHECK(bc_native_digest(dist, skip, 2, true, digest, NULL));
+      CHECK(memcmp(digest, m.native_digest, BC_NATIVE_DIGEST_SIZE) == 0);
+      p.integrity = BC_INTEGRITY_NATIVE;
+      CHECK(run_job(&p, &c) == 0 && bc_embed_read(path, bc_build_key(), &m) == BC_MANIFEST_OK);
       CHECK((m.flags & BC_MANIFEST_NATIVE_DIGEST) && !(m.flags & BC_MANIFEST_PYTHON_CHECK));
       CHECK(bc_native_digest(dist, skip, 2, false, digest, NULL));
       CHECK(memcmp(digest, m.native_digest, BC_NATIVE_DIGEST_SIZE) == 0);
@@ -1637,7 +1852,10 @@ static void test_brand_job(void)
   uint64_t n;
   uint8_t hash[BC_PLAYER_HASH_SIZE];
   CHECK(bc_test_read_file(player, &data, &n));
-  crypto_blake2b(hash, sizeof(hash), data, (size_t)n);
+  blake3_hasher hasher;
+  blake3_hasher_init(&hasher);
+  blake3_hasher_update(&hasher, data, (size_t)n);
+  blake3_hasher_finalize(&hasher, hash, sizeof(hash));
   free(data);
   CHECK(memcmp(hash, m.player_hash, sizeof(hash)) == 0);
   CHECK(exe_group_equals_ico(player, L"APPICON", ico));
@@ -1777,6 +1995,7 @@ int main(int argc, char **argv)
   test_embed();
   test_native();
   test_seal();
+  test_compress();
   test_project();
   test_brand();
   test_keyring();

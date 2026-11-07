@@ -25,8 +25,8 @@ engine/             UPBGE runtime: blenderplayer.exe, DLLs, <version>/python, <v
 BinaryCrypt stops casual extraction: an encrypted file cannot be opened in Blender or UPBGE, the
 decrypted data never touches the disk, the player refuses to save it back, and the launcher only
 runs the exact player the game was encrypted for, by default with the exact libraries (`.dll`,
-`.so`, `.dylib`, `.pyd`) of the game folder, and optionally its exact Python files. Any
-modification of an encrypted file or of the manifest is detected.
+`.so`, `.dylib`, `.pyd`) and Python files of the game folder. Any modification of an encrypted
+file or of the manifest is detected.
 
 The key necessarily exists on the player's machine while the game runs. A determined attacker with
 a debugger can therefore recover it; no client-side scheme prevents that, and the source code being
@@ -36,8 +36,8 @@ the key is in no shipped file at all: recovering it requires owning the game.
 
 Only `.blend` files are encrypted. Pack textures, sounds and scripts into the `.blend` (Blender:
 *File > External Data > Pack Resources*, Python scripts as Text blocks) to protect them too.
-External `.py` modules imported by the game stay readable; the *+ Python* integrity level (below)
-at least refuses them modified. Code injected into the running player (a debugger, an injector
+External `.py` modules imported by the game stay readable; the *+ Python* integrity level (below,
+the default) at least refuses them modified. Code injected into the running player (a debugger, an injector
 tool, `LD_PRELOAD`) is out of reach of any file check.
 
 ## How it works
@@ -50,17 +50,20 @@ tool, `LD_PRELOAD`) is out of reach of any file check.
    **project key**, created for each game in a key file next to its project; the game executable
    carries it masked with the build key. A game can instead get its key from a key server at
    launch (*online key*), or use the build key itself (see *Keys*, below).
-2. **Encryption.** `bc_tool` seals each `.blend` into a container of independent 64 KiB chunks,
-   each authenticated with XChaCha20-Poly1305 ([Monocypher](https://monocypher.org)). Sealing is
-   deterministic (the nonce derives from the key and the file's hash): an unchanged file gives the
-   same bytes on every export, so store patches (Steam, Epic) only carry what changed, and an
-   output that is already up to date is neither encrypted nor written again. It hashes the player
-   executable and the other native code of the game folder (BLAKE2b) and writes the game
+2. **Encryption.** `bc_tool` compresses each `.blend` Blender saved uncompressed (zstd, exactly as
+   Blender's *Compress* option does: encrypted data no longer compresses, so a store would ship
+   it at full size), then seals it into a container of independent 64 KiB chunks, each
+   authenticated with XChaCha20-Poly1305 ([Monocypher](https://monocypher.org)). Sealing is
+   deterministic (the nonce derives from the key and the hash of what is sealed): an unchanged
+   file gives the same bytes on every export, so store patches (Steam, Epic) only carry what
+   changed, and an output already made from the same file is neither compressed, encrypted nor
+   written again. It hashes the player executable and the code of the game folder
+   ([BLAKE3](https://github.com/BLAKE3-team/BLAKE3)) and writes the game
    executable: a copy of `bc_launcher` under the game's name with a manifest appended (player path
    and hash, native code digest, main file, the masked project key), authenticated with the build
    key.
 3. **Launch.** The game executable reads and authenticates its manifest, hashes the player and
-   the native code of the game folder, refuses to continue on any mismatch, starts the player on
+   the code of the game folder, refuses to continue on any mismatch, starts the player on
    the main file and writes the key into an inherited pipe, then wipes its own copy. The key never
    travels on the command line or through a file. The player inherits that pipe and its standard
    streams only, not other handles of whoever started the game.
@@ -74,7 +77,9 @@ copy in UPBGE (`intern/binarycrypt/binarycrypt_format.h`); both copies must be k
 
 ## Building
 
-Requirements: CMake 3.16 or newer and a C99 compiler. The editor uses
+Requirements: CMake 3.18 or newer and a C99 compiler. `bc_tool` compresses with
+[zstd](https://github.com/facebook/zstd): an installed zstd (CMake package, e.g. `libzstd-dev`)
+is used, otherwise zstd 1.5.7 is downloaded and built. The editor uses
 [raylib](https://www.raylib.com) 5.5 and [raygui](https://github.com/raysan5/raygui) 4.0
 (vendored). When no installed raylib is found, raylib 5.5 is downloaded and built automatically.
 
@@ -100,6 +105,7 @@ Platform notes:
 |---|---|---|
 | `BINARYCRYPT_BUILD_GUI` | `ON` | `OFF` builds a command-line-only `bc_tool` (no raylib), e.g. for CI. |
 | `BINARYCRYPT_FETCH_RAYLIB` | `ON` | Download raylib 5.5 when it is not installed. |
+| `BINARYCRYPT_FETCH_ZSTD` | `ON` | Download zstd 1.5.7 when it is not installed. |
 | `BINARYCRYPT_KEY_FILE` | empty | Build with a fixed key instead of a random one (see below). |
 | `BINARYCRYPT_HOST_KEYGEN` | empty | Host `bc_keygen` executable, required when cross compiling. |
 
@@ -142,7 +148,7 @@ Platform notes:
    - *Output*: mirror into an output folder (recommended), or next to the sources.
    - *Game name*: name of the game executable (`.exe` is added on Windows). Empty: the main file
      name.
-   - *Check* (default *+ Libraries*): see *Integrity check*, below.
+   - *Check* (default *+ Python*): see *Integrity check*, below.
    - *Manifest*: inside the game executable (default) or in a separate `binarycrypt.manifest`
      file next to it (see below).
    - *Icon*, *Version*, *Company*, *Copyright* (Windows, optional): see below.
@@ -176,10 +182,19 @@ a file changed, added or removed since the export stops the game.
 | Level | Checked | Cost at every launch (warm file cache, 2.3 GHz Xeon) |
 |---|---|---|
 | *Player* (`player`) | The player executable | Its hash only |
-| *+ Libraries* (`native`, default) | And every `.exe`, `.dll`, `.so`, `.so.N`, `.dylib`, `.pyd` of the game folder, recursively | 300 MB of libraries in a folder of 10,000 files: 0.47 s, against 0.007 s with *Player* |
-| *+ Python* (`python`) | And every `.py`, `.pyw`, `.pth`, `.zip` (the default `sys.path` names a `python3XX.zip` before the standard library) | 537 `.py` files (9.8 MB): +0.019 s. **And** the game recompiles every script it imports at every launch: about 0.15 s per MB of imported Python |
+| *+ Libraries* (`native`) | And every `.exe`, `.dll`, `.so`, `.so.N`, `.dylib`, `.pyd` of the game folder, recursively | 300 MB of libraries in a folder of 10,000 files: 0.13 s with AVX-512, 0.19 s with AVX2, 0.31 s with SSE4.1 (MinGW builds) |
+| *+ Python* (`python`, default) | And every `.py`, `.pyw`, `.pth`, `.zip` (the default `sys.path` names a `python3XX.zip` before the standard library) | 4,850 `.py` files (9.7 MB): +0.03 s. **And** the game recompiles every script it imports at every launch: about 0.15 s per MB of imported Python |
 
-The game executable and the player have their own checks and are not part of the digest.
+*+ Python* is the default because the player runs Python with every decrypted datablock at
+reach: one edited line in a module of the runtime's standard library (imported before the game
+starts) can save its textures, meshes and scripts to disk. The lower levels suit a game that
+accepts that risk for a faster start.
+
+The game executable and the player have their own checks and are not part of the digest. On
+Windows the game executable keeps every file it checked open until the player exits, shared for
+reading only: none can be replaced between the check and the moment the player loads it, even a
+module imported long after the start. Linux and macOS have no such lock (a file can be renamed
+over while open): there, a file swapped right after the check goes unnoticed.
 
 **Python bytecode at the *+ Python* level.** The player writes `.pyc` files next to the modules
 it imports, so they cannot be part of a digest, and checking `.py` alone would be pointless: a
@@ -308,10 +323,25 @@ the protocol are in [`keyserver/`](keyserver/README.md), under the MIT license.
   that load their other files explicitly by their `.upbgebc` names.
 
 Re-encrypting replaces outputs atomically: an interrupted batch never leaves a partial file. An
-output whose size and header already match what sealing would write (same key, same content) is
-kept as it is: re-exporting an unchanged 257 MB game took 0.38 s instead of 1.5 s. Only its header
-is compared, so damage further in is not repaired by an export (the player still refuses it). When
-a folder scan finds an already encrypted `.blend` (an old output), it is skipped with a warning.
+output made from the same `.blend` with the same key is kept as it is: its header names the
+source (a keyed hash of it), so the check needs one hash pass over the sources, and no
+compression. Re-exporting an unchanged 172 MB game (uncompressed `.blend` files of 68 and 73 MB,
+a compressed one of 31 MB) took 0.23 s instead of 1.5 s. Only the header is checked, so damage further
+in is not repaired by an export (the player still refuses it). When a folder scan finds an already
+encrypted `.blend` (an old output), it is skipped with a warning.
+
+**Compression.** A `.blend` saved without Blender's *Compress* option is compressed before it is
+sealed, the way that option would have: zstd level 3, independent frames of 1 MiB and a seek
+table, so the player opens and seeks it as any compressed `.blend`. Encrypted data does not
+compress, so without this a store that compresses its downloads (Steam compresses every chunk it
+ships) would ship it at full size. Measured with two scenes saved by Blender 4.0 (2.3 GHz Xeon):
+
+| `.blend` | Size | Encrypted | Export | Loading (decrypt, decompress) |
+|---|---|---|---|---|
+| Meshes (subdivided models, a 400×400 grid) | 67.6 MB | 25.5 MB (38%) | 0.57 s, 0.36 s of it compressing | 0.17 s, against 0.25 s to decrypt it uncompressed |
+| Same with a packed 2048×2048 PNG | 73.4 MB | 31.3 MB (43%) | | |
+
+Already compressed files (Blender's *Compress*, gzip) are sealed as they are.
 
 ### Project file (`.bcproj`)
 
@@ -338,7 +368,7 @@ key_url = https://keys.example.com/key       # online: given to the provider
 key_cache = none                # online: none | permanent (offline after the first launch)
 key_rotation = off              # online: off (one key) | per_update (a new key per update)
 key_update = 1                  # online, per_update: number of the update being exported
-integrity = native              # player | native (default, + libraries) | python (+ Python files)
+integrity = python              # player | native (+ libraries) | python (default, + Python files)
 player = engine/blenderplayer.exe   # relative to the game folder
 main = src/game.blend
 input = src                     # a folder (scanned for *.blend) or a file; repeatable
@@ -377,7 +407,8 @@ res/         BinaryCrypt icon (bc_tool, and game executables without an icon of 
 ## License
 
 GPL-3.0 (see `LICENSE.txt`). The source files are GPL-2.0-or-later, as UPBGE, except `keyserver/`
-(MIT, see `keyserver/LICENSE`). Monocypher is BSD-2-Clause or CC0-1.0; raygui is zlib/libpng; the
+(MIT, see `keyserver/LICENSE`). Monocypher is BSD-2-Clause or CC0-1.0; BLAKE3 is CC0-1.0 or
+Apache-2.0; raygui is zlib/libpng; zstd (downloaded when not installed) is BSD-3-Clause; the
 editor's font, Montserrat, is SIL OFL 1.1 (`tool/fonts/OFL.txt`).
 
 **Your game's license.** BinaryCrypt does not change what the GPL asks of a game. The Blender

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.18)
 project(UPBGE_BinaryCrypt C)
 
 set(CMAKE_C_STANDARD 99)
@@ -9,6 +9,7 @@ set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/cmake")
 
 option(BINARYCRYPT_BUILD_GUI "Build the bc_tool editor (raylib + raygui). OFF: command line only" ON)
 option(BINARYCRYPT_FETCH_RAYLIB "Download and build raylib 5.5 when no installed raylib is found" ON)
+option(BINARYCRYPT_FETCH_ZSTD "Download and build zstd 1.5.7 when no installed zstd is found" ON)
 set(BINARYCRYPT_KEY_FILE "" CACHE FILEPATH
   "File holding a fixed key (64 hex digits, see bc_tool --export-key). Empty: random key per clean build")
 
@@ -25,9 +26,73 @@ endif()
 add_library(monocypher STATIC common/monocypher/monocypher.c)
 target_include_directories(monocypher PUBLIC common/monocypher)
 
+# BLAKE3 (common/blake3): the integrity hashes the launcher computes at every start. The SIMD
+# kernels are built with their own instruction set flags and picked at run time from the CPU's
+# features, so the binaries still run on any x86-64 or ARM64 CPU.
+add_library(blake3 STATIC common/blake3/blake3.c common/blake3/blake3_dispatch.c common/blake3/blake3_portable.c)
+target_include_directories(blake3 PUBLIC common/blake3)
+include(CheckCSourceCompiles)
+check_c_source_compiles("#if !defined(__x86_64__) && !defined(_M_X64)\n#error\n#endif\nint main(void) { return 0; }" BC_X86_64)
+check_c_source_compiles("#if !defined(__aarch64__) && !defined(_M_ARM64)\n#error\n#endif\nint main(void) { return 0; }" BC_ARM64)
+if(BC_X86_64 AND MINGW)
+  # MinGW-w64 GCC does not align the stack for 256 and 512 bit locals (GCC bug 54412): AVX2 and
+  # AVX-512 code would fault on aligned spills. SSE4.1 at most.
+  target_sources(blake3 PRIVATE common/blake3/blake3_sse2.c common/blake3/blake3_sse41.c)
+  set_source_files_properties(common/blake3/blake3_sse2.c PROPERTIES COMPILE_OPTIONS -msse2)
+  set_source_files_properties(common/blake3/blake3_sse41.c PROPERTIES COMPILE_OPTIONS -msse4.1)
+  target_compile_definitions(blake3 PRIVATE BLAKE3_NO_AVX2 BLAKE3_NO_AVX512)
+elseif(BC_X86_64)
+  target_sources(blake3 PRIVATE common/blake3/blake3_sse2.c common/blake3/blake3_sse41.c
+                                common/blake3/blake3_avx2.c common/blake3/blake3_avx512.c)
+  if(MSVC)
+    # SSE2 and SSE4.1 intrinsics need no flag on x64.
+    set_source_files_properties(common/blake3/blake3_avx2.c PROPERTIES COMPILE_OPTIONS /arch:AVX2)
+    set_source_files_properties(common/blake3/blake3_avx512.c PROPERTIES COMPILE_OPTIONS /arch:AVX512)
+  else()
+    set_source_files_properties(common/blake3/blake3_sse2.c PROPERTIES COMPILE_OPTIONS -msse2)
+    set_source_files_properties(common/blake3/blake3_sse41.c PROPERTIES COMPILE_OPTIONS -msse4.1)
+    set_source_files_properties(common/blake3/blake3_avx2.c PROPERTIES COMPILE_OPTIONS -mavx2)
+    set_source_files_properties(common/blake3/blake3_avx512.c PROPERTIES COMPILE_OPTIONS "-mavx512f;-mavx512vl")
+  endif()
+elseif(BC_ARM64)
+  target_sources(blake3 PRIVATE common/blake3/blake3_neon.c)
+  target_compile_definitions(blake3 PRIVATE BLAKE3_USE_NEON=1)
+else()
+  target_compile_definitions(blake3 PRIVATE BLAKE3_NO_SSE2 BLAKE3_NO_SSE41 BLAKE3_NO_AVX2 BLAKE3_NO_AVX512 BLAKE3_USE_NEON=0)
+endif()
+
+# zstd: bc_tool compresses .blend files before encrypting them (common/bc_compress.h). An installed
+# zstd first, otherwise the pinned upstream release, static and single threaded.
+find_package(zstd CONFIG QUIET)
+if(TARGET zstd::libzstd_static)
+  set(BC_ZSTD zstd::libzstd_static)
+elseif(TARGET zstd::libzstd_shared)
+  set(BC_ZSTD zstd::libzstd_shared)
+elseif(BINARYCRYPT_FETCH_ZSTD)
+  include(FetchContent)
+  set(ZSTD_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
+  set(ZSTD_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+  set(ZSTD_BUILD_CONTRIB OFF CACHE BOOL "" FORCE)
+  set(ZSTD_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+  set(ZSTD_BUILD_STATIC ON CACHE BOOL "" FORCE)
+  set(ZSTD_LEGACY_SUPPORT OFF CACHE BOOL "" FORCE)
+  set(ZSTD_MULTITHREAD_SUPPORT OFF CACHE BOOL "" FORCE)
+  FetchContent_Declare(zstd
+    GIT_REPOSITORY https://github.com/facebook/zstd.git
+    GIT_TAG v1.5.7
+    GIT_SHALLOW TRUE
+    SOURCE_SUBDIR build/cmake
+  )
+  FetchContent_MakeAvailable(zstd)
+  set(BC_ZSTD libzstd_static)
+else()
+  message(FATAL_ERROR "zstd not found: install it (libzstd-dev) or enable BINARYCRYPT_FETCH_ZSTD")
+endif()
+
 # Everything except the key: shared by the key generator, the tool, the launcher and the tests.
 add_library(bc_core STATIC
   common/bc_brand.c
+  common/bc_compress.c
   common/bc_embed.c
   common/bc_envelope.c
   common/bc_job.c
@@ -40,7 +105,7 @@ add_library(bc_core STATIC
   common/bc_seal.c
 )
 target_include_directories(bc_core PUBLIC common)
-target_link_libraries(bc_core PUBLIC monocypher)
+target_link_libraries(bc_core PUBLIC monocypher blake3 PRIVATE ${BC_ZSTD})
 target_compile_options(bc_core PRIVATE ${BC_WARNINGS})
 if(WIN32)
   target_link_libraries(bc_core PUBLIC bcrypt)
@@ -205,7 +270,7 @@ endif()
 include(CTest)
 if(BUILD_TESTING)
   add_executable(bc_tests tests/bc_tests.c)
-  target_link_libraries(bc_tests PRIVATE bc_build_key)
+  target_link_libraries(bc_tests PRIVATE bc_build_key ${BC_ZSTD})
   if(WIN32)
     target_link_libraries(bc_tests PRIVATE version) # GetFileVersionInfo: checks the branding.
   endif()
@@ -219,7 +284,7 @@ if(BUILD_TESTING)
   # Stand-in for the UPBGE player: receives the key through the pipe contract and checks that the
   # main file decrypts to the expected bytes. It does not link the build key.
   add_executable(bc_fake_player tests/bc_fake_player.c)
-  target_link_libraries(bc_fake_player PRIVATE bc_core)
+  target_link_libraries(bc_fake_player PRIVATE bc_core ${BC_ZSTD})
   target_compile_options(bc_fake_player PRIVATE ${BC_WARNINGS})
 
   # Stand-in key provider and key server in one (online key games).
