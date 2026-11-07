@@ -2,6 +2,7 @@
 
 #include "bc_project.h"
 
+#include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -82,6 +83,62 @@ void bc_project_remove_input(BC_Project *p, const int index)
           p->inputs + index + 1,
           sizeof(char *) * (size_t)(p->input_count - index - 1));
   p->input_count--;
+}
+
+int bc_project_data_extensions(const BC_Project *p, char out[][BC_DATA_EXT_SIZE], const int max, char *err, const size_t err_size)
+{
+  /* Kinds of their own, and what the OS or Python loads as code. */
+  static const char *const not_data[] = {".blend", ".py", ".pyw", ".pyc", ".pth", ".pyd", ".dll", ".so", ".dylib", ".exe"};
+  int count = 0;
+  const char *c = p->data_extensions;
+  while (*c != '\0') {
+    if (*c == ' ' || *c == '\t' || *c == ',' || *c == ';') {
+      c++;
+      continue;
+    }
+    const char *start = c;
+    while (*c != '\0' && *c != ' ' && *c != '\t' && *c != ',' && *c != ';') {
+      c++;
+    }
+    const char *name = start;
+    if (name[0] == '*') {
+      name++;
+    }
+    if (name < c && name[0] == '.') {
+      name++;
+    }
+    const size_t n = (size_t)(c - name);
+    bool valid = n > 0 && n + 2 <= BC_DATA_EXT_SIZE;
+    for (size_t i = 0; valid && i < n; i++) {
+      valid = isalnum((unsigned char)name[i]) || name[i] == '_' || name[i] == '-' || name[i] == '.';
+    }
+    if (!valid) {
+      snprintf(err, err_size, "'%.*s' is not a file extension", (int)(c - start), start);
+      return -1;
+    }
+    if (count == max) {
+      snprintf(err, err_size, "more than %d data extensions", max);
+      return -1;
+    }
+    char ext[BC_DATA_EXT_SIZE];
+    ext[0] = '.';
+    memcpy(ext + 1, name, n);
+    ext[n + 1] = '\0';
+    for (size_t i = 0; i < sizeof(not_data) / sizeof(not_data[0]); i++) {
+      /* Same length and same suffix, ignoring case: the same extension. */
+      if (strlen(ext) == strlen(not_data[i]) && bc_path_has_extension(ext, not_data[i])) {
+        snprintf(err,
+                 err_size,
+                 i == 0 ? "'%s' files are always encrypted, as scenes" :
+                 i == 1 ? "'%s' files are always encrypted, as Python modules" :
+                          "'%s' cannot be a data extension: the player loads it as code",
+                 not_data[i]);
+        return -1;
+      }
+    }
+    memcpy(out[count++], ext, n + 2);
+  }
+  return count;
 }
 
 const char *bc_project_dist_root(const BC_Project *p)
@@ -284,6 +341,9 @@ bool bc_project_load(BC_Project *p, const char *file_path, char *err, size_t err
         break;
       }
     }
+    else if (strcmp(key, "data_extensions") == 0) {
+      ok = (size_t)snprintf(p->data_extensions, sizeof(p->data_extensions), "%s", value) < sizeof(p->data_extensions);
+    }
     else if (strcmp(key, "input") == 0) {
       char path[BC_PATH_MAX];
       ok = bc_resolve(path, project_dir, value) && bc_project_add_input(p, path);
@@ -393,6 +453,9 @@ bool bc_project_save(const BC_Project *p, const char *file_path, char *err, size
   bc_write_value(f, "player", p->player);
   if (p->main[0] != '\0') {
     bc_write_path(f, "main", project_dir, p->main);
+  }
+  if (p->data_extensions[0] != '\0') {
+    bc_write_value(f, "data_extensions", p->data_extensions);
   }
   for (int i = 0; i < p->input_count; i++) {
     bc_write_path(f, "input", project_dir, p->inputs[i]);

@@ -31,6 +31,8 @@ function(bc_expect_output text)
   endif()
 endfunction()
 
+# Optional second argument: the kind byte (offset 11) as two hex digits, 00 .blend, 01 Python
+# module, 02 data file.
 function(bc_expect_sealed file)
   if(NOT EXISTS "${file}")
     message(FATAL_ERROR "missing ${file}")
@@ -39,6 +41,12 @@ function(bc_expect_sealed file)
   file(READ "${file}" head LIMIT 8 HEX)
   if(NOT head STREQUAL "555042474542431a")
     message(FATAL_ERROR "${file} is not a BinaryCrypt container")
+  endif()
+  if(ARGC GREATER 1)
+    file(READ "${file}" kind OFFSET 11 LIMIT 1 HEX)
+    if(NOT kind STREQUAL "${ARGV1}")
+      message(FATAL_ERROR "${file} holds kind ${kind}, expected ${ARGV1}")
+    endif()
   endif()
 endfunction()
 
@@ -53,22 +61,30 @@ string(REPEAT "game data 0123456789 " 9000 payload)
 file(WRITE "${SRC}/game.blend" "BLENDER-v405${payload}")
 file(WRITE "${SRC}/levels/level 1.blend" "BLENDER-v405 level one ${payload}")
 file(WRITE "${SRC}/levels/notes.txt" "not a blend file")
+file(WRITE "${SRC}/levels/logic.py" "SPEED = 3\n")
+file(WRITE "${SRC}/levels/__init__.py" "")
+file(WRITE "${SRC}/levels/stats.json" "{\"hp\": 10}")
 file(COPY "${BC_PLAYER}" DESTINATION "${DIST}/engine")
 
 # -- Mirror mode ------------------------------------------------------------------------------
 file(WRITE "${BC_WORK}/game.bcproj"
   "version = 1\nsource_root = src\noutput_mode = mirror\noutput_dir = dist\n"
-  "game_name = My Game\nplayer = engine/${player_name}\nmain = src/game.blend\ninput = src\n")
+  "game_name = My Game\nplayer = engine/${player_name}\nmain = src/game.blend\ninput = src\n"
+  "data_extensions = json\n")
 bc_run(TRUE "${BC_TOOL}" --batch "${BC_WORK}/game.bcproj")
 # No key setting: a key for this project, created next to the project file.
 bc_expect_output("Created the project key")
 if(NOT EXISTS "${BC_WORK}/game.key")
   message(FATAL_ERROR "the project key file was not created next to the project")
 endif()
-bc_expect_sealed("${DIST}/game.blend")
+bc_expect_sealed("${DIST}/game.blend" 00)
 file(SHA256 "${DIST}/levels/level 1.blend" level_project)
-bc_expect_sealed("${DIST}/levels/level 1.blend")
-if(EXISTS "${DIST}/levels/notes.txt" OR NOT EXISTS "${DIST}/${game}")
+bc_expect_sealed("${DIST}/levels/level 1.blend" 00)
+# Python modules and the data extensions come with the folders, encrypted; empty files as they are.
+bc_expect_sealed("${DIST}/levels/logic.py" 01)
+bc_expect_sealed("${DIST}/levels/stats.json" 02)
+file(SIZE "${DIST}/levels/__init__.py" init_size)
+if(EXISTS "${DIST}/levels/notes.txt" OR NOT EXISTS "${DIST}/${game}" OR NOT init_size EQUAL 0)
   message(FATAL_ERROR "unexpected mirror output")
 endif()
 # The root holds only the game executable, the encrypted data and engine/.
@@ -113,6 +129,14 @@ endif()
 file(WRITE "${DIST}/engine/scripts/menu.py" "print('patched')")
 bc_run(FALSE "${DIST}/${game}")
 file(WRITE "${DIST}/engine/scripts/menu.py" "print()")
+bc_run(TRUE "${DIST}/${game}")
+# An encrypted module swapped for a plain one (the player would import it) stops the game too.
+file(RENAME "${DIST}/levels/logic.py" "${BC_WORK}/logic.py.sealed")
+file(WRITE "${DIST}/levels/logic.py" "SPEED = 99\n")
+bc_run(FALSE "${DIST}/${game}")
+bc_expect_output("library, program or Python file")
+file(REMOVE "${DIST}/levels/logic.py")
+file(RENAME "${BC_WORK}/logic.py.sealed" "${DIST}/levels/logic.py")
 bc_run(TRUE "${DIST}/${game}")
 # Libraries level: Python sources, bytecode and .pth files are not covered.
 file(READ "${BC_WORK}/game.bcproj" checked)
@@ -292,8 +316,8 @@ bc_run(FALSE "${DIST}/${game}")
 bc_expect_output("test provider refused")
 set(ENV{BC_TEST_PROVIDER_MODE} "ok")
 # Key per update: update 2 changes the main file; the game then needs two keys (the player picks
-# the main file's by key id), the unchanged level keeps its bytes, and a cached key is not asked
-# for again.
+# the main file's by key id), the unchanged level, module and data file keep their bytes (the empty
+# __init__.py uses no key), and a cached key is not asked for again.
 set(ENV{BC_TEST_PROVIDER_KEY_FILE} "${BC_WORK}/updates.key")
 set(ENV{BC_TEST_PROVIDER_LOG} "${BC_WORK}/provider.log")
 set(rotation "key = online\nkey_file = updates.key\nkey_provider = engine/${provider_name}\nkey_url = https://keys.example.com/key\nkey_cache = permanent\nkey_rotation = per_update\n")
@@ -307,7 +331,7 @@ file(APPEND "${SRC}/game.blend" "new content of update 2")
 file(WRITE "${BC_WORK}/update2.bcproj" "${project}${rotation}key_update = 2\n")
 bc_run(TRUE "${BC_TOOL}" --batch "${BC_WORK}/update2.bcproj")
 bc_expect_output("New key for update 2")
-bc_expect_output("1 file(s) with its key, 1 unchanged with earlier keys; the game uses 2 key(s)")
+bc_expect_output("1 file(s) with its key, 3 unchanged with earlier keys; the game uses 2 key(s)")
 file(SHA256 "${DIST}/game.blend" main_v2)
 file(SHA256 "${DIST}/levels/level 1.blend" level_v2)
 if(main_v1 STREQUAL main_v2 OR NOT level_v1 STREQUAL level_v2)

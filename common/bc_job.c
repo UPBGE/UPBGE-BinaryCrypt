@@ -34,8 +34,13 @@ typedef struct BC_JobFile {
    * unchanged ones. Also the plaintext hash when the file is sealed as it is. */
   uint8_t hash[BC_PLAIN_HASH_SIZE];
   bool hashed;
+  /** BC_KIND_*: .blend, .py, anything else a data file. */
+  uint8_t kind;
   /** A .blend Blender did not compress: compressed before sealing (bc_compress.h). */
   bool compress;
+  /** An empty module or data file (an empty __init__.py): written as it is, since a container
+   * cannot be empty and there is nothing to hide. Neither hashed nor sealed, it uses no key. */
+  bool copy;
   /** Key ring index of the key sealing this file, -1 for the build key. */
   int key;
 } BC_JobFile;
@@ -78,6 +83,10 @@ struct BC_Job {
   char player_rel[BC_PATH_MAX];
   char player_abs[BC_PATH_MAX];
   char main_out_rel[BC_PATH_MAX];
+  /** Mirror output: folders also give Python modules and the data files of these extensions. */
+  bool mirror;
+  char data_ext[BC_DATA_EXT_MAX][BC_DATA_EXT_SIZE];
+  int data_ext_count;
 
   BC_JobFile *files;
   int file_count;
@@ -167,6 +176,26 @@ typedef struct BC_ScanContext {
 
 static void bc_scan_dir(BC_Job *job, const char *dir, const char *skip_dir, bool *ok);
 
+/** What a folder gives: .blend files, and with the mirror output .py modules and data files. */
+static bool bc_job_scans(const BC_Job *job, const char *name)
+{
+  if (bc_path_has_extension(name, ".blend")) {
+    return true;
+  }
+  if (!job->mirror) {
+    return false;
+  }
+  if (bc_path_has_extension(name, ".py")) {
+    return true;
+  }
+  for (int i = 0; i < job->data_ext_count; i++) {
+    if (bc_path_has_extension(name, job->data_ext[i])) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static void bc_scan_entry(void *user, const char *name, bool is_dir)
 {
   BC_ScanContext *ctx = (BC_ScanContext *)user;
@@ -181,10 +210,10 @@ static void bc_scan_entry(void *user, const char *name, bool is_dir)
       bc_scan_dir(ctx->job, path, ctx->skip_dir, &ctx->ok);
     }
   }
-  else if (bc_path_has_extension(name, ".blend")) {
-    /* Found by scanning, not listed: an encrypted .blend is most likely an old output (for
-     * example from an earlier output folder inside the sources). Skip it instead of failing the
-     * whole batch. Explicitly listed files still fail loudly in bc_seal_begin. */
+  else if (bc_job_scans(ctx->job, name)) {
+    /* Found by scanning, not listed: an encrypted file is most likely an old output (for example
+     * from an earlier output folder inside the sources). Skip it instead of failing the whole
+     * batch. Explicitly listed files still fail loudly in bc_seal_begin. */
     if (bc_file_is_container(path)) {
       bc_log(ctx->job, BC_LOG_WARNING, "Skipped '%s': already encrypted", path);
     }
@@ -550,6 +579,18 @@ BC_Job *bc_job_create(const BC_Project *p,
   snprintf(job->launcher_path, sizeof(job->launcher_path), "%s", launcher_path);
   job->manifest_mode = p->manifest_mode;
   job->integrity = p->integrity;
+  job->mirror = p->output_mode == BC_OUTPUT_MIRROR;
+  char err[256];
+  job->data_ext_count = bc_project_data_extensions(p, job->data_ext, BC_DATA_EXT_MAX, err, sizeof(err));
+  if (job->data_ext_count < 0) {
+    bc_log(job, BC_LOG_ERROR, "Data files: %s", err);
+    return bc_job_fail_create(job);
+  }
+  if (job->data_ext_count > 0 && !job->mirror) {
+    /* Like the branding settings off Windows: kept in the project, ignored with a warning. */
+    bc_log(job, BC_LOG_WARNING, "Data files ignored: they need the mirror output, where their encrypted copies keep their names");
+    job->data_ext_count = 0;
+  }
   if (p->input_count == 0) {
     bc_log(job, BC_LOG_ERROR, "There are no input files");
     return bc_job_fail_create(job);
@@ -597,7 +638,7 @@ BC_Job *bc_job_create(const BC_Project *p,
   }
   job->file_count = unique;
   if (job->file_count == 0) {
-    bc_log(job, BC_LOG_ERROR, "No .blend files found in the inputs");
+    bc_log(job, BC_LOG_ERROR, "No files to encrypt found in the inputs");
     return bc_job_fail_create(job);
   }
 
@@ -605,6 +646,14 @@ BC_Job *bc_job_create(const BC_Project *p,
   bool main_found = false;
   for (int i = 0; i < job->file_count; i++) {
     BC_JobFile *file = &job->files[i];
+    file->kind = bc_path_has_extension(file->in, ".blend") ? BC_KIND_BLEND :
+                 bc_path_has_extension(file->in, ".py")    ? BC_KIND_PYTHON :
+                                                             BC_KIND_DATA;
+    if (file->kind != BC_KIND_BLEND && !job->mirror) {
+      /* An import or a script names "module.py" or "level.json", never "level.upbgebc". */
+      bc_log(job, BC_LOG_ERROR, "'%s': only .blend files can be encrypted next to the sources, the others need the mirror output", file->in);
+      return bc_job_fail_create(job);
+    }
     char out[BC_PATH_MAX];
     if (!bc_output_path(p, file->in, out, sizeof(out)) ||
         (file->out = (char *)malloc(strlen(out) + 1)) == NULL)
@@ -619,11 +668,16 @@ BC_Job *bc_job_create(const BC_Project *p,
     }
     job->total_bytes += 2 * file->size; /* Hashed, then sealed. */
     file->key = -1;
+    file->copy = file->size == 0 && file->kind != BC_KIND_BLEND;
     if (bc_path_equal(out, job->game_exe)) {
       bc_log(job, BC_LOG_ERROR, "The game executable would overwrite '%s'", out);
       return bc_job_fail_create(job);
     }
     if (strcmp(file->in, p->main) == 0) {
+      if (file->kind != BC_KIND_BLEND) {
+        bc_log(job, BC_LOG_ERROR, "The main file must be a .blend file");
+        return bc_job_fail_create(job);
+      }
       main_found = true;
       if (!bc_path_relative(job->main_out_rel, sizeof(job->main_out_rel), job->dist_root, out)) {
         bc_log(job, BC_LOG_ERROR, "The main file must end up inside the distribution folder");
@@ -813,7 +867,7 @@ static void bc_job_hash_file(BC_Job *job, BC_JobFile *file)
   crypto_blake2b_update(&job->file_hash_ctx, job->hash_buffer, n);
   job->done_bytes += n;
   if (first) {
-    file->compress = bc_blend_is_uncompressed(job->hash_buffer, n);
+    file->compress = file->kind == BC_KIND_BLEND && bc_blend_is_uncompressed(job->hash_buffer, n);
   }
   if (n == BC_HASH_READ_SIZE) {
     return;
@@ -829,6 +883,33 @@ static void bc_job_hash_file(BC_Job *job, BC_JobFile *file)
   }
 }
 
+/** Write an empty file as it is (see BC_JobFile::copy). */
+static void bc_job_copy_empty(BC_Job *job, BC_JobFile *file)
+{
+  uint64_t size = 1;
+  if (!bc_file_size(file->in, &size) || size != 0) {
+    bc_log(job, BC_LOG_ERROR, "'%s' changed while it was being read", file->in);
+    bc_job_set_failed(job);
+    return;
+  }
+  if (bc_is_file(file->out) && bc_file_size(file->out, &size) && size == 0) {
+    job->kept_files++;
+    bc_log(job, BC_LOG_INFO, "Up to date %s", bc_display(job, file->out));
+    job->current++;
+    return;
+  }
+  char dir[BC_PATH_MAX];
+  bc_path_dirname(dir, sizeof(dir), file->out);
+  FILE *f = bc_mkdir_p(dir) ? bc_fopen(file->out, "wb") : NULL;
+  if (f == NULL || fclose(f) != 0) {
+    bc_log(job, BC_LOG_ERROR, "Cannot write '%s'", file->out);
+    bc_job_set_failed(job);
+    return;
+  }
+  bc_log(job, BC_LOG_INFO, "Copied %s (empty: nothing to encrypt)", bc_display(job, file->out));
+  job->current++;
+}
+
 static void bc_job_seal(BC_Job *job)
 {
   if (job->current == job->file_count) {
@@ -837,6 +918,10 @@ static void bc_job_seal(BC_Job *job)
   }
   BC_JobFile *file = &job->files[job->current];
   char err[BC_PATH_MAX + 128];
+  if (file->copy) {
+    bc_job_copy_empty(job, file);
+    return;
+  }
   if (!file->hashed) {
     bc_job_hash_file(job, file);
     return;
@@ -846,7 +931,7 @@ static void bc_job_seal(BC_Job *job)
     /* Made from the same source with the same key: the container stands (byte for byte, even if
      * this zstd would compress differently), so neither compress, encrypt nor rewrite it.
      * Re-exporting an unchanged game costs one hash pass. */
-    if (bc_seal_output_is_current(key, file->out, file->hash)) {
+    if (bc_seal_output_is_current(key, file->kind, file->out, file->hash)) {
       job->kept_files++;
       job->done_bytes += file->size;
       bc_log(job, BC_LOG_INFO, "Up to date %s", bc_display(job, file->out));
@@ -875,7 +960,7 @@ static void bc_job_seal(BC_Job *job)
       job->total_bytes += file->size; /* One more pass over the source. */
       return;
     }
-    if (!bc_seal_begin(&job->sealer, key, file->in, file->out, file->hash, file->hash, err, sizeof(err))) {
+    if (!bc_seal_begin(&job->sealer, key, file->kind, file->in, file->out, file->hash, file->hash, err, sizeof(err))) {
       bc_log(job, BC_LOG_ERROR, "%s", err);
       bc_job_set_failed(job);
       return;
@@ -898,7 +983,7 @@ static void bc_job_seal(BC_Job *job)
     job->compressing = false;
     job->current_base = job->done_bytes;
     /* The compressed copy is the plaintext; the source id still names the source. */
-    if (!bc_seal_begin(&job->sealer, key, job->compressed, file->out, job->compressor.out_hash, file->hash, err, sizeof(err))) {
+    if (!bc_seal_begin(&job->sealer, key, file->kind, job->compressed, file->out, job->compressor.out_hash, file->hash, err, sizeof(err))) {
       bc_log(job, BC_LOG_ERROR, "%s", err);
       bc_job_set_failed(job);
       return;
@@ -941,7 +1026,9 @@ static void bc_job_write_game_exe(BC_Job *job)
     /* Every key some file uses, oldest update first: the launcher fetches exactly these. */
     bool used[BC_KEYS_MAX] = {false};
     for (int i = 0; i < job->file_count; i++) {
-      used[job->files[i].key] = true;
+      if (!job->files[i].copy) {
+        used[job->files[i].key] = true;
+      }
     }
     for (int i = 0; i < job->ring.key_count; i++) {
       if (used[i]) {

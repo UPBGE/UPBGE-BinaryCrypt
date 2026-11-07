@@ -1,7 +1,7 @@
 # UPBGE BinaryCrypt
 
-UPBGE BinaryCrypt encrypts the `.blend` files of a UPBGE game so that they can be shipped without
-handing out the editable sources. It is the open-source successor of BPPlayer and follows the same
+UPBGE BinaryCrypt encrypts the `.blend` files, Python modules and data files of a UPBGE game so
+that they can be shipped without handing out the editable sources. It is the open-source successor of BPPlayer and follows the same
 model: an **encryption tool** for the developer and a **launcher** shipped with the game.
 
 | Component | Shipped with the game | Role |
@@ -16,7 +16,7 @@ A shipped game looks like this: one executable, the encrypted data and the runti
 MyGame.exe          game executable (launcher + manifest)
                     (binarycrypt.manifest next to it with the external manifest option)
 game.blend          encrypted
-levels/...          encrypted
+levels/...          encrypted (.blend files, and in mirror mode Python modules and data files)
 engine/             UPBGE runtime: blenderplayer.exe, DLLs, <version>/python, <version>/datafiles
 ```
 
@@ -34,11 +34,11 @@ public does not change it. Anti-debugging and code obfuscation are out of scope.
 own key by default, so a key recovered from one game opens no other; with an online key (below)
 the key is in no shipped file at all: recovering it requires owning the game.
 
-Only `.blend` files are encrypted. Pack textures, sounds and scripts into the `.blend` (Blender:
-*File > External Data > Pack Resources*, Python scripts as Text blocks) to protect them too.
-External `.py` modules imported by the game stay readable; the *+ Python* integrity level (below,
-the default) at least refuses them modified. Code injected into the running player (a debugger, an injector
-tool, `LD_PRELOAD`) is out of reach of any file check.
+Encrypted are the `.blend` files, the game's Python modules and the data files it reads with
+`bge.logic.decryptFile()` (see *Python modules and data files*). Textures, sounds and videos the
+`.blend` loads from disk are not: pack them into it (Blender: *File > External Data > Pack
+Resources*). Code injected into the running player (a debugger, an injector tool, `LD_PRELOAD`) is
+out of reach of any file check.
 
 ## How it works
 
@@ -46,15 +46,16 @@ tool, `LD_PRELOAD`) is out of reach of any file check.
    time and compiles it into `bc_tool` and `bc_launcher` only, stored as two shares so that
    neither executable holds it in one piece: each share sits at a random offset in 4 KiB of random
    bytes, one in read-only data and one in writable data. It never appears in the sources, the
-   build flags or the build logs. The UPBGE player never contains it. The `.blend` files are encrypted with a
+   build flags or the build logs. The UPBGE player never contains it. The game files are encrypted with a
    **project key**, created for each game in a key file next to its project; the game executable
    carries it masked with the build key. A game can instead get its key from a key server at
    launch (*online key*), or use the build key itself (see *Keys*, below).
 2. **Encryption.** `bc_tool` compresses each `.blend` Blender saved uncompressed (zstd, exactly as
    Blender's *Compress* option does: encrypted data no longer compresses, so a store would ship
    it at full size), then seals it into a container of independent 64 KiB chunks, each
-   authenticated with XChaCha20-Poly1305 ([Monocypher](https://monocypher.org)). Sealing is
-   deterministic (the nonce derives from the key and the hash of what is sealed): an unchanged
+   authenticated with XChaCha20-Poly1305 ([Monocypher](https://monocypher.org)). Python modules
+   and data files are sealed as they are. Sealing is deterministic (the nonce derives from the key
+   and the hash of what is sealed): an unchanged
    file gives the same bytes on every export, so store patches (Steam, Epic) only carry what
    changed, and an output already made from the same file is neither compressed, encrypted nor
    written again. It hashes the player executable and the code of the game folder
@@ -69,7 +70,8 @@ tool, `LD_PRELOAD`) is out of reach of any file check.
    streams only, not other handles of whoever started the game.
 4. **Loading.** The player reads the key into a memory page locked out of swap (and, on Linux,
    out of core dumps), then decrypts containers chunk by chunk below Blender's file readers: the
-   main file, `LibLoad`, linked libraries and zstd compressed files all work.
+   main file, `LibLoad`, linked libraries and zstd compressed files all work. Python modules are
+   decrypted by `import`, data files by `bge.logic.decryptFile()`.
 
 The container format and the launcher to player hand-off are specified in
 [`common/binarycrypt_format.h`](common/binarycrypt_format.h). **This header exists as an identical
@@ -156,8 +158,11 @@ Platform notes:
      *Keys*, below.
    - *Player*: the player inside the game folder; `engine/blenderplayer(.exe)` by default.
    - *Main file*: the `.blend` the game starts.
-   - *Files to encrypt*: `.blend` files and folders (scanned recursively, hidden folders skipped).
-     Drag and drop them on the window.
+   - *Files to encrypt*: files and folders, dragged and dropped on the window. Folders are scanned
+     recursively (hidden folders skipped) for `.blend` files and, with the mirror output, `.py`
+     modules and the files of the *Data files* extensions (for example `json csv`). A file listed
+     on its own is encrypted whatever its extension: `.blend` as a scene, `.py` as a module, any
+     other as a data file.
 3. **Encrypt.** This writes the encrypted files and the game executable. Save the project to run
    the same batch again later, or from a script: `bc_tool --batch mygame.bcproj`.
 4. **Sign** (optional, recommended on Windows): sign the game executable after exporting, e.g.
@@ -320,7 +325,8 @@ the protocol are in [`keyserver/`](keyserver/README.md), under the MIT license.
 - **Next to the sources**: each `name.blend` gets an encrypted `name.upbgebc` beside it, and the
   source folder is the game folder. Linked libraries still point to `.blend` names and
   `getBlendFileList()` only lists `.blend` files, so this mode suits single-file games, or games
-  that load their other files explicitly by their `.upbgebc` names.
+  that load their other files explicitly by their `.upbgebc` names. Only `.blend` files: a module
+  or a data file is opened by its own name, which an encrypted copy beside it cannot take.
 
 Re-encrypting replaces outputs atomically: an interrupted batch never leaves a partial file. An
 output made from the same `.blend` with the same key is kept as it is: its header names the
@@ -342,6 +348,47 @@ ships) would ship it at full size. Measured with two scenes saved by Blender 4.0
 | Same with a packed 2048×2048 PNG | 73.4 MB | 31.3 MB (43%) | | |
 
 Already compressed files (Blender's *Compress*, gzip) are sealed as they are.
+
+### Python modules and data files
+
+With the mirror output, the `.py` files of the scanned folders are encrypted too, and so are the
+files of the *Data files* extensions (`data_extensions`): list the folders the game uses, not one
+that also holds tools or add-ons. The game uses them as before:
+
+- **Modules** are imported with `import`, by Python components and by module mode Python
+  controllers, unchanged. The player puts a finder in front of Python's path finder: Python
+  searches as usual, and when the `.py` it found is a container, the finder decrypts it into
+  memory, compiles it there and wipes the plaintext. No bytecode is written for it and its source
+  is never on disk: tracebacks show file names and line numbers, without the lines.
+- **Data files** are read with `bge.logic.decryptFile(path)`, which returns their content as
+  `bytes` (`'//'` is the folder of the current `.blend`). A file that is not encrypted is returned
+  as it is, so the same script works in Blender and in the game:
+
+  ```python
+  import json
+  from bge import logic
+
+  level = json.loads(logic.decryptFile("//levels/level1.json"))
+  ```
+
+- An **empty** module or data file (an empty `__init__.py`) is copied as it is: there is nothing
+  to hide, and a container cannot be empty.
+- Every container holds one **kind** (scene, module, data file), part of its authenticated
+  header: `decryptFile()` refuses a `.blend` or a module, `import` a data file, `LibLoad` both.
+
+Only the player started from the game executable decrypts them; Blender and other players read
+them as unknown binary files. Both cost little: decryption runs at about 400 MB/s (2.1 GHz Xeon,
+one core), and in a game with a key the finder adds one `open()` per newly imported `.py`, a few
+microseconds; a game without a key (or Blender) has no finder at all. Data files are not
+compressed: when a store compresses its downloads and a data file is large and compressible,
+compress it in the game's own format before the export.
+
+**What it protects.** The source and the data never reach the disk in clear, but once imported, a
+module's code objects live in the player, where Python code can disassemble them; what keeps
+foreign Python out of the player is the integrity check. At *+ Python* (the default) an encrypted
+module replaced by a plain one stops the game, as any changed `.py` does; at the lower levels it
+would be imported. Python scripts that use Blender's API may have to be made available as source
+anyway (see *Your game's license*, below).
 
 ### Project file (`.bcproj`)
 
@@ -371,7 +418,9 @@ key_update = 1                  # online, per_update: number of the update being
 integrity = python              # player | native (+ libraries) | python (default, + Python files)
 player = engine/blenderplayer.exe   # relative to the game folder
 main = src/game.blend
-input = src                     # a folder (scanned for *.blend) or a file; repeatable
+data_extensions = json csv      # mirror, optional: folders also give these data files
+input = src                     # a folder (scanned for *.blend, and in mirror mode *.py and the
+                                #   data extensions) or a file of any kind; repeatable
 ```
 
 ## Game executable messages

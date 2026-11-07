@@ -20,7 +20,8 @@
 
 static void bc_usage(FILE *f)
 {
-  fputs("UPBGE BinaryCrypt tool: encrypts .blend files for the UPBGE player.\n"
+  fputs("UPBGE BinaryCrypt tool: encrypts the .blend files, Python modules and data files of a UPBGE\n"
+        "game for its player.\n"
         "\n"
         "usage:\n"
 #ifdef BC_WITH_GUI

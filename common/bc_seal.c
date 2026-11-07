@@ -56,6 +56,7 @@ static void bc_seal_close(BC_Sealer *s, const bool remove_output)
 
 bool bc_seal_begin(BC_Sealer *s,
                    const uint8_t key[BC_KEY_SIZE],
+                   const uint8_t kind,
                    const char *in_path,
                    const char *out_path,
                    const uint8_t plain_hash[BC_PLAIN_HASH_SIZE],
@@ -87,22 +88,17 @@ bool bc_seal_begin(BC_Sealer *s,
   }
   uint8_t first[8];
   const size_t n = fread(first, 1, sizeof(first), s->in);
-  switch (bc_classify(first, n)) {
-    case BC_INPUT_BLEND:
-      break;
-    case BC_INPUT_SEALED:
-      snprintf(err, err_size, "'%s' is already encrypted", in_path);
-      bc_seal_close(s, false);
-      return false;
-    case BC_INPUT_UNKNOWN:
-      snprintf(err, err_size, "'%s' is not a .blend file", in_path);
-      bc_seal_close(s, false);
-      return false;
+  const BC_InputKind input = bc_classify(first, n);
+  if (input == BC_INPUT_SEALED || (kind == BC_KIND_BLEND && input != BC_INPUT_BLEND)) {
+    /* Modules and data files are whatever the game reads; only their encryption is checked. */
+    snprintf(err, err_size, input == BC_INPUT_SEALED ? "'%s' is already encrypted" : "'%s' is not a .blend file", in_path);
+    bc_seal_close(s, false);
+    return false;
   }
   rewind(s->in);
   setvbuf(s->in, NULL, _IOFBF, BC_IO_BUFFER_SIZE);
 
-  bc_seal_header(key, plain_size, plain_hash, source_hash, &s->header);
+  bc_seal_header(key, kind, plain_size, plain_hash, source_hash, &s->header);
   bc_header_write(&s->header, s->header_raw);
   s->chunk_count = bc_chunk_count(&s->header);
 
@@ -230,6 +226,7 @@ static void bc_source_id(const uint8_t key[BC_KEY_SIZE],
 }
 
 void bc_seal_header(const uint8_t key[BC_KEY_SIZE],
+                    const uint8_t kind,
                     const uint64_t plain_size,
                     const uint8_t plain_hash[BC_PLAIN_HASH_SIZE],
                     const uint8_t source_hash[BC_PLAIN_HASH_SIZE],
@@ -238,6 +235,7 @@ void bc_seal_header(const uint8_t key[BC_KEY_SIZE],
   memset(r_header, 0, sizeof(*r_header));
   r_header->version = BC_FORMAT_VERSION;
   r_header->chunk_log2 = BC_CHUNK_LOG2_DEFAULT;
+  r_header->kind = kind;
   r_header->plain_size = plain_size;
   bc_key_id(key, r_header->key_id);
   bc_source_id(key, source_hash, r_header->source_id);
@@ -254,6 +252,7 @@ void bc_seal_header(const uint8_t key[BC_KEY_SIZE],
 }
 
 bool bc_seal_output_is_current(const uint8_t key[BC_KEY_SIZE],
+                               const uint8_t kind,
                                const char *out_path,
                                const uint8_t source_hash[BC_PLAIN_HASH_SIZE])
 {
@@ -267,7 +266,7 @@ bool bc_seal_output_is_current(const uint8_t key[BC_KEY_SIZE],
   fclose(f);
   BC_Header header;
   if (n != sizeof(raw) || bc_header_read(raw, &header) != BC_HEADER_OK ||
-      header.chunk_log2 != BC_CHUNK_LOG2_DEFAULT || !bc_file_size(out_path, &size) ||
+      header.chunk_log2 != BC_CHUNK_LOG2_DEFAULT || header.kind != kind || !bc_file_size(out_path, &size) ||
       size != bc_container_size(&header))
   {
     return false;

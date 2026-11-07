@@ -139,6 +139,21 @@ static bool file_holds_key(const char *path, const uint8_t key_id[BC_KEY_ID_SIZE
   return found;
 }
 
+/** Kind byte of the container at \a rel (BC_KIND_*), -1 when unreadable. */
+static int sealed_kind(const char *rel)
+{
+  char path[BC_PATH_MAX];
+  uint8_t raw[BC_HEADER_SIZE];
+  BC_Header header;
+  work_path(path, rel);
+  FILE *f = bc_fopen(path, "rb");
+  const size_t n = f != NULL ? fread(raw, 1, sizeof(raw), f) : 0;
+  if (f != NULL) {
+    fclose(f);
+  }
+  return n == sizeof(raw) && bc_header_read(raw, &header) == BC_HEADER_OK ? header.kind : -1;
+}
+
 /** True when the container \a sealed decrypts with \a key. */
 static bool decrypts_with(const char *sealed, const uint8_t key[BC_KEY_SIZE])
 {
@@ -943,7 +958,7 @@ static void test_seal(void)
     BC_Sealer s;
     uint8_t hash[BC_PLAIN_HASH_SIZE];
     CHECK(bc_hash_file(in, hash));
-    CHECK(bc_seal_begin(&s, bc_build_key(), in, out, hash, hash, err, sizeof(err)));
+    CHECK(bc_seal_begin(&s, bc_build_key(), BC_KIND_BLEND, in, out, hash, hash, err, sizeof(err)));
     int r;
     while ((r = bc_seal_step(&s, err, sizeof(err))) == 1) {
     }
@@ -964,13 +979,13 @@ static void test_seal(void)
   work_path(c2, "seal/other_key.blend");
   CHECK(bc_hash_file(in, hash));
   BC_Sealer s;
-  CHECK(bc_seal_begin(&s, bc_build_key(), in, a, hash, hash, err, sizeof(err)));
+  CHECK(bc_seal_begin(&s, bc_build_key(), BC_KIND_BLEND, in, a, hash, hash, err, sizeof(err)));
   while (bc_seal_step(&s, err, sizeof(err)) == 1) {
   }
-  CHECK(bc_seal_begin(&s, bc_build_key(), in, b, hash, hash, err, sizeof(err)));
+  CHECK(bc_seal_begin(&s, bc_build_key(), BC_KIND_BLEND, in, b, hash, hash, err, sizeof(err)));
   while (bc_seal_step(&s, err, sizeof(err)) == 1) {
   }
-  CHECK(bc_seal_begin(&s, OTHER_KEY, in, c2, hash, hash, err, sizeof(err)));
+  CHECK(bc_seal_begin(&s, OTHER_KEY, BC_KIND_BLEND, in, c2, hash, hash, err, sizeof(err)));
   while (bc_seal_step(&s, err, sizeof(err)) == 1) {
   }
   uint8_t *da = NULL, *db = NULL, *dc = NULL;
@@ -983,19 +998,19 @@ static void test_seal(void)
   free(dc);
 
   /* Up to date: made from this source with this key, recognized from the header alone. */
-  CHECK(bc_seal_output_is_current(bc_build_key(), a, hash));
-  CHECK(!bc_seal_output_is_current(OTHER_KEY, a, hash));
+  CHECK(bc_seal_output_is_current(bc_build_key(), BC_KIND_BLEND, a, hash));
+  CHECK(!bc_seal_output_is_current(OTHER_KEY, BC_KIND_BLEND, a, hash));
   {
     uint8_t other[BC_PLAIN_HASH_SIZE];
     memcpy(other, hash, sizeof(other));
     other[5] ^= 1;
-    CHECK(!bc_seal_output_is_current(bc_build_key(), a, other));
+    CHECK(!bc_seal_output_is_current(bc_build_key(), BC_KIND_BLEND, a, other));
     /* Sealed from a transform of the source (another plaintext hash): still current for the
      * source, with another nonce than the source sealed as it is. */
-    CHECK(bc_seal_begin(&s, bc_build_key(), in, c2, hash, other, err, sizeof(err)));
+    CHECK(bc_seal_begin(&s, bc_build_key(), BC_KIND_BLEND, in, c2, hash, other, err, sizeof(err)));
     while (bc_seal_step(&s, err, sizeof(err)) == 1) {
     }
-    CHECK(bc_seal_output_is_current(bc_build_key(), c2, other) && !bc_seal_output_is_current(bc_build_key(), c2, hash));
+    CHECK(bc_seal_output_is_current(bc_build_key(), BC_KIND_BLEND, c2, other) && !bc_seal_output_is_current(bc_build_key(), BC_KIND_BLEND, c2, hash));
     uint8_t *x = NULL, *y = NULL;
     uint64_t nx = 0, ny = 0;
     CHECK(bc_test_read_file(a, &x, &nx) && bc_test_read_file(c2, &y, &ny));
@@ -1009,7 +1024,7 @@ static void test_seal(void)
       fputc(0, f);
       fclose(f);
     }
-    CHECK(!bc_seal_output_is_current(bc_build_key(), c2, other));
+    CHECK(!bc_seal_output_is_current(bc_build_key(), BC_KIND_BLEND, c2, other));
   }
 
   /* The plaintext must still match the hash the nonce came from: otherwise the output is dropped
@@ -1018,29 +1033,47 @@ static void test_seal(void)
   memcpy(wrong, hash, sizeof(wrong));
   wrong[0] ^= 1;
   bc_remove(b);
-  CHECK(bc_seal_begin(&s, bc_build_key(), in, b, wrong, hash, err, sizeof(err)));
+  CHECK(bc_seal_begin(&s, bc_build_key(), BC_KIND_BLEND, in, b, wrong, hash, err, sizeof(err)));
   int result;
   while ((result = bc_seal_step(&s, err, sizeof(err))) == 1) {
   }
   CHECK(result < 0 && strstr(err, "changed while") != NULL && !bc_is_file(b));
 
   /* Refusals: already sealed, not a blend, empty. */
-  CHECK(!bc_seal_begin(&s, bc_build_key(), a, b, hash, hash, err, sizeof(err)));
+  CHECK(!bc_seal_begin(&s, bc_build_key(), BC_KIND_BLEND, a, b, hash, hash, err, sizeof(err)));
   CHECK(strstr(err, "already encrypted") != NULL);
   write_text("seal/notes.blend", "just text");
   work_path(in, "seal/notes.blend");
-  CHECK(!bc_seal_begin(&s, bc_build_key(), in, b, hash, hash, err, sizeof(err)));
+  CHECK(!bc_seal_begin(&s, bc_build_key(), BC_KIND_BLEND, in, b, hash, hash, err, sizeof(err)));
   CHECK(strstr(err, "not a .blend") != NULL);
   write_text("seal/empty.blend", "");
   work_path(in, "seal/empty.blend");
-  CHECK(!bc_seal_begin(&s, bc_build_key(), in, b, hash, hash, err, sizeof(err)));
+  CHECK(!bc_seal_begin(&s, bc_build_key(), BC_KIND_BLEND, in, b, hash, hash, err, sizeof(err)));
 
   /* zstd compressed blend files (Blender's "Compress" option) are accepted as they are. */
   char zstd_like[32] = "\x28\xb5\x2f\xfd" "compressed payload";
   write_text("seal/compressed.blend", zstd_like);
   work_path(in, "seal/compressed.blend");
-  CHECK(bc_seal_begin(&s, bc_build_key(), in, b, hash, hash, err, sizeof(err)));
+  CHECK(bc_seal_begin(&s, bc_build_key(), BC_KIND_BLEND, in, b, hash, hash, err, sizeof(err)));
   bc_seal_abort(&s);
+
+  /* Modules and data files: any content but a container. The kind is in the header (and so in
+   * the nonce and the associated data), and an output of another kind is never current. */
+  write_text("seal/menu.py", "MENU = 1\n");
+  work_path(in, "seal/menu.py");
+  work_path(b, "seal/out/menu.py");
+  CHECK(bc_hash_file(in, hash));
+  CHECK(!bc_seal_begin(&s, bc_build_key(), BC_KIND_BLEND, in, b, hash, hash, err, sizeof(err)) && strstr(err, "not a .blend") != NULL);
+  CHECK(bc_seal_begin(&s, bc_build_key(), BC_KIND_PYTHON, in, b, hash, hash, err, sizeof(err)));
+  while ((result = bc_seal_step(&s, err, sizeof(err))) == 1) {
+  }
+  CHECK(result == 0 && decrypts_to("seal/out/menu.py", "seal/menu.py") && sealed_kind("seal/out/menu.py") == BC_KIND_PYTHON);
+  CHECK(bc_seal_output_is_current(bc_build_key(), BC_KIND_PYTHON, b, hash));
+  CHECK(!bc_seal_output_is_current(bc_build_key(), BC_KIND_DATA, b, hash));
+  CHECK(sealed_kind("seal/twice_a.blend") == BC_KIND_BLEND);
+  work_path(c2, "seal/out/resealed.bin");
+  CHECK(!bc_seal_begin(&s, bc_build_key(), BC_KIND_DATA, b, c2, hash, hash, err, sizeof(err)) && strstr(err, "already encrypted") != NULL);
+  CHECK(!bc_is_file(c2));
 }
 
 /** "BLENDER" then \a size bytes of text-like data: compresses like real .blend data does. */
@@ -1303,6 +1336,33 @@ static void test_project(void)
   work_path(path, "proj/bad_manifest.bcproj");
   CHECK(!bc_project_load(&p, path, err, sizeof(err)) && strstr(err, "manifest must be") != NULL);
 
+  /* Data extensions: stored as typed, split by bc_project_data_extensions. */
+  {
+    char ext[BC_DATA_EXT_MAX][BC_DATA_EXT_SIZE];
+    write_text("proj/data.bcproj", "version = 1\ndata_extensions = json, .TXT;*.csv  tar.gz\n");
+    work_path(path, "proj/data.bcproj");
+    CHECK(bc_project_load(&p, path, err, sizeof(err)));
+    CHECK_STR(p.data_extensions, "json, .TXT;*.csv  tar.gz");
+    CHECK(bc_project_data_extensions(&p, ext, BC_DATA_EXT_MAX, err, sizeof(err)) == 4);
+    CHECK_STR(ext[0], ".json");
+    CHECK_STR(ext[1], ".TXT");
+    CHECK_STR(ext[2], ".csv");
+    CHECK_STR(ext[3], ".tar.gz");
+    CHECK(bc_project_save(&p, saved, err, sizeof(err)) && bc_project_load(&q, saved, err, sizeof(err)));
+    CHECK_STR(q.data_extensions, p.data_extensions);
+    bc_project_free(&q);
+    const char *refused[][2] = {{"json py", "Python modules"}, {"blend", "scenes"}, {".DLL", "as code"}, {"pyd", "as code"}, {"j/son", "not a file extension"}, {"json .", "not a file extension"}, {"*", "not a file extension"}};
+    for (size_t i = 0; i < sizeof(refused) / sizeof(refused[0]); i++) {
+      snprintf(p.data_extensions, sizeof(p.data_extensions), "%s", refused[i][0]);
+      CHECK(bc_project_data_extensions(&p, ext, BC_DATA_EXT_MAX, err, sizeof(err)) == -1 && strstr(err, refused[i][1]) != NULL);
+    }
+    snprintf(p.data_extensions, sizeof(p.data_extensions), "a b c");
+    CHECK(bc_project_data_extensions(&p, ext, 2, err, sizeof(err)) == -1 && strstr(err, "more than 2") != NULL);
+    p.data_extensions[0] = '\0';
+    CHECK(bc_project_data_extensions(&p, ext, BC_DATA_EXT_MAX, err, sizeof(err)) == 0);
+    bc_project_free(&p);
+  }
+
   /* Strictness. */
   write_text("proj/typo.bcproj", "version = 1\nsource_rot = src\n");
   work_path(path, "proj/typo.bcproj");
@@ -1318,6 +1378,7 @@ typedef struct LogCapture {
   bool player_branded;
   int encrypted;
   int up_to_date;
+  int copied;
   char last_encrypted[1024];
   char last_error[1024];
   char last_warning[1024];
@@ -1334,6 +1395,7 @@ static void capture_log(void *user, BC_LogLevel level, const char *message)
     snprintf(c->last_encrypted, sizeof(c->last_encrypted), "%s", message);
   }
   c->up_to_date += strncmp(message, "Up to date ", 11) == 0;
+  c->copied += strncmp(message, "Copied ", 7) == 0;
   if (level == BC_LOG_WARNING) {
     c->warnings++;
     snprintf(c->last_warning, sizeof(c->last_warning), "%s", message);
@@ -1740,6 +1802,76 @@ static void test_job(void)
     work_path(path, "job/dist/levels/old_output.blend");
     CHECK(!bc_is_file(path));
     bc_remove(to);
+  }
+
+  /* Python modules and data files, mirror output only. Folders give .py files and the data
+   * extensions, any file can be listed; empty ones are copied as they are. */
+  {
+    char empty[BC_PATH_MAX];
+    uint64_t size = 1;
+    write_text("job/src/scripts/__init__.py", "");
+    write_text("job/src/scripts/menu.py", "import json\nMENU = 1\n");
+    write_text("job/src/data/level.json", "{\"level\": 1}");
+    write_text("job/src/data/empty.json", "");
+    write_text("job/src/data/notes.md", "not a data extension");
+    write_text("job/src/data/listed.bin", "listed on its own");
+    work_path(path, "job/src/data/listed.bin");
+    bc_project_add_input(&p, path);
+    snprintf(p.data_extensions, sizeof(p.data_extensions), "json");
+    CHECK(run_job(&p, &c) == 0 && c.errors == 0 && c.copied == 2);
+    CHECK(decrypts_to("job/dist/scripts/menu.py", "job/src/scripts/menu.py") && sealed_kind("job/dist/scripts/menu.py") == BC_KIND_PYTHON);
+    CHECK(decrypts_to("job/dist/data/level.json", "job/src/data/level.json") && sealed_kind("job/dist/data/level.json") == BC_KIND_DATA);
+    CHECK(decrypts_to("job/dist/data/listed.bin", "job/src/data/listed.bin") && sealed_kind("job/dist/data/listed.bin") == BC_KIND_DATA);
+    CHECK(sealed_kind("job/dist/game.blend") == BC_KIND_BLEND);
+    work_path(empty, "job/dist/scripts/__init__.py");
+    CHECK(bc_is_file(empty) && bc_file_size(empty, &size) && size == 0);
+    work_path(empty, "job/dist/data/empty.json");
+    CHECK(bc_is_file(empty) && bc_file_size(empty, &size) && size == 0);
+    work_path(path, "job/dist/data/notes.md");
+    CHECK(!bc_is_file(path));
+    /* Unchanged: nothing written again, empty copies included. */
+    CHECK(run_job(&p, &c) == 0 && c.encrypted == 0 && c.copied == 0 && c.up_to_date >= 7);
+    /* Online keys: an empty copy uses no key, the manifest names the one the others use. */
+    p.key_mode = BC_KEY_ONLINE;
+    work_path(p.key_file, "job/content.key");
+    snprintf(p.key_provider, sizeof(p.key_provider), "engine/provider");
+    CHECK(run_job(&p, &c) == 0 && c.errors == 0);
+    work_path(path, exe_name);
+    CHECK(bc_embed_read(path, bc_build_key(), &m) == BC_MANIFEST_OK && m.key_count == 1);
+    p.key_mode = BC_KEY_BUILD;
+    p.key_file[0] = p.key_provider[0] = '\0';
+    CHECK(run_job(&p, &c) == 0 && c.errors == 0);
+    /* Refusals: the main file is a scene, data extensions are data, the others need the mirror. */
+    work_path(p.main, "job/src/scripts/menu.py");
+    CHECK(run_job(&p, &c) == -2 && strstr(c.last_error, "must be a .blend") != NULL);
+    work_path(p.main, "job/src/game.blend");
+    snprintf(p.data_extensions, sizeof(p.data_extensions), "json py");
+    CHECK(run_job(&p, &c) == -2 && strstr(c.last_error, "Data files:") != NULL);
+    snprintf(p.data_extensions, sizeof(p.data_extensions), "json");
+    p.output_mode = BC_OUTPUT_INPLACE;
+    write_text("job/src/engine/player", "player");
+    work_path(path, "job/src/data/listed.bin");
+    bc_remove(path);
+    bc_project_clear_inputs(&p);
+    work_path(path, "job/src");
+    bc_project_add_input(&p, path);
+    CHECK(run_job(&p, &c) == 0 && c.warnings == 1 && strstr(c.last_warning, "need the mirror output") != NULL);
+    work_path(path, "job/src/data/level.upbgebc");
+    CHECK(!bc_is_file(path));
+    write_text("job/src/data/listed.bin", "listed on its own");
+    work_path(path, "job/src/data/listed.bin");
+    bc_project_add_input(&p, path);
+    p.data_extensions[0] = '\0';
+    CHECK(run_job(&p, &c) == -2 && strstr(c.last_error, "listed.bin") != NULL && strstr(c.last_error, "mirror output") != NULL);
+    p.output_mode = BC_OUTPUT_MIRROR;
+    const char *remove[] = {"job/src/scripts/__init__.py", "job/src/scripts/menu.py", "job/src/data/level.json", "job/src/data/empty.json", "job/src/data/notes.md", "job/src/data/listed.bin", "job/src/engine/player"};
+    for (size_t i = 0; i < sizeof(remove) / sizeof(remove[0]); i++) {
+      work_path(path, remove[i]);
+      bc_remove(path);
+    }
+    bc_project_clear_inputs(&p);
+    work_path(path, "job/src");
+    bc_project_add_input(&p, path);
   }
 
   /* Mirror output inside the source tree: its content is not encrypted again. */

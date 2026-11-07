@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 
-/* Streaming container writer: seals one .blend into a BinaryCrypt container chunk by chunk, so
+/* Streaming container writer: seals one file (a .blend, a Python module or a data file, the header's
+ * kind) into a BinaryCrypt container chunk by chunk, so
  * memory use is one chunk regardless of file size and a caller can interleave other work (a GUI
  * frame) between chunks.
  *
@@ -53,14 +54,15 @@ typedef struct BC_Sealer {
 } BC_Sealer;
 
 /**
- * Open \a in_path, check that it is a .blend (plain, gzip or zstd) and not already sealed, and
- * start writing the container to a temporary file next to \a out_path (parent directories are
- * created). \a plain_hash is the BLAKE2b-256 of the input (#bc_hash_file), \a source_hash that of
+ * Open \a in_path, check that it is not already sealed and, for #BC_KIND_BLEND, that it is a
+ * .blend (plain, gzip or zstd), and start writing the container of \a kind to a temporary file
+ * next to \a out_path (parent directories are created). Empty files cannot be sealed. \a plain_hash is the BLAKE2b-256 of the input (#bc_hash_file), \a source_hash that of
  * the file the input was made from (the same when sealed as it is). On failure nothing is left on
  * disk and \a err holds the reason.
  */
 bool bc_seal_begin(BC_Sealer *s,
                    const uint8_t key[BC_KEY_SIZE],
+                   uint8_t kind,
                    const char *in_path,
                    const char *out_path,
                    const uint8_t plain_hash[BC_PLAIN_HASH_SIZE],
@@ -84,21 +86,23 @@ void bc_seal_abort(BC_Sealer *s);
 /** BLAKE2b-256 of a whole file in one call (the job hashes in slices instead). */
 bool bc_hash_file(const char *path, uint8_t r_hash[BC_PLAIN_HASH_SIZE]);
 
-/** Header that sealing \a plain_size bytes with plaintext hash \a plain_hash, made from a source
- * hashing to \a source_hash, under \a key writes. Deterministic: the source id is a keyed hash of
+/** Header that sealing \a plain_size bytes of \a kind with plaintext hash \a plain_hash, made
+ * from a source hashing to \a source_hash, under \a key writes. Deterministic: the source id is a keyed hash of
  * the source hash, the nonce prefix a keyed hash of the other fields and the plaintext hash. */
 void bc_seal_header(const uint8_t key[BC_KEY_SIZE],
+                    uint8_t kind,
                     uint64_t plain_size,
                     const uint8_t plain_hash[BC_PLAIN_HASH_SIZE],
                     const uint8_t source_hash[BC_PLAIN_HASH_SIZE],
                     BC_Header *r_header);
 
-/** True when \a out_path already holds a container this tool made from a source hashing to
- * \a source_hash under \a key: current format and chunk size, same key id and source id, and the
- * exact size its header announces. An export then skips it (no new bytes, no new timestamp, no
+/** True when \a out_path already holds a container of \a kind this tool made from a source hashing
+ * to \a source_hash under \a key: current format and chunk size, same kind, key id and source id,
+ * and the exact size its header announces. An export then skips it (no new bytes, no new timestamp, no
  * transform). Only the header is read: damage past it goes unnoticed here, and is caught by the
  * player's MAC check. The source id is keyed: nobody without the key can forge a match. */
 bool bc_seal_output_is_current(const uint8_t key[BC_KEY_SIZE],
+                               uint8_t kind,
                                const char *out_path,
                                const uint8_t source_hash[BC_PLAIN_HASH_SIZE]);
 

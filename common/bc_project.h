@@ -4,7 +4,7 @@
  * comments, paths relative to the project file so a project can move with its game:
  *
  *   version = 1
- *   source_root = .               # tree of the source .blend files
+ *   source_root = .               # tree of the game sources (.blend files, Python modules...)
  *   output_mode = mirror          # mirror | inplace
  *   output_dir = dist             # mirror only: encrypted copy of the tree, same names
  *   game_name = MyGame            # game executable name (".exe" added on Windows); optional,
@@ -31,8 +31,10 @@
  *                                 # Python bytecode removed) (bc_native.h)
  *   player = engine/blenderplayer.exe  # relative to the distribution root, hashed by the tool
  *   main = game.blend             # the blend the game executable starts
- *   input = game.blend            # a file, or a folder scanned recursively for *.blend
- *   input = levels
+ *   data_extensions = .json .txt  # mirror only: folders also give these files, read in the
+ *                                 # game with bge.logic.decryptFile(); optional
+ *   input = game.blend            # a file of any kind, or a folder scanned recursively for
+ *   input = levels                # *.blend, and in mirror mode *.py and data_extensions files
  *
  * A '#' preceded by a space or a tab starts a comment; double quotes keep it, and leading or
  * trailing spaces, in a value.
@@ -60,6 +62,9 @@ extern "C" {
 #define BC_PROJECT_TEXT_MAX 256
 #define BC_PROJECT_VERSION_MAX 32
 #define BC_PROJECT_URL_MAX 1024
+/** Limits of #bc_project_data_extensions. */
+#define BC_DATA_EXT_MAX 32
+#define BC_DATA_EXT_SIZE 32
 /** Conventional player location inside the distribution root (bc_exe_extension() appended). */
 #define BC_DEFAULT_PLAYER "engine/blenderplayer"
 
@@ -122,6 +127,8 @@ typedef struct BC_Project {
   BC_Integrity integrity;
   char player[BC_PATH_MAX];
   char main[BC_PATH_MAX];
+  /** Extensions of the data files folder inputs give, as typed ("json, .txt"); empty: none. */
+  char data_extensions[BC_PROJECT_TEXT_MAX];
   char **inputs;
   int input_count;
   int input_capacity;
@@ -134,6 +141,14 @@ void bc_project_free(BC_Project *p);
 bool bc_project_add_input(BC_Project *p, const char *path);
 void bc_project_remove_input(BC_Project *p, int index);
 void bc_project_clear_inputs(BC_Project *p);
+
+/**
+ * Split #BC_Project.data_extensions (separated by spaces, commas or semicolons; "json", ".json"
+ * and "*.json" alike) into dot-prefixed extensions.
+ * \return their number, or -1 with the reason in \a err: a malformed list, or an extension that is
+ * not data (.blend, .py, or code the player loads: encrypted, it would no longer load).
+ */
+int bc_project_data_extensions(const BC_Project *p, char out[][BC_DATA_EXT_SIZE], int max, char *err, size_t err_size);
 
 /** Where the launcher, manifest and player live (see file comment). */
 const char *bc_project_dist_root(const BC_Project *p);

@@ -83,6 +83,14 @@ extern "C" {
  * INT64_MAX, so 64-bit offset arithmetic cannot overflow on hostile headers. */
 #define BC_PLAIN_SIZE_MAX (UINT64_C(1) << 48)
 
+/* What a container holds. Each reader opens its own kind only: Blender's file reader a .blend, the
+ * player's importer a Python module, the script API (bge.logic.decryptFile) data. So no script
+ * can be handed the decrypted bytes of a scene or of a module's source. */
+#define BC_KIND_BLEND 0
+#define BC_KIND_PYTHON 1
+#define BC_KIND_DATA 2
+#define BC_KIND_MAX BC_KIND_DATA
+
 #define BC_KEY_PIPE_ENV "UPBGE_BC_KEY_PIPE"
 
 /* Domain separation string for the key identifier: the key id must never be reusable as any
@@ -93,7 +101,7 @@ extern "C" {
 #define BC_OFS_MAGIC 0
 #define BC_OFS_VERSION 8       /* u16 */
 #define BC_OFS_CHUNK_LOG2 10   /* u8 */
-#define BC_OFS_FLAGS 11        /* u8, must be 0 in version 1 */
+#define BC_OFS_KIND 11         /* u8, BC_KIND_* */
 #define BC_OFS_RESERVED0 12    /* 4 bytes, must be 0 */
 #define BC_OFS_PLAIN_SIZE 16   /* u64 */
 #define BC_OFS_KEY_ID 24       /* 8 bytes */
@@ -106,7 +114,7 @@ extern "C" {
 typedef struct BC_Header {
   uint16_t version;
   uint8_t chunk_log2;
-  uint8_t flags;
+  uint8_t kind;
   uint64_t plain_size;
   uint8_t key_id[BC_KEY_ID_SIZE];
   uint8_t nonce_prefix[BC_NONCE_PREFIX_SIZE];
@@ -169,7 +177,7 @@ static inline void bc_header_write(const BC_Header *header, uint8_t out[BC_HEADE
   memcpy(out + BC_OFS_MAGIC, BC_MAGIC, BC_MAGIC_SIZE);
   bc_store_u16(out + BC_OFS_VERSION, header->version);
   out[BC_OFS_CHUNK_LOG2] = header->chunk_log2;
-  out[BC_OFS_FLAGS] = header->flags;
+  out[BC_OFS_KIND] = header->kind;
   bc_store_u64(out + BC_OFS_PLAIN_SIZE, header->plain_size);
   memcpy(out + BC_OFS_KEY_ID, header->key_id, BC_KEY_ID_SIZE);
   memcpy(out + BC_OFS_NONCE_PREFIX, header->nonce_prefix, BC_NONCE_PREFIX_SIZE);
@@ -177,8 +185,8 @@ static inline void bc_header_write(const BC_Header *header, uint8_t out[BC_HEADE
 }
 
 /**
- * Parse and validate a stored header. Strict on every field but the source id: reserved bytes and
- * flags must be zero so a future version can give them meaning without old readers
+ * Parse and validate a stored header. Strict on every field but the source id: reserved bytes must
+ * be zero and the kind known, so a future version can give them meaning without old readers
  * misinterpreting files.
  * An empty payload is rejected because the header is only authenticated through the chunks.
  */
@@ -192,14 +200,14 @@ static inline BC_HeaderResult bc_header_read(const uint8_t in[BC_HEADER_SIZE], B
     return BC_HEADER_BAD_VERSION;
   }
   header->chunk_log2 = in[BC_OFS_CHUNK_LOG2];
-  header->flags = in[BC_OFS_FLAGS];
+  header->kind = in[BC_OFS_KIND];
   header->plain_size = bc_load_u64(in + BC_OFS_PLAIN_SIZE);
   memcpy(header->key_id, in + BC_OFS_KEY_ID, BC_KEY_ID_SIZE);
   memcpy(header->nonce_prefix, in + BC_OFS_NONCE_PREFIX, BC_NONCE_PREFIX_SIZE);
   memcpy(header->source_id, in + BC_OFS_SOURCE_ID, BC_SOURCE_ID_SIZE);
 
   if (header->chunk_log2 < BC_CHUNK_LOG2_MIN || header->chunk_log2 > BC_CHUNK_LOG2_MAX ||
-      header->flags != 0 || header->plain_size == 0 || header->plain_size > BC_PLAIN_SIZE_MAX ||
+      header->kind > BC_KIND_MAX || header->plain_size == 0 || header->plain_size > BC_PLAIN_SIZE_MAX ||
       !bc_is_zero(in + BC_OFS_RESERVED0, 4))
   {
     return BC_HEADER_CORRUPT;

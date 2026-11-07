@@ -73,9 +73,10 @@ typedef struct BC_Gui {
   char provider_text[BC_PATH_MAX];
   char url_text[BC_PROJECT_URL_MAX];
   char update_text[16];
+  char data_text[BC_PROJECT_TEXT_MAX];
   bool source_edit, output_edit, player_edit, main_edit, game_edit;
   bool icon_edit, version_edit, company_edit, copyright_edit;
-  bool key_file_edit, provider_edit, url_edit, update_edit;
+  bool key_file_edit, provider_edit, url_edit, update_edit, data_edit;
 
   char **items;
   int item_count;
@@ -277,17 +278,14 @@ static void bc_gui_set_player(BC_Gui *g, const char *path)
   bc_gui_set_dist_path(g, path, g->project.player, sizeof(g->project.player), "player (with the UPBGE runtime)");
 }
 
-/** Add a dropped or picked path. The first one also seeds the source folder and the main file. */
+/** Add a dropped or picked path: a folder, or a file of any kind (.blend, module, data file). The
+ * first one also seeds the source folder, the first .blend the main file. */
 static void bc_gui_add_input(BC_Gui *g, const char *path)
 {
   char normalized[BC_PATH_MAX];
   snprintf(normalized, sizeof(normalized), "%s", path);
   bc_path_normalize(normalized);
   const bool is_dir = bc_is_dir(normalized);
-  if (!is_dir && !bc_path_has_extension(normalized, ".blend")) {
-    bc_gui_logf(g, BC_LOG_WARNING, "Ignored '%s': not a .blend file or a folder", normalized);
-    return;
-  }
   if (g->project.source_root[0] == '\0') {
     if (is_dir) {
       snprintf(g->project.source_root, sizeof(g->project.source_root), "%s", normalized);
@@ -296,7 +294,7 @@ static void bc_gui_add_input(BC_Gui *g, const char *path)
       bc_path_dirname(g->project.source_root, sizeof(g->project.source_root), normalized);
     }
   }
-  if (g->project.main[0] == '\0' && !is_dir) {
+  if (g->project.main[0] == '\0' && !is_dir && bc_path_has_extension(normalized, ".blend")) {
     snprintf(g->project.main, sizeof(g->project.main), "%s", normalized);
   }
   bc_project_add_input(&g->project, normalized);
@@ -1250,22 +1248,46 @@ static void bc_gui_draw(BC_Gui *g)
   log_lines = log_lines < 3 ? 3 : log_lines > BC_LOG_VISIBLE ? BC_LOG_VISIBLE : log_lines;
   const float bottom_h = BC_ROW + BC_GAP + (float)log_lines * 24 + 3 * BC_GAP;
   const float files_h = H - y - bottom_h - BC_MARGIN;
-  bc_group_box(bc_rect(BC_MARGIN, y, inner, files_h), "Files to encrypt (drop .blend files or folders here)");
+  bc_group_box(bc_rect(BC_MARGIN, y, inner, files_h), "Files to encrypt (drop files or folders here)");
   const float list_x = BC_MARGIN + BC_GAP;
   const float list_y = y + 2 * BC_GAP;
   const float list_w = inner - BC_BUTTON_W - 4 * BC_GAP;
-  const float list_h = files_h - 3 * BC_GAP;
+  const float list_h = files_h - 4 * BC_GAP - BC_ROW;
   GuiListViewEx(bc_rect(list_x, list_y, list_w, list_h),
                 (const char **)g->items,
                 g->item_count,
                 &g->list_scroll,
                 &g->list_active,
                 &g->list_focus);
+  {
+    /* Below the list, as wide: what else the folders give. Next to the sources a module or a data
+     * file would need another name, so the field only applies to the mirror output. */
+    const float data_y = list_y + list_h + BC_GAP;
+    const float label_w = MeasureTextEx(GuiGetFont(), "Data files", BC_TEXT_SIZE, text_spacing).x + 3 * BC_GAP;
+    const bool data_off = inplace && !running;
+    if (data_off) {
+      GuiDisable();
+    }
+    GuiLabel(bc_rect(list_x, data_y, label_w, BC_ROW), "Data files");
+    if (bc_gui_text_field(bc_rect(list_x + label_w, data_y, list_w - label_w, BC_ROW),
+                          "Extensions of the data files the folders also give, encrypted too (for example: json txt csv). The game reads them with bge.logic.decryptFile(path). Python modules (.py) are always encrypted. Mirror output only",
+                          g->data_text,
+                          sizeof(g->data_text),
+                          g->project.data_extensions,
+                          sizeof(g->project.data_extensions),
+                          &g->data_edit))
+    {
+      bc_gui_set_modified(g);
+    }
+    if (data_off) {
+      GuiEnable();
+    }
+  }
   const float bx = list_x + list_w + BC_GAP;
   float by = list_y;
   if (GuiButton(bc_rect(bx, by, BC_BUTTON_W, BC_ROW), "Add files...")) {
     char list[65536];
-    r = bc_dialog_open_files("Add .blend files", "blend", true, list, sizeof(list));
+    r = bc_dialog_open_files("Add files", NULL, true, list, sizeof(list));
     if (r == BC_DIALOG_OK) {
       for (char *p = strtok(list, "\n"); p != NULL; p = strtok(NULL, "\n")) {
         bc_gui_add_input(g, p);
@@ -1278,7 +1300,7 @@ static void bc_gui_draw(BC_Gui *g)
   }
   by += BC_ROW + BC_GAP;
   if (GuiButton(bc_rect(bx, by, BC_BUTTON_W, BC_ROW), "Add folder...")) {
-    r = bc_dialog_pick_folder("Add a folder (scanned for .blend files)", path, sizeof(path));
+    r = bc_dialog_pick_folder("Add a folder (scanned for .blend, .py and data files)", path, sizeof(path));
     if (r == BC_DIALOG_OK) {
       bc_gui_add_input(g, path);
       bc_gui_rebuild_items(g);
@@ -1291,8 +1313,8 @@ static void bc_gui_draw(BC_Gui *g)
   const bool has_selection = g->list_active >= 0 && g->list_active < g->project.input_count;
   if (GuiButton(bc_rect(bx, by, BC_BUTTON_W, BC_ROW), "Set as main") && has_selection) {
     const char *selected = g->project.inputs[g->list_active];
-    if (bc_is_dir(selected)) {
-      bc_gui_log(g, BC_LOG_WARNING, "The main file must be a .blend file, not a folder");
+    if (bc_is_dir(selected) || !bc_path_has_extension(selected, ".blend")) {
+      bc_gui_log(g, BC_LOG_WARNING, "The main file must be a .blend file");
     }
     else {
       snprintf(g->project.main, sizeof(g->project.main), "%s", selected);
@@ -1427,7 +1449,7 @@ int bc_gui_run(const char *project_path)
   }
   bc_gui_rebuild_items(&g);
   bc_gui_update_title(&g);
-  bc_gui_log(&g, BC_LOG_INFO, "Drop .blend files or folders on the window, copy the UPBGE runtime into the game folder's engine/, then Encrypt");
+  bc_gui_log(&g, BC_LOG_INFO, "Drop the game's files or folders on the window, copy the UPBGE runtime into the game folder's engine/, then Encrypt");
 
   /* Frames still to draw without waiting for input. The first ones: some systems send no expose
    * event. And one after each click or Enter: immediate mode handles them while drawing, so what
