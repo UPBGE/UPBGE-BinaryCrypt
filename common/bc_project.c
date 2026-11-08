@@ -84,10 +84,30 @@ void bc_project_remove_input(BC_Project *p, const int index)
   p->input_count--;
 }
 
+/* Kinds of their own (the first two), and what the OS or Python loads as code. */
+static const char *const bc_not_data[] = {".blend", ".py", ".pyw", ".pyc", ".pth", ".pyd", ".dll", ".so", ".dylib", ".exe"};
+
+/** Index of \a ext in bc_not_data, -1 when it may be data. */
+static int bc_not_data_index(const char *ext)
+{
+  const size_t n = strlen(ext);
+  for (int i = 0; i < (int)(sizeof(bc_not_data) / sizeof(bc_not_data[0])); i++) {
+    /* Same length and same suffix, ignoring case: the same extension. */
+    if (n == strlen(bc_not_data[i]) && bc_path_has_extension(ext, bc_not_data[i])) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+BC_ExtensionRule bc_project_extension_rule(const char *ext)
+{
+  const int i = bc_not_data_index(ext);
+  return i < 0 ? BC_EXTENSION_DATA : i < 2 ? BC_EXTENSION_ALWAYS : BC_EXTENSION_NEVER;
+}
+
 int bc_project_data_extensions(const BC_Project *p, char out[][BC_DATA_EXT_SIZE], const int max, char *err, const size_t err_size)
 {
-  /* Kinds of their own, and what the OS or Python loads as code. */
-  static const char *const not_data[] = {".blend", ".py", ".pyw", ".pyc", ".pth", ".pyd", ".dll", ".so", ".dylib", ".exe"};
   int count = 0;
   const char *c = p->data_extensions;
   while (*c != '\0') {
@@ -123,17 +143,15 @@ int bc_project_data_extensions(const BC_Project *p, char out[][BC_DATA_EXT_SIZE]
     ext[0] = '.';
     memcpy(ext + 1, name, n);
     ext[n + 1] = '\0';
-    for (size_t i = 0; i < sizeof(not_data) / sizeof(not_data[0]); i++) {
-      /* Same length and same suffix, ignoring case: the same extension. */
-      if (strlen(ext) == strlen(not_data[i]) && bc_path_has_extension(ext, not_data[i])) {
-        snprintf(err,
-                 err_size,
-                 i == 0 ? "'%s' files are always encrypted, as scenes" :
-                 i == 1 ? "'%s' files are always encrypted, as Python modules" :
-                          "'%s' cannot be a data extension: the player loads it as code",
-                 not_data[i]);
-        return -1;
-      }
+    const int i = bc_not_data_index(ext);
+    if (i >= 0) {
+      snprintf(err,
+               err_size,
+               i == 0 ? "'%s' files are always encrypted, as .blend files" :
+               i == 1 ? "'%s' files are always encrypted, as Python modules" :
+                        "'%s' cannot be a data extension: the player loads it as code",
+               bc_not_data[i]);
+      return -1;
     }
     memcpy(out[count++], ext, n + 2);
   }
@@ -339,6 +357,14 @@ bool bc_project_load(BC_Project *p, const char *file_path, char *err, size_t err
     }
     else if (strcmp(key, "data_extensions") == 0) {
       ok = (size_t)snprintf(p->data_extensions, sizeof(p->data_extensions), "%s", value) < sizeof(p->data_extensions);
+      /* Checked here, not first by the export: the editor has no text field to fix the list in. */
+      char ext[BC_DATA_EXT_MAX][BC_DATA_EXT_SIZE];
+      char why[128];
+      if (ok && bc_project_data_extensions(p, ext, BC_DATA_EXT_MAX, why, sizeof(why)) < 0) {
+        snprintf(err, err_size, "line %d: data_extensions: %s", line_number, why);
+        ok = false;
+        break;
+      }
     }
     else if (strcmp(key, "input") == 0) {
       char path[BC_PATH_MAX];

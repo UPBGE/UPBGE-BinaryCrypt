@@ -46,16 +46,21 @@ typedef struct BC_FileList {
   int skipped;
 } BC_FileList;
 
+/** Every file a listing meets, given to the export or not: the listed files and all the files of
+ * the scanned folders (the editor counts their types). */
+typedef void (*BC_SeenFn)(void *user, const char *path);
+
 /** The files an export of \a p encrypts: the listed files, and what the listed folders give
  * (.blend files, Python modules, files with one of the \a data_ext extensions; hidden folders, the
- * output folder and already encrypted files left out), sorted, each once. Problems go to \a log
- * (may be NULL). \return false when an input is missing, outside the source folder or inside the
- * output folder, or a file cannot be read; \a r_list is then empty. One code path for the export
- * and for what the editor shows. */
+ * output folder and already encrypted files left out), sorted, each once. Problems go to \a log,
+ * every file met to \a seen (both may be NULL). \return false when an input is missing, outside
+ * the source folder or inside the output folder, or a file cannot be read; \a r_list is then
+ * empty. One code path for the export and for what the editor shows. */
 bool bc_project_list_files(const BC_Project *p,
                            char (*data_ext)[BC_DATA_EXT_SIZE],
                            int data_ext_count,
                            BC_LogFn log,
+                           BC_SeenFn seen,
                            void *user,
                            BC_FileList *r_list);
 

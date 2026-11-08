@@ -1447,7 +1447,7 @@ static void test_project(void)
     CHECK(bc_project_save(&p, saved, err, sizeof(err)) && bc_project_load(&q, saved, err, sizeof(err)));
     CHECK_STR(q.data_extensions, p.data_extensions);
     bc_project_free(&q);
-    const char *refused[][2] = {{"json py", "Python modules"}, {"blend", "scenes"}, {".DLL", "as code"}, {"pyd", "as code"}, {"j/son", "not a file extension"}, {"json .", "not a file extension"}, {"*", "not a file extension"}};
+    const char *refused[][2] = {{"json py", "Python modules"}, {"blend", "as .blend files"}, {".DLL", "as code"}, {"pyd", "as code"}, {"j/son", "not a file extension"}, {"json .", "not a file extension"}, {"*", "not a file extension"}};
     for (size_t i = 0; i < sizeof(refused) / sizeof(refused[0]); i++) {
       snprintf(p.data_extensions, sizeof(p.data_extensions), "%s", refused[i][0]);
       CHECK(bc_project_data_extensions(&p, ext, BC_DATA_EXT_MAX, err, sizeof(err)) == -1 && strstr(err, refused[i][1]) != NULL);
@@ -1456,6 +1456,18 @@ static void test_project(void)
     CHECK(bc_project_data_extensions(&p, ext, 2, err, sizeof(err)) == -1 && strstr(err, "more than 2") != NULL);
     p.data_extensions[0] = '\0';
     CHECK(bc_project_data_extensions(&p, ext, BC_DATA_EXT_MAX, err, sizeof(err)) == 0);
+    /* A list the export would refuse does not load. */
+    write_text("proj/bad_data.bcproj", "version = 1\ndata_extensions = json dll\n");
+    work_path(path, "proj/bad_data.bcproj");
+    BC_Project r;
+    bc_project_init(&r);
+    CHECK(!bc_project_load(&r, path, err, sizeof(err)) && strstr(err, "line 2: data_extensions") != NULL &&
+          strstr(err, "as code") != NULL);
+    /* The editor's File types column reads the same rule. */
+    CHECK(bc_project_extension_rule(".Blend") == BC_EXTENSION_ALWAYS && bc_project_extension_rule(".py") == BC_EXTENSION_ALWAYS);
+    CHECK(bc_project_extension_rule(".DLL") == BC_EXTENSION_NEVER && bc_project_extension_rule(".pyc") == BC_EXTENSION_NEVER);
+    CHECK(bc_project_extension_rule(".json") == BC_EXTENSION_DATA && bc_project_extension_rule(".pyx") == BC_EXTENSION_DATA &&
+          bc_project_extension_rule(".gz") == BC_EXTENSION_DATA);
     bc_project_free(&p);
   }
 

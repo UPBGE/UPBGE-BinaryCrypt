@@ -6,6 +6,7 @@
  * encrypting, each frame hands about 12 ms to the batch job: the window stays responsive and the
  * progress bar is live, with no threads and no synchronization. */
 
+#include <ctype.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -96,6 +97,20 @@ typedef struct BC_Check {
   char todo[512];
 } BC_Check;
 
+typedef struct BC_FileType {
+  char ext[BC_DATA_EXT_SIZE]; /* ".json", lowercase. */
+  int count;
+} BC_FileType;
+
+/** An input as the list shows it, found by the scan: drawing needs no file system call. */
+typedef struct BC_InputRow {
+  /** A folder: its listed files, sorted, are one run [first, first + count). */
+  int first, count;
+  bool dir;
+  /** What it gives: "3 blends · 4 scripts", "blend · 2.1 MB". */
+  char info[64];
+} BC_InputRow;
+
 typedef struct BC_Gui {
   BC_Project project;
   char project_path[BC_PATH_MAX];
@@ -114,10 +129,9 @@ typedef struct BC_Gui {
   char provider_text[BC_PATH_MAX];
   char url_text[BC_PROJECT_URL_MAX];
   char update_text[16];
-  char data_text[BC_PROJECT_TEXT_MAX];
   bool source_edit, output_edit, player_edit, game_edit;
   bool icon_edit, version_edit, company_edit, copyright_edit;
-  bool key_file_edit, provider_edit, url_edit, update_edit, data_edit;
+  bool key_file_edit, provider_edit, url_edit, update_edit;
   /** Open dropdowns: drawn last, over the rows below them. */
   bool check_edit, manifest_edit, key_edit;
 
@@ -126,8 +140,8 @@ typedef struct BC_Gui {
   int item_count;
   /** First row shown, and the selected input (-1: none). */
   int list_scroll, list_active;
-  /** The file list shows every file the inputs give instead of the inputs. */
-  bool show_all;
+  /** Per input: its folder row folded (its files hidden). */
+  bool *input_folded;
 
   /* What the inputs give, listed as the export lists it. Walking folders, it runs only when the
    * inputs, the folders or the data file extensions change, or the window gets the focus back:
@@ -138,8 +152,13 @@ typedef struct BC_Gui {
   unsigned inputs_revision, scan_revision;
   int scan_blends, scan_modules, scan_data;
   uint64_t scan_bytes;
-  /** Per input: what it gives ("3 blends · 4 scripts", "blend · 2.1 MB"). */
-  char (*input_info)[64];
+  /** One per input, NULL until the first scan of the inputs. */
+  BC_InputRow *input_rows;
+  /** File types the inputs hold, every file met counted: .blend and .py first, then by name. */
+  BC_FileType *types;
+  int type_count, type_capacity, types_scroll;
+  /** Files met by the listing running now (BC_Seen), NULL otherwise. */
+  void *seen;
   bool focused;
 
   /** Sections open; folded they show their summary line only. Kept with the help panel switch and
@@ -165,7 +184,7 @@ typedef struct BC_Gui {
   float scroll_grab;
   /** Where the file list and the log take the wheel themselves, as last drawn: empty while they
    * have nothing to scroll, so the wheel moves the page there. */
-  Rectangle list_wheel, log_wheel;
+  Rectangle list_wheel, types_wheel, log_wheel;
 
   /** Bumped by every change of the project; the check follows it. */
   unsigned revision;
@@ -262,11 +281,14 @@ static void bc_gui_rebuild_items(BC_Gui *g)
   }
   free(g->items);
   g->items = NULL;
+  free(g->input_folded);
+  g->input_folded = NULL;
   g->item_count = g->project.input_count;
   if (g->item_count == 0) {
     g->list_active = -1;
     return;
   }
+  g->input_folded = (bool *)calloc((size_t)g->item_count, sizeof(bool));
   g->items = (char **)calloc((size_t)g->item_count, sizeof(char *));
   for (int i = 0; i < g->item_count; i++) {
     const char *input = g->project.inputs[i];
@@ -527,7 +549,7 @@ static void bc_gui_load_settings(BC_Gui *g, int *r_width, int *r_height)
 {
   g->help = true;
   g->game_open = g->build_open = true;
-  g->windows_open = g->protection_open = g->show_all = false;
+  g->windows_open = g->protection_open = false;
   /* Tall enough for every row of a Windows build with online keys, and still within a 1080p
    * screen with its taskbar. */
   *r_width = 1100;
@@ -546,7 +568,6 @@ static void bc_gui_load_settings(BC_Gui *g, int *r_width, int *r_height)
       {"build_open", &g->build_open},
       {"windows_open", &g->windows_open},
       {"protection_open", &g->protection_open},
-      {"all_files", &g->show_all},
   };
   char line[128];
   while (fgets(line, sizeof(line), f) != NULL) {
@@ -584,14 +605,13 @@ static void bc_gui_save_settings(const BC_Gui *g)
   }
   fprintf(f,
           "# bc_tool editor settings\n"
-          "help = %d\ngame_open = %d\nbuild_open = %d\nwindows_open = %d\nprotection_open = %d\nall_files = %d\n"
+          "help = %d\ngame_open = %d\nbuild_open = %d\nwindows_open = %d\nprotection_open = %d\n"
           "window_width = %d\nwindow_height = %d\n",
           g->help,
           g->game_open,
           g->build_open,
           g->windows_open,
           g->protection_open,
-          g->show_all,
           GetScreenWidth(),
           GetScreenHeight());
   fclose(f);
@@ -698,7 +718,105 @@ static void bc_gui_scan_log(void *user, const BC_LogLevel level, const char *mes
   }
 }
 
-/** List what the inputs give, as the export does, and count it per kind and per input. */
+/** Add \a n files to type \a ext ("." and lowercase), a new row if it has none yet. Types are
+ * few: a linear search. */
+static void bc_gui_count_type(BC_Gui *g, const char *ext, const int n)
+{
+  for (int i = 0; i < g->type_count; i++) {
+    if (strcmp(g->types[i].ext, ext) == 0) {
+      g->types[i].count += n;
+      return;
+    }
+  }
+  if (g->type_count == g->type_capacity) {
+    const int capacity = g->type_capacity ? 2 * g->type_capacity : 32;
+    BC_FileType *types = (BC_FileType *)realloc(g->types, sizeof(BC_FileType) * (size_t)capacity);
+    if (types == NULL) {
+      return;
+    }
+    g->types = types;
+    g->type_capacity = capacity;
+  }
+  snprintf(g->types[g->type_count].ext, sizeof(g->types[g->type_count].ext), "%s", ext);
+  g->types[g->type_count].count = n;
+  g->type_count++;
+}
+
+/** Files met by the listing, kept until it ends: overlapping inputs (a folder and a folder
+ * inside it) meet a file more than once, and a file counts once. */
+typedef struct BC_Seen {
+  char **paths;
+  int count, capacity;
+} BC_Seen;
+
+static void bc_gui_scan_seen(void *user, const char *path)
+{
+  BC_Seen *seen = (BC_Seen *)((BC_Gui *)user)->seen;
+  if (seen->count == seen->capacity) {
+    const int capacity = seen->capacity ? 2 * seen->capacity : 256;
+    char **paths = (char **)realloc(seen->paths, sizeof(char *) * (size_t)capacity);
+    if (paths == NULL) {
+      return;
+    }
+    seen->paths = paths;
+    seen->capacity = capacity;
+  }
+  const size_t n = strlen(path) + 1;
+  char *copy = (char *)malloc(n);
+  if (copy != NULL) {
+    memcpy(copy, path, n);
+    seen->paths[seen->count++] = copy;
+  }
+}
+
+static int bc_string_compare(const void *a, const void *b)
+{
+  return strcmp(*(char *const *)a, *(char *const *)b);
+}
+
+/** Each file met once, counted under its type: its last extension, lowercase. Hidden files
+ * (.DS_Store, .gitignore) and files without an extension are no type to choose. */
+static void bc_gui_count_seen(BC_Gui *g, BC_Seen *seen)
+{
+  if (seen->count > 1) {
+    qsort(seen->paths, (size_t)seen->count, sizeof(char *), bc_string_compare);
+  }
+  for (int i = 0; i < seen->count; i++) {
+    const char *path = seen->paths[i];
+    if (i > 0 && strcmp(path, seen->paths[i - 1]) == 0) {
+      continue;
+    }
+    const char *name = bc_path_basename(path);
+    const char *dot = strrchr(name, '.');
+    if (name[0] == '.' || dot == NULL || dot[1] == '\0' || strlen(dot) >= BC_DATA_EXT_SIZE) {
+      continue;
+    }
+    char ext[BC_DATA_EXT_SIZE];
+    size_t n = 0;
+    for (; dot[n] != '\0'; n++) {
+      ext[n] = (char)tolower((unsigned char)dot[n]);
+    }
+    ext[n] = '\0';
+    bc_gui_count_type(g, ext, 1);
+  }
+  for (int i = 0; i < seen->count; i++) {
+    free(seen->paths[i]);
+  }
+  free(seen->paths);
+  memset(seen, 0, sizeof(*seen));
+}
+
+/** .blend, then .py, then the other types by name. */
+static int bc_type_compare(const void *a, const void *b)
+{
+  const char *x = ((const BC_FileType *)a)->ext, *y = ((const BC_FileType *)b)->ext;
+  const int rx = strcmp(x, ".blend") == 0 ? 0 : strcmp(x, ".py") == 0 ? 1 : 2;
+  const int ry = strcmp(y, ".blend") == 0 ? 0 : strcmp(y, ".py") == 0 ? 1 : 2;
+  return rx != ry ? rx - ry : strcmp(x, y);
+}
+
+/** List what the inputs give, as the export does; count it per kind and per input, and count every
+ * file met per type. */
 static void bc_gui_refresh_scan(BC_Gui *g)
 {
   if (g->scan_revision == g->inputs_revision) {
@@ -707,8 +825,12 @@ static void bc_gui_refresh_scan(BC_Gui *g)
   g->scan_revision = g->inputs_revision;
   g->revision++; /* The check reads the list. */
   bc_file_list_free(&g->scan);
-  free(g->input_info);
-  g->input_info = NULL;
+  free(g->input_rows);
+  g->input_rows = NULL;
+  /* .blend and .py always have a row: what is always encrypted shows before any file is added. */
+  g->type_count = 0;
+  bc_gui_count_type(g, ".blend", 0);
+  bc_gui_count_type(g, ".py", 0);
   g->scan_ok = false;
   g->scan_error[0] = '\0';
   g->scan_blends = g->scan_modules = g->scan_data = 0;
@@ -721,34 +843,71 @@ static void bc_gui_refresh_scan(BC_Gui *g)
   char err[256];
   const int ext_count = bc_project_data_extensions(p, ext, BC_DATA_EXT_MAX, err, sizeof(err));
   if (ext_count < 0) {
-    snprintf(g->scan_error, sizeof(g->scan_error), "Data files: %s", err);
+    snprintf(g->scan_error, sizeof(g->scan_error), "File types: %s", err);
     return;
   }
-  g->scan_ok = bc_project_list_files(p, ext, ext_count, bc_gui_scan_log, g, &g->scan);
+  BC_Seen seen = {NULL, 0, 0};
+  g->seen = &seen;
+  g->scan_ok = bc_project_list_files(p, ext, ext_count, bc_gui_scan_log, bc_gui_scan_seen, g, &g->scan);
+  g->seen = NULL;
+  bc_gui_count_seen(g, &seen);
   int *counts[3] = {&g->scan_blends, &g->scan_modules, &g->scan_data};
   for (int i = 0; i < g->scan.count; i++) {
     (*counts[g->scan.files[i].kind])++;
     g->scan_bytes += g->scan.files[i].size;
   }
-  /* Per input, what it gives. Inputs are few: one pass over the files each. */
-  g->input_info = (char(*)[64])calloc((size_t)p->input_count, sizeof(*g->input_info));
-  for (int i = 0; g->input_info != NULL && i < p->input_count; i++) {
-    const char *input = p->inputs[i];
-    char text[64] = "";
-    if (bc_is_dir(input)) {
-      int n[3] = {0, 0, 0};
+  /* A chosen type no file has (or one of two dots, "tar.gz", counted above as ".gz") keeps a row,
+   * so it can be unticked: counted from the listed files. */
+  for (int e = 0; e < ext_count; e++) {
+    bool known = false;
+    for (int i = 0; i < g->type_count && !known; i++) {
+      known = strlen(g->types[i].ext) == strlen(ext[e]) && bc_path_has_extension(g->types[i].ext, ext[e]);
+    }
+    if (!known) {
+      int n = 0;
       for (int f = 0; f < g->scan.count; f++) {
-        n[g->scan.files[f].kind] += bc_path_is_inside(input, g->scan.files[f].path) ? 1 : 0;
+        n += g->scan.files[f].kind == BC_KIND_DATA && bc_path_has_extension(g->scan.files[f].path, ext[e]) ? 1 : 0;
       }
+      char lower[BC_DATA_EXT_SIZE];
+      size_t k = 0;
+      for (; ext[e][k] != '\0'; k++) {
+        lower[k] = (char)tolower((unsigned char)ext[e][k]);
+      }
+      lower[k] = '\0';
+      bc_gui_count_type(g, lower, n);
+    }
+  }
+  if (g->type_count > 1) {
+    qsort(g->types, (size_t)g->type_count, sizeof(BC_FileType), bc_type_compare);
+  }
+  /* Per input, what it gives and, for a folder, where its files are among the sorted listed files. */
+  g->input_rows = (BC_InputRow *)calloc((size_t)p->input_count, sizeof(BC_InputRow));
+  for (int i = 0; g->input_rows != NULL && i < p->input_count; i++) {
+    const char *input = p->inputs[i];
+    BC_InputRow *row = &g->input_rows[i];
+    char *text = row->info;
+    row->dir = bc_is_dir(input);
+    if (row->dir) {
+      int n[3] = {0, 0, 0};
+      int first = -1, count = 0;
+      for (int f = 0; f < g->scan.count; f++) {
+        if (bc_path_is_inside(input, g->scan.files[f].path)) {
+          n[g->scan.files[f].kind]++;
+          first = first < 0 ? f : first;
+          count++;
+        }
+      }
+      row->first = first < 0 ? 0 : first;
+      row->count = count;
       static const char *const names[3][2] = {{"blend", "blends"}, {"script", "scripts"}, {"data file", "data files"}};
       for (int k = 0; k < 3; k++) {
         if (n[k] > 0) {
           const size_t used = strlen(text);
-          snprintf(text + used, sizeof(text) - used, "%s%d %s", used ? "  \xc2\xb7  " : "", n[k], names[k][n[k] != 1]);
+          snprintf(text + used, sizeof(row->info) - used, "%s%d %s", used ? "  \xc2\xb7  " : "", n[k], names[k][n[k] != 1]);
         }
       }
       if (text[0] == '\0') {
-        snprintf(text, sizeof(text), "nothing to encrypt");
+        snprintf(text, sizeof(row->info), "nothing to encrypt");
       }
     }
     else {
@@ -758,10 +917,46 @@ static void bc_gui_refresh_scan(BC_Gui *g)
       bc_format_size(bytes, size, sizeof(size));
       static const char *const kinds[3] = {"blend", "script", "data"};
       const int kind = bc_path_has_extension(input, ".blend") ? 0 : bc_path_has_extension(input, ".py") ? 1 : 2;
-      snprintf(text, sizeof(text), "%s  \xc2\xb7  %s", kinds[kind], size);
+      snprintf(text, sizeof(row->info), "%s  \xc2\xb7  %s", kinds[kind], size);
     }
-    snprintf(g->input_info[i], sizeof(g->input_info[i]), "%s", text);
   }
+}
+
+/** Tick or untick a data file type: the project's extensions, written again without it or with it
+ * added. */
+static void bc_gui_toggle_type(BC_Gui *g, const char *type)
+{
+  char ext[BC_DATA_EXT_MAX][BC_DATA_EXT_SIZE];
+  char err[256];
+  const int count = bc_project_data_extensions(&g->project, ext, BC_DATA_EXT_MAX, err, sizeof(err));
+  if (count < 0) {
+    bc_gui_logf(g, BC_LOG_ERROR, "File types: %s", err);
+    return;
+  }
+  char text[BC_PROJECT_TEXT_MAX] = "";
+  bool removed = false;
+  for (int i = 0; i < count; i++) {
+    if (strlen(ext[i]) == strlen(type) && bc_path_has_extension(ext[i], type)) {
+      removed = true;
+      continue;
+    }
+    const size_t used = strlen(text);
+    snprintf(text + used, sizeof(text) - used, "%s%s", used ? " " : "", ext[i] + 1);
+  }
+  if (!removed) {
+    if (count == BC_DATA_EXT_MAX) {
+      bc_gui_logf(g, BC_LOG_ERROR, "File types: more than %d", BC_DATA_EXT_MAX);
+      return;
+    }
+    const size_t used = strlen(text);
+    if ((size_t)snprintf(text + used, sizeof(text) - used, "%s%s", used ? " " : "", type + 1) >= sizeof(text) - used) {
+      bc_gui_log(g, BC_LOG_ERROR, "File types: too many");
+      return;
+    }
+  }
+  snprintf(g->project.data_extensions, sizeof(g->project.data_extensions), "%s", text);
+  bc_gui_set_modified(g);
+  g->inputs_revision++;
 }
 
 /** Check what the fields name. Only stat calls, and only on change or every BC_CHECK_PERIOD:
@@ -880,7 +1075,7 @@ static bool bc_gui_editing(const BC_Gui *g)
 {
   return g->source_edit || g->output_edit || g->player_edit || g->game_edit ||
          g->icon_edit || g->version_edit || g->company_edit || g->copyright_edit ||
-         g->key_file_edit || g->provider_edit || g->url_edit || g->update_edit || g->data_edit ||
+         g->key_file_edit || g->provider_edit || g->url_edit || g->update_edit ||
          g->check_edit || g->manifest_edit || g->key_edit;
 }
 
@@ -1416,7 +1611,9 @@ static bool bc_gui_scroll_page(BC_Gui *g, const float win_w, const float win_h, 
   bool wheeled = false;
   if (interactive) {
     const float wheel = GetMouseWheelMove();
-    if (wheel != 0 && !CheckCollisionPointRec(mouse, g->list_wheel) && !CheckCollisionPointRec(mouse, g->log_wheel)) {
+    if (wheel != 0 && !CheckCollisionPointRec(mouse, g->list_wheel) && !CheckCollisionPointRec(mouse, g->types_wheel) &&
+        !CheckCollisionPointRec(mouse, g->log_wheel))
+    {
       g->scroll_y -= wheel * BC_SCROLL_STEP;
       wheeled = true;
     }
@@ -1457,6 +1654,8 @@ static bool bc_gui_scroll_page(BC_Gui *g, const float win_w, const float win_h, 
 
 /* Rows of the file list. */
 #define BC_LIST_ROW 28
+/* File list rows a taller window gives before the log grows past BC_LOG_MIN lines. */
+#define BC_LIST_ROWS 8
 /* Three text lines of help, the panel's padding: long help is written to fit. */
 #define BC_HELP_LINES 3
 #define BC_HELP_H (BC_HELP_LINES * 24 + BC_GAP)
@@ -1554,21 +1753,44 @@ static void bc_gui_set_main(BC_Gui *g, const char *path)
   }
 }
 
-/** \a path relative to the source folder when inside it. */
-static const char *bc_gui_relative(const BC_Gui *g, const char *path)
+/** Wheel over \a bounds scrolls \a scroll (rows) within [0, max]; the region is recorded so the
+ * page leaves the wheel to it. */
+static void bc_list_wheel(int *scroll, const int max_scroll, const Rectangle bounds, const bool live, const bool page_wheeled, Rectangle *r_region)
 {
-  const size_t n = strlen(g->project.source_root);
-  if (n > 0 && strncmp(path, g->project.source_root, n) == 0 && path[n] == '/') {
-    return path + n + 1;
+  if (live && !page_wheeled && max_scroll > 0 && CheckCollisionPointRec(GetMousePosition(), bounds)) {
+    const float wheel = GetMouseWheelMove();
+    *scroll -= wheel > 0 ? (int)(wheel + 0.5f) : (int)(wheel - 0.5f);
   }
-  return path;
+  *scroll = *scroll < 0 ? 0 : *scroll > max_scroll ? max_scroll : *scroll;
+  *r_region = max_scroll > 0 && GuiGetState() != STATE_DISABLED ? bounds : bc_rect(0, 0, 0, 0);
+}
+
+/** Thumb of a list scrolled by rows: its size and place in rows. */
+static void bc_list_thumb(const Rectangle bounds, const int scroll, const int max_scroll, const int visible, const int rows)
+{
+  if (max_scroll <= 0) {
+    return;
+  }
+  const float track_h = bounds.height - 2 * BC_GAP;
+  const float thumb_h = track_h * (float)visible / (float)rows;
+  const float at = (float)scroll / (float)max_scroll;
+  DrawRectangleRec(bc_rect(bounds.x + bounds.width - BC_GAP, bounds.y + BC_GAP + (track_h - thumb_h) * at, 4, thumb_h),
+                   GetColor((unsigned int)GuiGetStyle(DEFAULT, BORDER_COLOR_NORMAL)));
+}
+
+static void bc_list_frame(const Rectangle bounds)
+{
+  const bool disabled = GuiGetState() == STATE_DISABLED;
+  DrawRectangleRec(bounds, GetColor((unsigned int)GuiGetStyle(DEFAULT, BACKGROUND_COLOR)));
+  DrawRectangleLinesEx(bounds, 1, GetColor((unsigned int)GuiGetStyle(DEFAULT, disabled ? BORDER_COLOR_DISABLED : BORDER_COLOR_NORMAL)));
 }
 
 /**
- * The file list, drawn here instead of by raygui for its star column. Inputs view: the main file
- * first when only a folder gives it (it has no row of its own), then the inputs. All files view:
- * every file the inputs give. The star of a .blend row makes it the main file; a click elsewhere
- * selects an input. Only the visible rows are formatted.
+ * The file list as a tree, drawn here instead of by raygui for its star and arrow column. Each
+ * input is a row; a folder's files follow it, indented, unless it is folded. Every .blend has a
+ * star: the main file's is orange, a click on another makes that one the main file. A click on an
+ * input row selects it (Remove); the rows under a folder are its files, not inputs of their own.
+ * Only the visible rows are formatted.
  */
 static void bc_gui_file_list(BC_Gui *g, const Rectangle bounds, const bool page_wheeled)
 {
@@ -1579,30 +1801,21 @@ static void bc_gui_file_list(BC_Gui *g, const Rectangle bounds, const bool page_
   /* raylib keeps the last position once the pointer has left the window: nothing is under it then. */
   const bool live = !disabled && !GuiIsLocked() && IsCursorOnScreen();
   const Vector2 mouse = GetMousePosition();
-  const int main_index = bc_gui_main_index(g);
-  bool main_is_input = false;
-  for (int i = 0; i < g->project.input_count && !main_is_input; i++) {
-    main_is_input = strcmp(g->project.inputs[i], g->project.main) == 0;
+  const int inputs = g->project.input_count;
+  /* Rows of each input: itself, then its files while open. Inputs are few. */
+  int rows = 0;
+  for (int i = 0; i < inputs; i++) {
+    const bool open = g->input_rows != NULL && g->input_folded != NULL && !g->input_folded[i];
+    rows += 1 + (open ? g->input_rows[i].count : 0);
   }
-  const int lead = !g->show_all && main_index >= 0 && !main_is_input ? 1 : 0;
-  const int rows = g->show_all ? g->scan.count : lead + g->project.input_count;
   const int visible = (int)((bounds.height - 4) / BC_LIST_ROW);
   const int max_scroll = rows > visible ? rows - visible : 0;
 
-  DrawRectangleRec(bounds, GetColor((unsigned int)GuiGetStyle(DEFAULT, BACKGROUND_COLOR)));
-  DrawRectangleLinesEx(bounds, 1, GetColor((unsigned int)GuiGetStyle(DEFAULT, disabled ? BORDER_COLOR_DISABLED : BORDER_COLOR_NORMAL)));
-  bc_tip(bounds,
-         g->show_all ? "Every file the list gives\nWith its kind and size, as the export encrypts it. Click the star of a .blend to make it the main file, the .blend the game starts." :
-                       "Files and folders to encrypt\nA folder gives its .blend files, Python modules and data files. The star marks the main file, the .blend the game starts: click the star of another .blend to change it.");
-  if (live && !page_wheeled && max_scroll > 0 && CheckCollisionPointRec(mouse, bounds)) {
-    const float wheel = GetMouseWheelMove();
-    g->list_scroll -= wheel > 0 ? (int)(wheel + 0.5f) : (int)(wheel - 0.5f);
-  }
-  g->list_scroll = g->list_scroll < 0 ? 0 : g->list_scroll > max_scroll ? max_scroll : g->list_scroll;
-  g->list_wheel = max_scroll > 0 && !disabled ? bounds : bc_rect(0, 0, 0, 0);
-
+  bc_list_frame(bounds);
+  bc_tip(bounds, "Files and folders to encrypt\nA folder shows the files it gives, each .blend with a star: the orange star marks the main file, the .blend the game starts. Click another star to change it.");
+  bc_list_wheel(&g->list_scroll, max_scroll, bounds, live, page_wheeled, &g->list_wheel);
   if (rows == 0) {
-    const char *empty = g->show_all ? "No files to encrypt" : "Drop the game folder, or its files, on the window";
+    const char *empty = "Drop the game folder, or its files, on the window";
     const float w = MeasureTextEx(font, empty, BC_TEXT_SIZE, spacing).x;
     const Vector2 at = {bounds.x + (bounds.width - w) / 2, bounds.y + (bounds.height - BC_TEXT_SIZE) / 2};
     DrawTextEx(font, empty, at, BC_TEXT_SIZE, spacing, GetColor((unsigned int)BC_RGB(BC_RGB_HINT)));
@@ -1611,57 +1824,76 @@ static void bc_gui_file_list(BC_Gui *g, const Rectangle bounds, const bool page_
   const float row_w = bounds.width - 4 - (max_scroll > 0 ? 6 : 0);
   const Color text_color = GetColor((unsigned int)GuiGetStyle(DEFAULT, disabled ? TEXT_COLOR_DISABLED : TEXT_COLOR_NORMAL));
   const Color info_color = GetColor((unsigned int)BC_RGB(BC_RGB_HINT));
-  for (int r = g->list_scroll; r < rows && r < g->list_scroll + visible; r++) {
-    const Rectangle row = bc_rect(bounds.x + 2, bounds.y + 2 + (float)(r - g->list_scroll) * BC_LIST_ROW, row_w, BC_LIST_ROW);
-    /* What the row shows: a listed file, or an input. */
+  const float slot_w = BC_ICON_SIZE + 2 * BC_GAP;
+  /* Walk to the first visible row, then draw rows until the panel is full. */
+  int input = 0, child = -1, r = 0;
+  for (; input < inputs; input++) {
+    const bool open = g->input_rows != NULL && g->input_folded != NULL && !g->input_folded[input];
+    const int span = 1 + (open ? g->input_rows[input].count : 0);
+    if (r + span > g->list_scroll) {
+      child = g->list_scroll - r - 1; /* -1: the input row itself. */
+      break;
+    }
+    r += span;
+  }
+  for (int drawn = 0; drawn < visible && input < inputs; drawn++) {
+    const bool open = g->input_rows != NULL && g->input_folded != NULL && !g->input_folded[input];
+    const bool is_dir = g->input_rows != NULL && g->input_rows[input].dir;
+    const Rectangle row = bc_rect(bounds.x + 2, bounds.y + 2 + (float)drawn * BC_LIST_ROW, row_w, BC_LIST_ROW);
     const char *path;
     const char *label;
     char info[80];
-    int input = -1;
     bool blend;
-    if (g->show_all || r < lead) {
-      const BC_ListedFile *file = &g->scan.files[g->show_all ? r : main_index];
+    float indent = 0;
+    if (child < 0) {
+      path = g->project.inputs[input];
+      label = input < g->item_count ? g->items[input] : path;
+      blend = !is_dir && bc_path_has_extension(path, ".blend");
+      snprintf(info, sizeof(info), "%s", g->input_rows != NULL ? g->input_rows[input].info : "");
+    }
+    else {
+      const BC_ListedFile *file = &g->scan.files[g->input_rows[input].first + child];
       path = file->path;
-      label = bc_gui_relative(g, path);
+      /* Relative to its folder: the folder row says where. */
+      const size_t n = strlen(g->project.inputs[input]);
+      label = strncmp(path, g->project.inputs[input], n) == 0 && path[n] == '/' ? path + n + 1 : path;
       blend = file->kind == BC_KIND_BLEND;
+      indent = slot_w;
       char size[24];
       bc_format_size(file->size, size, sizeof(size));
-      if (!g->show_all) {
-        snprintf(info, sizeof(info), "main file");
-      }
-      else if (file->size == 0 && !blend) {
+      if (file->size == 0 && !blend) {
         snprintf(info, sizeof(info), "%s  \xc2\xb7  empty, copied", kinds[file->kind]);
       }
       else {
         snprintf(info, sizeof(info), "%s  \xc2\xb7  %s", kinds[file->kind], size);
       }
     }
-    else {
-      input = r - lead;
-      path = g->project.inputs[input];
-      label = input < g->item_count ? g->items[input] : path;
-      blend = !bc_is_dir(path) && bc_path_has_extension(path, ".blend");
-      snprintf(info, sizeof(info), "%s", g->input_info ? g->input_info[input] : "");
-    }
     const bool is_main = blend && strcmp(path, g->project.main) == 0;
     const bool hover = live && CheckCollisionPointRec(mouse, row);
-    const Rectangle star = bc_rect(row.x, row.y, BC_ICON_SIZE + 2 * BC_GAP, BC_LIST_ROW);
-    const bool star_hover = hover && blend && CheckCollisionPointRec(mouse, star);
-    if (input >= 0 && input == g->list_active) {
+    const Rectangle slot = bc_rect(row.x + indent, row.y, slot_w, BC_LIST_ROW);
+    const bool slot_hover = hover && CheckCollisionPointRec(mouse, slot) && (blend || (child < 0 && is_dir));
+    if (child < 0 && input == g->list_active) {
       DrawRectangleRec(row, GetColor((unsigned int)GuiGetStyle(DEFAULT, BASE_COLOR_FOCUSED)));
       DrawRectangleLinesEx(row, 1, GetColor((unsigned int)BC_RGB(BC_RGB_ACCENT)));
     }
     else if (hover) {
       DrawRectangleRec(row, GetColor((unsigned int)BC_RGB(0x222222)));
     }
+    const int icon_y = (int)(row.y + (BC_LIST_ROW - BC_ICON_SIZE) / 2);
     if (blend) {
-      const unsigned int rgb = is_main ? BC_RGB_ACCENT : star_hover ? 0xa8a8a8 : 0x4a4a4a;
-      GuiDrawIcon(ICON_STAR, (int)(row.x + BC_GAP), (int)(row.y + (BC_LIST_ROW - BC_ICON_SIZE) / 2), 1, GetColor((unsigned int)BC_RGB(rgb)));
+      const unsigned int rgb = is_main ? BC_RGB_ACCENT : slot_hover ? 0xa8a8a8 : 0x4a4a4a;
+      GuiDrawIcon(ICON_STAR, (int)(slot.x + BC_GAP), icon_y, 1, GetColor((unsigned int)BC_RGB(rgb)));
+      if (slot_hover) {
+        bc_tip(slot, is_main ? "The main file\nThe .blend the game executable starts." : "Make it the main file\nThe .blend the game executable starts.");
+      }
     }
-    if (star_hover) {
-      bc_tip(star, is_main ? "The main file\nThe .blend the game executable starts." : "Make it the main file\nThe .blend the game executable starts.");
+    else if (child < 0 && is_dir) {
+      GuiDrawIcon(open ? ICON_ARROW_DOWN_FILL : ICON_ARROW_RIGHT_FILL, (int)(slot.x + BC_GAP), icon_y, 1, GetColor((unsigned int)(slot_hover ? BC_RGB(BC_RGB_ACCENT) : GuiGetStyle(LABEL, TEXT_COLOR_NORMAL))));
+      if (slot_hover) {
+        bc_tip(slot, open ? "Hide the files of this folder" : "Show the files of this folder");
+      }
     }
-    const float text_x = star.x + star.width;
+    const float text_x = slot.x + slot.width;
     const float info_w = MeasureTextEx(font, info, BC_TEXT_SIZE, spacing).x;
     const float info_x = row.x + row.width - BC_GAP - info_w;
     char shown[BC_PATH_MAX];
@@ -1669,24 +1901,95 @@ static void bc_gui_file_list(BC_Gui *g, const Rectangle bounds, const bool page_
     const Vector2 text_at = {text_x, row.y + (BC_LIST_ROW - BC_TEXT_SIZE) / 2};
     DrawTextEx(font, shown, text_at, BC_TEXT_SIZE, spacing, text_color);
     const Vector2 info_at = {info_x, text_at.y};
-    DrawTextEx(font, info, info_at, BC_TEXT_SIZE, spacing, is_main && !g->show_all && input < 0 ? GetColor((unsigned int)BC_RGB(BC_RGB_ACCENT)) : info_color);
+    DrawTextEx(font, info, info_at, BC_TEXT_SIZE, spacing, info_color);
     if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-      if (star_hover) {
+      if (slot_hover && blend) {
         bc_gui_set_main(g, path);
       }
-      else if (input >= 0) {
+      else if (slot_hover) {
+        g->input_folded[input] = open; /* Folds an open folder, opens a folded one. */
+      }
+      else if (child < 0) {
         g->list_active = input;
       }
     }
+    /* Next row: the next file of this folder, or the next input. */
+    child++;
+    if (child >= (open ? g->input_rows[input].count : 0)) {
+      input++;
+      child = -1;
+    }
   }
-  /* Scroll bar once the rows do not fit: its size and place in rows. */
-  if (max_scroll > 0) {
-    const float track_h = bounds.height - 2 * BC_GAP;
-    const float thumb_h = track_h * (float)visible / (float)rows;
-    const float at = (float)g->list_scroll / (float)max_scroll;
-    DrawRectangleRec(bc_rect(bounds.x + bounds.width - BC_GAP, bounds.y + BC_GAP + (track_h - thumb_h) * at, 4, thumb_h),
-                     GetColor((unsigned int)GuiGetStyle(DEFAULT, BORDER_COLOR_NORMAL)));
+  bc_list_thumb(bounds, g->list_scroll, max_scroll, visible, rows);
+}
+
+/**
+ * The types of the files the inputs hold, with how many there are and a tick box: .blend files
+ * and Python modules are always encrypted, code the system or Python loads (.dll, .so, .pyc...)
+ * never, any other type when ticked (the project's data file extensions).
+ */
+static void bc_gui_types_list(BC_Gui *g, const Rectangle bounds, const bool page_wheeled)
+{
+  const float spacing = (float)GuiGetStyle(DEFAULT, TEXT_SPACING);
+  const Font font = GuiGetFont();
+  const bool disabled = GuiGetState() == STATE_DISABLED;
+  const bool live = !disabled && !GuiIsLocked() && IsCursorOnScreen();
+  const Vector2 mouse = GetMousePosition();
+  /* Header row, then the types. */
+  const Rectangle list = bc_rect(bounds.x, bounds.y + BC_LIST_ROW, bounds.width, bounds.height - BC_LIST_ROW);
+  const int visible = (int)((list.height - 4) / BC_LIST_ROW);
+  const int max_scroll = g->type_count > visible ? g->type_count - visible : 0;
+  bc_list_frame(bounds);
+  bc_tip(bounds, "File types the list holds\n.blend files and Python modules are always encrypted; code (.dll, .so, .pyc...) never. Tick another type to encrypt its files too: the game reads them with bge.logic.decryptFile(path).");
+  const Vector2 head_at = {bounds.x + BC_GAP, bounds.y + (BC_LIST_ROW - BC_TEXT_SIZE) / 2 + 2};
+  DrawTextEx(font, "File types", head_at, BC_TEXT_SIZE, spacing, GetColor((unsigned int)GuiGetStyle(LABEL, disabled ? TEXT_COLOR_DISABLED : TEXT_COLOR_NORMAL)));
+  DrawRectangleRec(bc_rect(bounds.x + 1, bounds.y + BC_LIST_ROW, bounds.width - 2, 1), GetColor((unsigned int)GuiGetStyle(DEFAULT, LINE_COLOR)));
+  bc_list_wheel(&g->types_scroll, max_scroll, list, live, page_wheeled, &g->types_wheel);
+
+  char ext[BC_DATA_EXT_MAX][BC_DATA_EXT_SIZE];
+  char err[256];
+  const int ext_count = bc_project_data_extensions(&g->project, ext, BC_DATA_EXT_MAX, err, sizeof(err));
+  const float row_w = list.width - 4 - (max_scroll > 0 ? 6 : 0);
+  for (int t = g->types_scroll; t < g->type_count && t < g->types_scroll + visible; t++) {
+    const BC_FileType *type = &g->types[t];
+    const Rectangle row = bc_rect(list.x + 2, list.y + 2 + (float)(t - g->types_scroll) * BC_LIST_ROW, row_w, BC_LIST_ROW);
+    const BC_ExtensionRule rule = bc_project_extension_rule(type->ext);
+    const bool always = rule == BC_EXTENSION_ALWAYS;
+    const bool never = rule == BC_EXTENSION_NEVER;
+    bool ticked = always;
+    for (int i = 0; i < ext_count && !ticked; i++) {
+      ticked = strlen(ext[i]) == strlen(type->ext) && bc_path_has_extension(ext[i], type->ext);
+    }
+    const bool choosable = !always && !never;
+    const bool hover = live && choosable && CheckCollisionPointRec(mouse, row);
+    if (hover) {
+      DrawRectangleRec(row, GetColor((unsigned int)BC_RGB(0x222222)));
+    }
+    /* Tick box: the accent filled when ticked, grey when it cannot change. */
+    const Rectangle box = bc_rect(row.x + BC_GAP, row.y + (BC_LIST_ROW - 16) / 2, 16, 16);
+    const Color edge = GetColor((unsigned int)(!choosable || disabled ? GuiGetStyle(DEFAULT, BORDER_COLOR_DISABLED) :
+                                               hover                 ? BC_RGB(BC_RGB_ACCENT) :
+                                                                       GuiGetStyle(DEFAULT, BORDER_COLOR_NORMAL)));
+    DrawRectangleLinesEx(box, 1, edge);
+    if (ticked) {
+      const unsigned int fill = choosable && !disabled ? BC_RGB_ACCENT : 0x5c5c5c;
+      DrawRectangleRec(bc_rect(box.x + 3, box.y + 3, box.width - 6, box.height - 6), GetColor((unsigned int)BC_RGB(fill)));
+    }
+    char info[48];
+    snprintf(info, sizeof(info), always ? "%d  \xc2\xb7  always" : never ? "%d  \xc2\xb7  never" : "%d", type->count);
+    const float info_w = MeasureTextEx(font, info, BC_TEXT_SIZE, spacing).x;
+    const float text_x = box.x + box.width + BC_GAP;
+    const Vector2 text_at = {text_x, row.y + (BC_LIST_ROW - BC_TEXT_SIZE) / 2};
+    char shown[BC_DATA_EXT_SIZE + 8];
+    bc_fit_right(type->ext, row.x + row.width - BC_GAP - info_w - 2 * BC_GAP - text_x, shown, sizeof(shown));
+    DrawTextEx(font, shown, text_at, BC_TEXT_SIZE, spacing, GetColor((unsigned int)GuiGetStyle(DEFAULT, choosable && !disabled ? TEXT_COLOR_NORMAL : TEXT_COLOR_DISABLED)));
+    const Vector2 info_at = {row.x + row.width - BC_GAP - info_w, text_at.y};
+    DrawTextEx(font, info, info_at, BC_TEXT_SIZE, spacing, GetColor((unsigned int)BC_RGB(BC_RGB_HINT)));
+    if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+      bc_gui_toggle_type(g, type->ext);
+    }
   }
+  bc_list_thumb(list, g->types_scroll, max_scroll, visible, g->type_count);
 }
 
 /** The help panel at the bottom: the help of the control under the pointer, as registered this
@@ -1737,8 +2040,9 @@ static void bc_gui_draw(BC_Gui *g)
   const bool dropdown_open = g->check_edit || g->manifest_edit || g->key_edit;
 
   /* Heights, known before anything is drawn: with the shortest file list and log (BC_LOG_MIN
-   * lines) they give the height of the page. A taller window gives the log lines first, then the
-   * list the rest (the log all of it while the list is folded away); a shorter one scrolls the
+   * lines) they give the height of the page. A taller window gives the list rows first, up to
+   * BC_LIST_ROWS (it is where the main blend and the types are chosen), then the log lines, then
+   * the list the rest (the log all of it while the list is folded away); a shorter one scrolls the
    * page. Every section folds. */
   const bool online = g->project.key_mode == BC_KEY_ONLINE;
   const bool key_file_row = g->project.key_mode != BC_KEY_BUILD;
@@ -1761,7 +2065,8 @@ static void bc_gui_draw(BC_Gui *g)
   const float inner = W - 2 * BC_MARGIN - (page_h > win_h ? BC_SCROLL_W : 0);
   const float spare = page_h - min_h;
   const int log_max = g->game_open ? BC_LOG_VISIBLE : BC_LOG_ROWS_MAX;
-  int log_lines = BC_LOG_MIN + (int)(spare / 24);
+  const float list_first = g->game_open ? (BC_LIST_ROWS - 3) * BC_LIST_ROW : 0;
+  int log_lines = BC_LOG_MIN + (spare > list_first ? (int)((spare - list_first) / 24) : 0);
   log_lines = log_lines > log_max ? log_max : log_lines;
   const float list_h = list_min_h + spare - (float)(log_lines - BC_LOG_MIN) * 24;
   const float game_h = g->game_open ? game_fixed_h + list_h : BC_FOLDED_H;
@@ -1869,12 +2174,14 @@ static void bc_gui_draw(BC_Gui *g)
     }
     y += BC_ROW + BC_GAP;
 
-    /* The wheel moved the page: the list it may have brought under the pointer sits this frame
-     * out. */
-    bc_gui_file_list(g, bc_rect(x0, y, right - x0, list_h), page_wheeled);
+    /* The files as a tree, and beside them the types they come in. The wheel moved the page: a
+     * list it may have brought under the pointer sits this frame out. */
+    const float types_w = 260;
+    bc_gui_file_list(g, bc_rect(x0, y, right - x0 - types_w - BC_GAP, list_h), page_wheeled);
+    bc_gui_types_list(g, bc_rect(right - types_w, y, types_w, list_h), page_wheeled);
     y += list_h + BC_GAP;
 
-    /* Under the list: its buttons, the data file extensions, the view. */
+    /* Under the list: its buttons. */
     float bx = x0;
     const float add_files_w = bc_button_w("Add files..."), add_folder_w = bc_button_w("Add folder...");
     const float remove_w = bc_button_w("Remove"), clear_w = bc_button_w("Clear");
@@ -1905,7 +2212,7 @@ static void bc_gui_draw(BC_Gui *g)
       }
     }
     bx += add_folder_w + BC_GAP;
-    const bool has_selection = !g->show_all && g->list_active >= 0 && g->list_active < g->project.input_count;
+    const bool has_selection = g->list_active >= 0 && g->list_active < g->project.input_count;
     bool changed = bc_enable_begin(has_selection);
     bc_tip(bc_rect(bx, y, remove_w, BC_ROW), "Remove the selected entry\nFrom this list only: the files stay on disk.");
     if (GuiButton(bc_rect(bx, y, remove_w, BC_ROW), "Remove") && has_selection) {
@@ -1923,26 +2230,6 @@ static void bc_gui_draw(BC_Gui *g)
       bc_gui_rebuild_items(g);
     }
     bc_enable_end(changed);
-    bx += clear_w + 3 * BC_GAP;
-
-    char view[32];
-    snprintf(view, sizeof(view), "All files (%d)", g->scan.count);
-    const float view_w = bc_button_w("All files (00000)");
-    const float view_x = right - view_w;
-    const float data_label_w = MeasureTextEx(font, "Data files", BC_TEXT_SIZE, text_spacing).x + 2 * BC_GAP;
-    const char *data_help = "Data file extensions to encrypt too\nFor example json txt csv: the folders give these files too. The game reads them with bge.logic.decryptFile(path). Python modules (.py) are always encrypted.";
-    GuiLabel(bc_rect(bx, y, data_label_w, BC_ROW), "Data files");
-    bc_tip(bc_rect(bx, y, data_label_w, BC_ROW), data_help);
-    if (bc_gui_text_field(bc_rect(bx + data_label_w, y, view_x - BC_GAP - (bx + data_label_w), BC_ROW), data_help, "Optional: json txt csv", g->data_text, sizeof(g->data_text), g->project.data_extensions, sizeof(g->project.data_extensions), &g->data_edit)) {
-      bc_gui_set_modified(g);
-      g->inputs_revision++;
-    }
-    bc_tip(bc_rect(view_x, y, view_w, BC_ROW), "Show every file the list gives\nWith its kind and size, as the export encrypts it; again: back to the inputs. Click the star of a .blend to make it the main file.");
-    const bool show_all = g->show_all;
-    GuiToggle(bc_rect(view_x, y, view_w, BC_ROW), view, &g->show_all);
-    if (g->show_all != show_all) {
-      g->list_scroll = 0;
-    }
     y += BC_ROW + BC_GAP + 2 * BC_GAP;
   }
   else {
@@ -2656,7 +2943,9 @@ int bc_gui_run(const char *project_path)
   }
   free(g.items);
   bc_file_list_free(&g.scan);
-  free(g.input_info);
+  free(g.input_rows);
+  free(g.input_folded);
+  free(g.types);
   bc_project_free(&g.project);
   UnloadFont(font); /* No-op for raylib's own font. */
   CloseWindow();

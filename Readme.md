@@ -172,13 +172,17 @@ Platform notes:
    sections in the order of the task. Each one folds to a summary line, by default the last two:
    1. *Game*, what gets encrypted:
       - *Source folder*: the root of your game sources (`.blend` files, Python modules, data files).
-      - The list of files and folders to encrypt, dragged and dropped on the window. Folders are
-        scanned recursively (hidden folders skipped) for `.blend` files, `.py` modules and the files
-        of the *Data files* extensions (for example `json csv`). A file listed on its own is
-        encrypted whatever its extension: `.blend` as a scene, `.py` as a module, any other as a
-        data file. *All files* shows every file the list gives, with its kind and size.
-      - The star marks the main file, the `.blend` the game starts: click the star of another
-        `.blend` to change it.
+      - The list of files and folders to encrypt, dragged and dropped on the window, one row each.
+        A folder unfolds, by its arrow, into the files it gives, with their kind and size: it is
+        scanned recursively (hidden folders skipped) for `.blend` files, `.py` modules and the
+        files of the ticked types. A file listed on its own is encrypted whatever its extension:
+        `.blend` and `.py` as such, any other as a data file.
+      - *File types*, next to the list: every extension the listed folders hold, with its number
+        of files. `.blend` and `.py` are always encrypted, code (`.dll`, `.so`, `.pyc`...) never:
+        the player loads it as it is. Tick another type (`.json`, `.png`...) to encrypt its files
+        as data files; the project keeps the ticked types as `data_extensions`.
+      - The star marks the main file, the `.blend` the game starts. Every `.blend` has one: click
+        another star to change it.
       - The section line counts what will be encrypted (`.blend` files, scripts, data files, size,
         files skipped because they are already encrypted).
    2. *Build*, where the game goes:
@@ -200,7 +204,7 @@ Platform notes:
    and a note when it does not (the runtime not yet copied into the game folder, for example).
    The panel at the bottom explains the field under the pointer; *Help* in the first row hides it,
    and tooltips then carry the whole help. The editor remembers the help panel, the folded
-   sections, the *All files* view and the window size from one run to the next (`bc_tool.ini` in
+   sections and the window size from one run to the next (`bc_tool.ini` in
    `%APPDATA%\UPBGE-BinaryCrypt`, `~/Library/Application Support/UPBGE-BinaryCrypt` or
    `~/.config/upbge-binarycrypt`).
 3. **Encrypt.** This writes the encrypted files and the game executable. The button stays
@@ -383,7 +387,7 @@ encrypted `.blend` (an old output), it is skipped with a warning.
 sealed, the way that option would have: zstd level 3, independent frames of 1 MiB and a seek
 table, so the player opens and seeks it as any compressed `.blend`. Encrypted data does not
 compress, so without this a store that compresses its downloads (Steam compresses every chunk it
-ships) would ship it at full size. Measured with two scenes saved by Blender 4.0 (2.3 GHz Xeon):
+ships) would ship it at full size. Measured with two `.blend` files saved by Blender 4.0 (2.3 GHz Xeon):
 
 | `.blend` | Size | Encrypted | Export | Loading (decrypt, decompress) |
 |---|---|---|---|---|
@@ -394,9 +398,9 @@ Already compressed files (Blender's *Compress*, gzip) are sealed as they are.
 
 ### Python modules and data files
 
-The `.py` files of the scanned folders are encrypted too, and so are the files of the *Data
-files* extensions (`data_extensions`): list the folders the game uses, not one
-that also holds tools or add-ons. The game uses them as before:
+The `.py` files of the scanned folders are encrypted too, and so are the files of the types
+ticked in *File types* (`data_extensions`): list the folders the game uses, not one that also
+holds tools or add-ons. The game uses them as before:
 
 - **Modules** are imported with `import`, by Python components and by module mode Python
   controllers, unchanged. The player puts a finder in front of Python's path finder: Python
@@ -416,7 +420,7 @@ that also holds tools or add-ons. The game uses them as before:
 
 - An **empty** module or data file (an empty `__init__.py`) is copied as it is: there is nothing
   to hide, and a container cannot be empty.
-- Every container holds one **kind** (scene, module, data file), part of its authenticated
+- Every container holds one **kind** (`.blend` file, module, data file), part of its authenticated
   header: `decryptFile()` refuses a `.blend` or a module, `import` a data file, `LibLoad` both.
 
 Only the player started from the game executable decrypts them; Blender and other players read

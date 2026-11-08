@@ -146,6 +146,18 @@ void bc_project_clear_inputs(BC_Project *p);
  */
 int bc_project_data_extensions(const BC_Project *p, char out[][BC_DATA_EXT_SIZE], int max, char *err, size_t err_size);
 
+typedef enum BC_ExtensionRule {
+  /** May be a data extension. */
+  BC_EXTENSION_DATA = 0,
+  /** .blend and .py: always encrypted, as kinds of their own. */
+  BC_EXTENSION_ALWAYS,
+  /** Code the OS or Python loads: never encrypted. */
+  BC_EXTENSION_NEVER,
+} BC_ExtensionRule;
+
+/** What #bc_project_data_extensions makes of \a ext (dot-prefixed, any case). */
+BC_ExtensionRule bc_project_extension_rule(const char *ext);
+
 /** Where the launcher, manifest and player live (see file comment). */
 const char *bc_project_dist_root(const BC_Project *p);
 

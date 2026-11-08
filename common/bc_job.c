@@ -148,6 +148,7 @@ typedef struct BC_ListRules {
   int data_ext_count;
   const char *skip_dir;
   BC_LogFn log;
+  BC_SeenFn seen;
   void *user;
 } BC_ListRules;
 
@@ -223,7 +224,10 @@ static void bc_scan_entry(void *user, const char *name, bool is_dir)
       bc_scan_dir(ctx->list, ctx->rules, path, &ctx->ok);
     }
   }
-  else if (bc_list_scans(ctx->rules, name)) {
+  else if (ctx->rules->seen != NULL) {
+    ctx->rules->seen(ctx->rules->user, path);
+  }
+  if (!is_dir && bc_list_scans(ctx->rules, name)) {
     /* Found by scanning, not listed: an encrypted file is most likely an old output (for example
      * from an earlier output folder inside the sources). Skip it instead of failing the whole
      * batch. Explicitly listed files still fail loudly in bc_seal_begin. */
@@ -270,11 +274,12 @@ bool bc_project_list_files(const BC_Project *p,
                            char (*data_ext)[BC_DATA_EXT_SIZE],
                            const int data_ext_count,
                            BC_LogFn log,
+                           BC_SeenFn seen,
                            void *user,
                            BC_FileList *r_list)
 {
   memset(r_list, 0, sizeof(*r_list));
-  const BC_ListRules rules = {data_ext, data_ext_count, p->output_dir, log, user};
+  const BC_ListRules rules = {data_ext, data_ext_count, p->output_dir, log, seen, user};
   /* Expand folders, then sort and drop duplicates (a file can be listed and also be found inside
    * a listed folder). */
   bool ok = true;
@@ -292,6 +297,9 @@ bool bc_project_list_files(const BC_Project *p,
       bc_scan_dir(r_list, &rules, input, &ok);
     }
     else if (bc_is_file(input)) {
+      if (seen != NULL) {
+        seen(user, input);
+      }
       ok = bc_list_add(r_list, input);
     }
     else {
@@ -674,7 +682,7 @@ BC_Job *bc_job_create(const BC_Project *p,
   }
 
   BC_FileList list;
-  if (!bc_project_list_files(p, job->data_ext, job->data_ext_count, job->log, job->log_user, &list)) {
+  if (!bc_project_list_files(p, job->data_ext, job->data_ext_count, job->log, NULL, job->log_user, &list)) {
     return bc_job_fail_create(job);
   }
   if (list.count == 0) {
