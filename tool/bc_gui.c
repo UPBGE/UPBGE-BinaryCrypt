@@ -1716,7 +1716,7 @@ static bool bc_section(const float y,
   const bool hot = fold >= 0 && !disabled && !GuiIsLocked() && IsCursorOnScreen() && CheckCollisionPointRec(GetMousePosition(), header);
   float x = BC_MARGIN + 12;
   const float title_w = MeasureTextEx(font, title, BC_TEXT_SIZE, spacing).x;
-  const float arrow_w = fold >= 0 ? BC_ICON_SIZE + 4 : 0;
+  const float arrow_w = fold >= 0 ? (float)(BC_ICON_SIZE + 4) : 0.0f;
   /* The texts sit on the line: the background clears it behind them. */
   DrawRectangleRec(bc_rect(x - 4, y - 1, arrow_w + title_w + 8, 3), background);
   if (fold >= 0) {
@@ -2053,11 +2053,11 @@ static void bc_gui_draw(BC_Gui *g)
   const float list_min_h = 3 * BC_LIST_ROW + 4;
   const float game_fixed_h = 2 * BC_GAP + (BC_ROW + BC_GAP) + BC_GAP + (BC_ROW + BC_GAP); /* Without the list. */
   const float game_min_h = g->game_open ? game_fixed_h + list_min_h : BC_FOLDED_H;
-  const float build_h = g->build_open ? 2 * BC_GAP + 2 * (BC_ROW + BC_GAP) : BC_FOLDED_H;
-  const float windows_h = windows_open ? 2 * BC_GAP + 2 * (BC_ROW + BC_GAP) : BC_FOLDED_H;
+  const float build_h = g->build_open ? (float)(2 * BC_GAP + 2 * (BC_ROW + BC_GAP)) : BC_FOLDED_H;
+  const float windows_h = windows_open ? (float)(2 * BC_GAP + 2 * (BC_ROW + BC_GAP)) : BC_FOLDED_H;
   const int protection_rows = 2 + (key_file_row ? 1 : 0) + (online ? 2 : 0);
   const float protection_h = g->protection_open ? 2 * BC_GAP + (float)protection_rows * (BC_ROW + BC_GAP) : BC_FOLDED_H;
-  const float help_h = g->help ? BC_GAP + BC_HELP_H : 0;
+  const float help_h = g->help ? (float)(BC_GAP + BC_HELP_H) : 0.0f;
   const float bottom_min_h = (BC_ROW + BC_GAP) + (BC_LOG_MIN * 24 + BC_GAP) + help_h; /* Run row, log, help. */
   const float min_h = BC_MARGIN + (BC_ROW + 2 * BC_GAP) + (game_min_h + 2 * BC_GAP) + (build_h + 2 * BC_GAP) +
                       (windows_h + 2 * BC_GAP) + (protection_h + 2 * BC_GAP) + bottom_min_h + BC_MARGIN;
@@ -2065,7 +2065,7 @@ static void bc_gui_draw(BC_Gui *g)
   const float inner = W - 2 * BC_MARGIN - (page_h > win_h ? BC_SCROLL_W : 0);
   const float spare = page_h - min_h;
   const int log_max = g->game_open ? BC_LOG_VISIBLE : BC_LOG_ROWS_MAX;
-  const float list_first = g->game_open ? (BC_LIST_ROWS - 3) * BC_LIST_ROW : 0;
+  const float list_first = g->game_open ? (float)((BC_LIST_ROWS - 3) * BC_LIST_ROW) : 0.0f;
   int log_lines = BC_LOG_MIN + (spare > list_first ? (int)((spare - list_first) / 24) : 0);
   log_lines = log_lines > log_max ? log_max : log_lines;
   const float list_h = list_min_h + spare - (float)(log_lines - BC_LOG_MIN) * 24;
