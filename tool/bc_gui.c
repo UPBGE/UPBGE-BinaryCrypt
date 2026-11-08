@@ -112,7 +112,7 @@ typedef struct BC_Gui {
   bool icon_edit, version_edit, company_edit, copyright_edit;
   bool key_file_edit, provider_edit, url_edit, update_edit, data_edit;
   /** Open dropdowns: drawn last, over the rows below them. */
-  bool check_edit, key_edit;
+  bool check_edit, manifest_edit, key_edit;
 
   char **items;
   int item_count;
@@ -669,7 +669,7 @@ static bool bc_gui_editing(const BC_Gui *g)
   return g->source_edit || g->output_edit || g->player_edit || g->main_edit || g->game_edit ||
          g->icon_edit || g->version_edit || g->company_edit || g->copyright_edit ||
          g->key_file_edit || g->provider_edit || g->url_edit || g->update_edit || g->data_edit ||
-         g->check_edit || g->key_edit;
+         g->check_edit || g->manifest_edit || g->key_edit;
 }
 
 /* -------------------------------------------------------------------------------------------- */
@@ -1184,10 +1184,10 @@ static void bc_gui_draw(BC_Gui *g)
   BC_DialogResult r;
 
   if (modal) {
-    g->check_edit = g->key_edit = false;
+    g->check_edit = g->manifest_edit = g->key_edit = false;
   }
   /* An open dropdown takes every click until it closes: the rows under its list must not react. */
-  const bool dropdown_open = g->check_edit || g->key_edit;
+  const bool dropdown_open = g->check_edit || g->manifest_edit || g->key_edit;
   if (modal || dropdown_open) {
     GuiLock();
   }
@@ -1285,16 +1285,15 @@ static void bc_gui_draw(BC_Gui *g)
   if (!g->game_edit) {
     snprintf(g->game_text, sizeof(g->game_text), "%s%s", game_name, game_is_default ? "  (main file)" : "");
   }
-  /* Manifest placement shares the row, right aligned with the path row buttons. */
+  /* Integrity level and manifest placement share the row as dropdowns, the manifest right aligned
+   * with the path row buttons. Dropdowns are drawn last (a list opens over the rows below), as wide
+   * as their widest item plus room for the arrow. */
   const float text_spacing = (float)GuiGetStyle(DEFAULT, TEXT_SPACING);
-  const float manifest_item_w = MeasureTextEx(GuiGetFont(), "Separate file", BC_TEXT_SIZE, text_spacing).x + 4 * BC_GAP;
-  const float manifest_label_w = MeasureTextEx(GuiGetFont(), "Manifest", BC_TEXT_SIZE, text_spacing).x + 3 * BC_GAP;
-  const float manifest_group_w = 2 * manifest_item_w + GuiGetStyle(TOGGLE, GROUP_PADDING);
-  const float manifest_x = BC_MARGIN + inner - 2 * BC_GAP - manifest_group_w;
-  /* Integrity level: a dropdown between the name and the manifest group, drawn last (its list
-   * opens over the rows below). Dropdowns: the widest item, then room for the arrow. */
-  const float check_label_w = MeasureTextEx(GuiGetFont(), "Check", BC_TEXT_SIZE, text_spacing).x + 2 * BC_GAP;
   const float dropdown_extra = 3 * BC_GAP + (float)(GuiGetStyle(DROPDOWNBOX, ARROW_PADDING) + BC_ICON_SIZE);
+  const float manifest_label_w = MeasureTextEx(GuiGetFont(), "Manifest", BC_TEXT_SIZE, text_spacing).x + 3 * BC_GAP;
+  const float manifest_group_w = MeasureTextEx(GuiGetFont(), "Separate file", BC_TEXT_SIZE, text_spacing).x + dropdown_extra;
+  const float manifest_x = BC_MARGIN + inner - 2 * BC_GAP - manifest_group_w;
+  const float check_label_w = MeasureTextEx(GuiGetFont(), "Check", BC_TEXT_SIZE, text_spacing).x + 2 * BC_GAP;
   const float check_combo_w = MeasureTextEx(GuiGetFont(), "+ Libraries", BC_TEXT_SIZE, text_spacing).x + dropdown_extra;
   const float check_x = manifest_x - manifest_label_w - BC_GAP - check_combo_w;
   const float game_box_w = check_x - check_label_w - BC_GAP - (BC_MARGIN + BC_GAP + BC_LABEL_W);
@@ -1327,16 +1326,7 @@ static void bc_gui_draw(BC_Gui *g)
   GuiLabel(bc_rect(check_x - check_label_w, y, check_label_w, BC_ROW), "Check");
   const Rectangle check_box = bc_rect(check_x, y, check_combo_w, BC_ROW);
   GuiLabel(bc_rect(manifest_x - manifest_label_w, y, manifest_label_w, BC_ROW), "Manifest");
-  bc_tip(bc_rect(manifest_x, y, manifest_group_w, BC_ROW),
-         "Embedded: one self-contained game executable. Separate file: the game executable is an "
-         "untouched copy of bc_launcher and " BC_MANIFEST_FILENAME " goes next to it (sign "
-         "bc_launcher once; strip, UPX and codesign stay harmless)");
-  int manifest_mode = (int)g->project.manifest_mode;
-  GuiToggleGroup(bc_rect(manifest_x, y, manifest_item_w, BC_ROW), "Embedded;Separate file", &manifest_mode);
-  if (manifest_mode != (int)g->project.manifest_mode) {
-    g->project.manifest_mode = (BC_ManifestMode)manifest_mode;
-    bc_gui_set_modified(g);
-  }
+  const Rectangle manifest_box = bc_rect(manifest_x, y, manifest_group_w, BC_ROW);
   y += BC_ROW + BC_GAP;
 
   if (bc_gui_path_row(y, inner, "UPBGE runtime", "UPBGE player inside the game folder, with its runtime (DLLs, python, datafiles) next to it. It is hashed: the game refuses any other player", "Required: the UPBGE player inside the game folder", &check->runtime, g->project.player, g->player_text, &g->player_edit, &committed)) {
@@ -1818,7 +1808,7 @@ static void bc_gui_draw(BC_Gui *g)
   }
 
   /* Dropdowns last: an open list lies over the rows below it. The open one is drawn after the
-   * closed one. */
+   * closed ones. */
   if (dropdown_open && !modal) {
     GuiUnlock();
   }
@@ -1831,22 +1821,40 @@ static void bc_gui_draw(BC_Gui *g)
            "also every .dll, .so, .dylib, .pyd and .exe of the game folder (a proxy DLL would run inside the "
            "player). + Python: also .py, .pth and .zip files, and Python bytecode is removed (the game then "
            "compiles its scripts at every launch). Each level costs a hash of those files at every launch");
+    bc_tip(manifest_box,
+           "Embedded: one self-contained game executable. Separate file: the game executable is an "
+           "untouched copy of bc_launcher and " BC_MANIFEST_FILENAME " goes next to it (sign "
+           "bc_launcher once; strip, UPX and codesign stay harmless)");
     bc_tip(key_box,
            "Per project: a key of this project, from its key file, travels masked in the game executable (another game made with this tool has another key). Online: a key server gives it to players who own the game (Steam, Epic...) through the key provider; no shipped file holds it. Build key: the key compiled into this tool and the launcher");
   }
   int integrity = (int)g->project.integrity;
+  int manifest_mode = (int)g->project.manifest_mode;
   int key_mode = (int)g->project.key_mode;
-  /* Fixed before drawing: a click flips the flag, and the same click must not reach the
-   * dropdown twice. */
-  const bool check_last = g->check_edit;
-  for (int pass = 0; pass < 2; pass++) {
-    if ((pass == 0) != check_last) {
-      if (GuiDropdownBox(check_box, "Player;+ Libraries;+ Python", &integrity, g->check_edit)) {
-        g->check_edit = !g->check_edit;
-      }
+  struct {
+    Rectangle box;
+    const char *items;
+    int *value;
+    bool *edit;
+  } dropdowns[] = {
+      {check_box, "Player;+ Libraries;+ Python", &integrity, &g->check_edit},
+      {manifest_box, "Embedded;Separate file", &manifest_mode, &g->manifest_edit},
+      {key_box, "Per project;Online;Build key", &key_mode, &g->key_edit},
+  };
+  const int dropdown_count = (int)(sizeof(dropdowns) / sizeof(dropdowns[0]));
+  /* Fixed before drawing: a click flips the flag, and the same click must not reach a dropdown
+   * twice. */
+  int open = -1;
+  for (int i = 0; i < dropdown_count; i++) {
+    open = *dropdowns[i].edit ? i : open;
+  }
+  for (int pass = 0; pass <= dropdown_count; pass++) {
+    const int i = pass < dropdown_count ? pass : open;
+    if (i < 0 || (pass < dropdown_count && i == open)) {
+      continue;
     }
-    else if (GuiDropdownBox(key_box, "Per project;Online;Build key", &key_mode, g->key_edit)) {
-      g->key_edit = !g->key_edit;
+    if (GuiDropdownBox(dropdowns[i].box, dropdowns[i].items, dropdowns[i].value, *dropdowns[i].edit)) {
+      *dropdowns[i].edit = !*dropdowns[i].edit;
     }
   }
   if (running) {
@@ -1854,6 +1862,10 @@ static void bc_gui_draw(BC_Gui *g)
   }
   if (integrity != (int)g->project.integrity) {
     g->project.integrity = (BC_Integrity)integrity;
+    bc_gui_set_modified(g);
+  }
+  if (manifest_mode != (int)g->project.manifest_mode) {
+    g->project.manifest_mode = (BC_ManifestMode)manifest_mode;
     bc_gui_set_modified(g);
   }
   if (key_mode != (int)g->project.key_mode) {
