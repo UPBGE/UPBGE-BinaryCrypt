@@ -39,8 +39,10 @@
 #define BC_BUTTON_W 130
 #define BC_LOG_LINES 256
 #define BC_LOG_VISIBLE 7
-/* Fewest log lines: below them the page scrolls instead. */
+/* Fewest log lines: below them the page scrolls instead. Most: while the file list is folded the
+ * log takes the room. */
 #define BC_LOG_MIN 3
+#define BC_LOG_ROWS_MAX 48
 #define BC_JOB_BUDGET 0.012
 #define BC_STATUS_H 26
 /* Page scroll bar, in the right margin: the content gives up this width while the page scrolls. */
@@ -136,12 +138,14 @@ typedef struct BC_Gui {
   unsigned inputs_revision, scan_revision;
   int scan_blends, scan_modules, scan_data;
   uint64_t scan_bytes;
-  /** Per input: what it gives ("3 scenes · 4 scripts", "scene · 2.1 MB"). */
+  /** Per input: what it gives ("3 blends · 4 scripts", "blend · 2.1 MB"). */
   char (*input_info)[64];
   bool focused;
 
-  /** Sections 3 and 4 open; folded they show their summary line only. */
-  bool windows_open, protection_open;
+  /** Sections open; folded they show their summary line only. Kept with the help panel switch and
+   * the window size from one run to the next (bc_settings_path). */
+  bool game_open, build_open, windows_open, protection_open;
+  bool help;
 
   BC_Job *job;
   double job_start;
@@ -513,6 +517,87 @@ static void bc_gui_dialog_unavailable(BC_Gui *g)
 }
 
 /* -------------------------------------------------------------------------------------------- */
+/* Settings: how the editor looked, kept from one run to the next. A plain "key = value" file; a
+ * missing, unknown or damaged line keeps its default. */
+
+#define BC_WINDOW_MIN_W 1000
+#define BC_WINDOW_MIN_H 500
+
+static void bc_gui_load_settings(BC_Gui *g, int *r_width, int *r_height)
+{
+  g->help = true;
+  g->game_open = g->build_open = true;
+  g->windows_open = g->protection_open = g->show_all = false;
+  /* Tall enough for every row of a Windows build with online keys, and still within a 1080p
+   * screen with its taskbar. */
+  *r_width = 1100;
+  *r_height = 980;
+  char path[BC_PATH_MAX];
+  FILE *f = bc_settings_path(path, sizeof(path)) ? bc_fopen(path, "rb") : NULL;
+  if (f == NULL) {
+    return;
+  }
+  struct {
+    const char *key;
+    bool *value;
+  } flags[] = {
+      {"help", &g->help},
+      {"game_open", &g->game_open},
+      {"build_open", &g->build_open},
+      {"windows_open", &g->windows_open},
+      {"protection_open", &g->protection_open},
+      {"all_files", &g->show_all},
+  };
+  char line[128];
+  while (fgets(line, sizeof(line), f) != NULL) {
+    char key[32];
+    int value;
+    if (sscanf(line, " %31[a-z_] = %d", key, &value) != 2) {
+      continue;
+    }
+    for (size_t i = 0; i < sizeof(flags) / sizeof(flags[0]); i++) {
+      if (strcmp(key, flags[i].key) == 0) {
+        *flags[i].value = value != 0;
+      }
+    }
+    if (strcmp(key, "window_width") == 0 && value >= BC_WINDOW_MIN_W && value <= 16384) {
+      *r_width = value;
+    }
+    else if (strcmp(key, "window_height") == 0 && value >= BC_WINDOW_MIN_H && value <= 16384) {
+      *r_height = value;
+    }
+  }
+  fclose(f);
+}
+
+/** Best effort: settings that cannot be written are simply the defaults next time. */
+static void bc_gui_save_settings(const BC_Gui *g)
+{
+  char path[BC_PATH_MAX], dir[BC_PATH_MAX];
+  if (!bc_settings_path(path, sizeof(path))) {
+    return;
+  }
+  bc_path_dirname(dir, sizeof(dir), path);
+  FILE *f = bc_mkdir_p(dir) ? bc_fopen(path, "wb") : NULL;
+  if (f == NULL) {
+    return;
+  }
+  fprintf(f,
+          "# bc_tool editor settings\n"
+          "help = %d\ngame_open = %d\nbuild_open = %d\nwindows_open = %d\nprotection_open = %d\nall_files = %d\n"
+          "window_width = %d\nwindow_height = %d\n",
+          g->help,
+          g->game_open,
+          g->build_open,
+          g->windows_open,
+          g->protection_open,
+          g->show_all,
+          GetScreenWidth(),
+          GetScreenHeight());
+  fclose(f);
+}
+
+/* -------------------------------------------------------------------------------------------- */
 /* Job */
 
 static void bc_gui_start(BC_Gui *g)
@@ -655,7 +740,7 @@ static void bc_gui_refresh_scan(BC_Gui *g)
       for (int f = 0; f < g->scan.count; f++) {
         n[g->scan.files[f].kind] += bc_path_is_inside(input, g->scan.files[f].path) ? 1 : 0;
       }
-      static const char *const names[3][2] = {{"scene", "scenes"}, {"script", "scripts"}, {"data file", "data files"}};
+      static const char *const names[3][2] = {{"blend", "blends"}, {"script", "scripts"}, {"data file", "data files"}};
       for (int k = 0; k < 3; k++) {
         if (n[k] > 0) {
           const size_t used = strlen(text);
@@ -671,7 +756,7 @@ static void bc_gui_refresh_scan(BC_Gui *g)
       char size[24];
       bc_file_size(input, &bytes);
       bc_format_size(bytes, size, sizeof(size));
-      static const char *const kinds[3] = {"scene", "script", "data"};
+      static const char *const kinds[3] = {"blend", "script", "data"};
       const int kind = bc_path_has_extension(input, ".blend") ? 0 : bc_path_has_extension(input, ".py") ? 1 : 2;
       snprintf(text, sizeof(text), "%s  \xc2\xb7  %s", kinds[kind], size);
     }
@@ -1069,8 +1154,9 @@ static void bc_draw_span(const BC_Span *span, const float x, const float y, cons
 }
 
 /** Draw the tooltip registered this frame on top of everything, below its control or above it
- * when there is no room, inside the window: the short line of its help. */
-static void bc_gui_draw_tip(void)
+ * when there is no room, inside the window: the short line of its help, or with \a full all of
+ * it (the help panel is hidden). */
+static void bc_gui_draw_tip(const bool full)
 {
   const char *help = g_tip_text;
   g_tip_text = NULL;
@@ -1099,7 +1185,11 @@ static void bc_gui_draw_tip(void)
   const float line_h = BC_TEXT_SIZE + 4;
   const float max_w = (W - 2 * BC_MARGIN < 640 ? W - 2 * BC_MARGIN : 640) - 2 * BC_GAP;
   BC_Span spans[24];
-  const int n = bc_wrap(text, max_w, spacing, spans, 24);
+  int n = bc_wrap(text, max_w, spacing, spans, 24);
+  if (full && end != NULL) {
+    /* The rest below the short line, wrapped on its own. */
+    n += bc_wrap(end + 1, max_w, spacing, spans + n, 24 - n);
+  }
   float text_w = 0;
   for (int i = 0; i < n; i++) {
     char buffer[BC_SPAN_MAX];
@@ -1399,7 +1489,7 @@ static float bc_button_w(const char *text)
 
 /**
  * Section: a frame whose top line carries its title in the accent and, after it, a summary in the
- * hint color (red when \a summary_error) unless it is folded open. \a fold -1: always open; 0 folded: the top line only;
+ * hint color (red when \a summary_error; NULL: none). \a fold -1: always open; 0 folded: the top line only;
  * 1 open. A foldable section takes clicks on its whole header line and shows an arrow.
  * \return true when the header was clicked.
  */
@@ -1423,28 +1513,31 @@ static bool bc_section(const float y,
     DrawRectangleRec(bc_rect(BC_MARGIN, y, inner, 1), line);
   }
   const Rectangle header = bc_rect(BC_MARGIN, y - BC_ROW / 2, inner, BC_ROW);
-  const bool hot = fold >= 0 && !GuiIsLocked() && IsCursorOnScreen() && CheckCollisionPointRec(GetMousePosition(), header);
+  const bool disabled = GuiGetState() == STATE_DISABLED;
+  const bool hot = fold >= 0 && !disabled && !GuiIsLocked() && IsCursorOnScreen() && CheckCollisionPointRec(GetMousePosition(), header);
   float x = BC_MARGIN + 12;
   const float title_w = MeasureTextEx(font, title, BC_TEXT_SIZE, spacing).x;
   const float arrow_w = fold >= 0 ? BC_ICON_SIZE + 4 : 0;
   /* The texts sit on the line: the background clears it behind them. */
   DrawRectangleRec(bc_rect(x - 4, y - 1, arrow_w + title_w + 8, 3), background);
   if (fold >= 0) {
-    const Color arrow = GetColor((unsigned int)(hot ? BC_RGB(BC_RGB_ACCENT) : GuiGetStyle(LABEL, TEXT_COLOR_NORMAL)));
+    const Color arrow = GetColor((unsigned int)(disabled ? GuiGetStyle(DEFAULT, TEXT_COLOR_DISABLED) :
+                                                hot      ? BC_RGB(BC_RGB_ACCENT) :
+                                                           GuiGetStyle(LABEL, TEXT_COLOR_NORMAL)));
     GuiDrawIcon(fold ? ICON_ARROW_DOWN_FILL : ICON_ARROW_RIGHT_FILL, (int)x, (int)(y - BC_ICON_SIZE / 2), 1, arrow);
     x += arrow_w;
   }
   const Vector2 title_at = {x, y - BC_TEXT_SIZE / 2};
-  DrawTextEx(font, title, title_at, BC_TEXT_SIZE, spacing, GetColor((unsigned int)BC_RGB(BC_RGB_ACCENT)));
+  DrawTextEx(font, title, title_at, BC_TEXT_SIZE, spacing, GetColor((unsigned int)(disabled ? GuiGetStyle(DEFAULT, TEXT_COLOR_DISABLED) : BC_RGB(BC_RGB_ACCENT))));
   x += title_w + 2 * BC_GAP;
-  /* Open, a foldable section shows its fields: the summary would repeat them. */
-  if (summary != NULL && summary[0] != '\0' && fold != 1) {
+  if (summary != NULL && summary[0] != '\0') {
     char shown[BC_PATH_MAX];
     bc_fit_right(summary, BC_MARGIN + inner - 2 * BC_GAP - x, shown, sizeof(shown));
     const float w = MeasureTextEx(font, shown, BC_TEXT_SIZE, spacing).x;
     DrawRectangleRec(bc_rect(x - 4, y - 1, w + 8, 3), background);
     const Vector2 at = {x, y - BC_TEXT_SIZE / 2};
-    DrawTextEx(font, shown, at, BC_TEXT_SIZE, spacing, GetColor((unsigned int)BC_RGB(summary_error ? BC_RGB_ERROR : BC_RGB_HINT)));
+    const int rgba = disabled ? GuiGetStyle(DEFAULT, TEXT_COLOR_DISABLED) : BC_RGB(summary_error ? BC_RGB_ERROR : BC_RGB_HINT);
+    DrawTextEx(font, shown, at, BC_TEXT_SIZE, spacing, GetColor((unsigned int)rgba));
   }
   if (fold < 0) {
     return false;
@@ -1479,7 +1572,7 @@ static const char *bc_gui_relative(const BC_Gui *g, const char *path)
  */
 static void bc_gui_file_list(BC_Gui *g, const Rectangle bounds, const bool page_wheeled)
 {
-  static const char *const kinds[3] = {"scene", "script", "data"};
+  static const char *const kinds[3] = {"blend", "script", "data"};
   const float spacing = (float)GuiGetStyle(DEFAULT, TEXT_SPACING);
   const Font font = GuiGetFont();
   const bool disabled = GuiGetState() == STATE_DISABLED;
@@ -1499,8 +1592,8 @@ static void bc_gui_file_list(BC_Gui *g, const Rectangle bounds, const bool page_
   DrawRectangleRec(bounds, GetColor((unsigned int)GuiGetStyle(DEFAULT, BACKGROUND_COLOR)));
   DrawRectangleLinesEx(bounds, 1, GetColor((unsigned int)GuiGetStyle(DEFAULT, disabled ? BORDER_COLOR_DISABLED : BORDER_COLOR_NORMAL)));
   bc_tip(bounds,
-         g->show_all ? "Every file the list gives\nWith its kind and size, as the export encrypts it. Click the star of a .blend to make it the main file, the scene the game starts." :
-                       "Files and folders to encrypt\nA folder gives its .blend files, Python modules and data files. The star marks the main file, the scene the game starts: click the star of another .blend to change it.");
+         g->show_all ? "Every file the list gives\nWith its kind and size, as the export encrypts it. Click the star of a .blend to make it the main file, the .blend the game starts." :
+                       "Files and folders to encrypt\nA folder gives its .blend files, Python modules and data files. The star marks the main file, the .blend the game starts: click the star of another .blend to change it.");
   if (live && !page_wheeled && max_scroll > 0 && CheckCollisionPointRec(mouse, bounds)) {
     const float wheel = GetMouseWheelMove();
     g->list_scroll -= wheel > 0 ? (int)(wheel + 0.5f) : (int)(wheel - 0.5f);
@@ -1566,7 +1659,7 @@ static void bc_gui_file_list(BC_Gui *g, const Rectangle bounds, const bool page_
       GuiDrawIcon(ICON_STAR, (int)(row.x + BC_GAP), (int)(row.y + (BC_LIST_ROW - BC_ICON_SIZE) / 2), 1, GetColor((unsigned int)BC_RGB(rgb)));
     }
     if (star_hover) {
-      bc_tip(star, is_main ? "The main file\nThe scene the game executable starts." : "Make it the main file\nThe scene the game executable starts.");
+      bc_tip(star, is_main ? "The main file\nThe .blend the game executable starts." : "Make it the main file\nThe .blend the game executable starts.");
     }
     const float text_x = star.x + star.width;
     const float info_w = MeasureTextEx(font, info, BC_TEXT_SIZE, spacing).x;
@@ -1597,14 +1690,10 @@ static void bc_gui_file_list(BC_Gui *g, const Rectangle bounds, const bool page_
 }
 
 /** The help panel at the bottom: the help of the control under the pointer, as registered this
- * frame (call before #bc_gui_draw_tip), else what the editor is about; Copy log at its right. */
-static void bc_gui_help_panel(BC_Gui *g, const Rectangle bounds, const float copy_w)
+ * frame (call before #bc_gui_draw_tip), else what the editor is about. */
+static void bc_gui_help_panel(const Rectangle bounds)
 {
-  static char idle[192];
-  snprintf(idle,
-           sizeof(idle),
-           "Point at a field or a button to see what it does. Key %s: the key built into this tool (bc_launcher must come from the same build).",
-           g->fingerprint);
+  const char *idle = "Point at a field or a button to see what it does here. Help, in the first row, hides this panel.";
   const char *help = g_tip_text;
   const char *text = idle;
   if (help != NULL) {
@@ -1613,7 +1702,7 @@ static void bc_gui_help_panel(BC_Gui *g, const Rectangle bounds, const float cop
   }
   GuiStatusBar(bounds, NULL);
   const float spacing = (float)GuiGetStyle(DEFAULT, TEXT_SPACING);
-  const float text_w = bounds.width - copy_w - 4 * BC_GAP;
+  const float text_w = bounds.width - 2 * BC_GAP;
   BC_Span spans[BC_HELP_LINES + 1];
   const int n = bc_wrap(text, text_w, spacing, spans, BC_HELP_LINES + 1);
   const Color color = GetColor((unsigned int)(help ? GuiGetStyle(LABEL, TEXT_COLOR_NORMAL) : BC_RGB(BC_RGB_HINT)));
@@ -1627,10 +1716,6 @@ static void bc_gui_help_panel(BC_Gui *g, const Rectangle bounds, const float cop
       span.length = (int)strlen(buffer);
     }
     bc_draw_span(&span, bounds.x + BC_GAP, bounds.y + BC_GAP / 2 + (float)i * 24 + 2, spacing, color);
-  }
-  const Rectangle copy = bc_rect(bounds.x + bounds.width - copy_w - BC_GAP / 2, bounds.y + BC_GAP / 2, copy_w, BC_STATUS_H);
-  if (GuiButton(copy, "Copy log")) {
-    bc_gui_copy_log(g);
   }
 }
 
@@ -1653,27 +1738,33 @@ static void bc_gui_draw(BC_Gui *g)
 
   /* Heights, known before anything is drawn: with the shortest file list and log (BC_LOG_MIN
    * lines) they give the height of the page. A taller window gives the log lines first, then the
-   * list the rest; a shorter one scrolls the page. Sections 3 and 4 fold away. */
+   * list the rest (the log all of it while the list is folded away); a shorter one scrolls the
+   * page. Every section folds. */
   const bool online = g->project.key_mode == BC_KEY_ONLINE;
   const bool key_file_row = g->project.key_mode != BC_KEY_BUILD;
-  /* Icon and version information only exist for Windows games: hidden where this build cannot make
-   * one (the project keeps them, the job ignores them with a warning). */
+  /* Icon and version information only exist for Windows games: elsewhere the section stays folded
+   * and disabled (the project keeps them, the job ignores them with a warning). */
   const bool brand = bc_brand_supported();
+  const bool windows_open = brand && g->windows_open;
   const float list_min_h = 3 * BC_LIST_ROW + 4;
   const float game_fixed_h = 2 * BC_GAP + (BC_ROW + BC_GAP) + BC_GAP + (BC_ROW + BC_GAP); /* Without the list. */
-  const float build_h = 2 * BC_GAP + 2 * (BC_ROW + BC_GAP);
-  const float windows_h = g->windows_open ? 2 * BC_GAP + 2 * (BC_ROW + BC_GAP) : BC_FOLDED_H;
+  const float game_min_h = g->game_open ? game_fixed_h + list_min_h : BC_FOLDED_H;
+  const float build_h = g->build_open ? 2 * BC_GAP + 2 * (BC_ROW + BC_GAP) : BC_FOLDED_H;
+  const float windows_h = windows_open ? 2 * BC_GAP + 2 * (BC_ROW + BC_GAP) : BC_FOLDED_H;
   const int protection_rows = 2 + (key_file_row ? 1 : 0) + (online ? 2 : 0);
   const float protection_h = g->protection_open ? 2 * BC_GAP + (float)protection_rows * (BC_ROW + BC_GAP) : BC_FOLDED_H;
-  const float bottom_min_h = (BC_ROW + BC_GAP) + (BC_LOG_MIN * 24 + BC_GAP) + BC_GAP + BC_HELP_H; /* Run row, log, help. */
-  const float min_h = BC_MARGIN + (BC_ROW + 2 * BC_GAP) + (game_fixed_h + list_min_h + 2 * BC_GAP) + (build_h + 2 * BC_GAP) +
-                      (brand ? windows_h + 2 * BC_GAP : 0) + (protection_h + 2 * BC_GAP) + bottom_min_h + BC_MARGIN;
+  const float help_h = g->help ? BC_GAP + BC_HELP_H : 0;
+  const float bottom_min_h = (BC_ROW + BC_GAP) + (BC_LOG_MIN * 24 + BC_GAP) + help_h; /* Run row, log, help. */
+  const float min_h = BC_MARGIN + (BC_ROW + 2 * BC_GAP) + (game_min_h + 2 * BC_GAP) + (build_h + 2 * BC_GAP) +
+                      (windows_h + 2 * BC_GAP) + (protection_h + 2 * BC_GAP) + bottom_min_h + BC_MARGIN;
   const float page_h = min_h > win_h ? min_h : win_h;
   const float inner = W - 2 * BC_MARGIN - (page_h > win_h ? BC_SCROLL_W : 0);
   const float spare = page_h - min_h;
+  const int log_max = g->game_open ? BC_LOG_VISIBLE : BC_LOG_ROWS_MAX;
   int log_lines = BC_LOG_MIN + (int)(spare / 24);
-  log_lines = log_lines > BC_LOG_VISIBLE ? BC_LOG_VISIBLE : log_lines;
+  log_lines = log_lines > log_max ? log_max : log_lines;
   const float list_h = list_min_h + spare - (float)(log_lines - BC_LOG_MIN) * 24;
+  const float game_h = g->game_open ? game_fixed_h + list_h : BC_FOLDED_H;
   /* A held thumb owns the pointer up to the frame of its release: a button under the pointer must
    * not take that release as a click. */
   const bool thumb_held = g->scroll_drag;
@@ -1717,6 +1808,13 @@ static void bc_gui_draw(BC_Gui *g)
   if (GuiButton(bc_rect(x, y, BC_BUTTON_W, BC_ROW), "Save as...")) {
     bc_gui_save(g, true);
   }
+  {
+    /* The help panel at the bottom, on or off. Off, tooltips carry the whole help. */
+    const float help_w = bc_button_w("Help");
+    const Rectangle help_toggle = bc_rect(BC_MARGIN + inner - help_w, y, help_w, BC_ROW);
+    bc_tip(help_toggle, "Show or hide the help panel\nThe panel at the bottom explains the field under the pointer. Hidden, tooltips show the whole help instead.");
+    GuiToggle(help_toggle, "Help", &g->help);
+  }
   y += BC_ROW + 2 * BC_GAP;
 
   /* 1 · Game: what gets encrypted. Its summary is what the list gives, as the export lists it. */
@@ -1733,7 +1831,7 @@ static void bc_gui_draw(BC_Gui *g)
       bc_format_size(g->scan_bytes, size, sizeof(size));
       snprintf(summary,
                sizeof(summary),
-               "%d scene%s  \xc2\xb7  %d script%s  \xc2\xb7  %d data file%s  \xc2\xb7  %s",
+               "%d blend%s  \xc2\xb7  %d script%s  \xc2\xb7  %d data file%s  \xc2\xb7  %s",
                g->scan_blends,
                g->scan_blends == 1 ? "" : "s",
                g->scan_modules,
@@ -1746,7 +1844,11 @@ static void bc_gui_draw(BC_Gui *g)
         snprintf(summary + n, sizeof(summary) - n, "  \xc2\xb7  %d skipped (already encrypted)", g->scan.skipped);
       }
     }
-    bc_section(y, game_fixed_h + list_h, inner, "1 \xc2\xb7 Game", summary, error, -1, NULL);
+    if (bc_section(y, game_h, inner, "1 \xc2\xb7 Game", summary, error, g->game_open ? 1 : 0, "Show or hide what gets encrypted\nThe source folder, the files and folders to encrypt and the main file. Folded, the line counts what the list gives.")) {
+      g->game_open = !g->game_open;
+    }
+  }
+  if (g->game_open) {
     y += 2 * BC_GAP;
     if (bc_gui_path_row(x0, y, right, BC_LABEL_W, "Source folder", "Root of the game sources\nEvery file to encrypt is inside it, and the output folder mirrors its tree with the same names, so relative paths, linked libraries and imports keep working.", "Required: drop your game folder on the window", &check->source, g->project.source_root, g->source_text, &g->source_edit, &committed)) {
       r = bc_dialog_pick_folder("Source folder", path, sizeof(path));
@@ -1776,7 +1878,7 @@ static void bc_gui_draw(BC_Gui *g)
     float bx = x0;
     const float add_files_w = bc_button_w("Add files..."), add_folder_w = bc_button_w("Add folder...");
     const float remove_w = bc_button_w("Remove"), clear_w = bc_button_w("Clear");
-    bc_tip(bc_rect(bx, y, add_files_w, BC_ROW), "Add files to encrypt\nAny file inside the source folder: a .blend is sealed as a scene, a .py as a module, anything else as a data file.");
+    bc_tip(bc_rect(bx, y, add_files_w, BC_ROW), "Add files to encrypt\nAny file inside the source folder: .blend files, Python modules (.py), and any other file as a data file.");
     if (GuiButton(bc_rect(bx, y, add_files_w, BC_ROW), "Add files...")) {
       char list[65536];
       r = bc_dialog_open_files("Add files", NULL, true, list, sizeof(list));
@@ -1843,6 +1945,9 @@ static void bc_gui_draw(BC_Gui *g)
     }
     y += BC_ROW + BC_GAP + 2 * BC_GAP;
   }
+  else {
+    y += game_h + 2 * BC_GAP;
+  }
 
   /* 2 · Build: where the game goes, under which name, with which runtime. */
   char game_name[BC_GAME_NAME_MAX];
@@ -1858,7 +1963,12 @@ static void bc_gui_draw(BC_Gui *g)
              bc_exe_extension(),
              g->project.manifest_mode == BC_MANIFEST_EXTERNAL ? " + " BC_MANIFEST_FILENAME : "",
              player_dir);
-    bc_section(y, build_h, inner, "2 \xc2\xb7 Build", summary, false, -1, NULL);
+    const bool error = check->output.state == BC_FIELD_ERROR || check->runtime.state == BC_FIELD_ERROR;
+    if (bc_section(y, build_h, inner, "2 \xc2\xb7 Build", summary, error, g->build_open ? 1 : 0, "Show or hide where the game goes\nThe output folder (the game folder you ship), the name of the game executable and the UPBGE runtime.")) {
+      g->build_open = !g->build_open;
+    }
+  }
+  if (g->build_open) {
     y += 2 * BC_GAP;
     char output_hint[BC_PATH_MAX];
     if (g->project.source_root[0] != '\0') {
@@ -1931,22 +2041,34 @@ static void bc_gui_draw(BC_Gui *g)
     }
     y += BC_ROW + BC_GAP + 2 * BC_GAP;
   }
+  else {
+    y += build_h + 2 * BC_GAP;
+  }
 
-  /* 3 · Windows appearance, only where this build makes Windows games. Any value set brands both
-   * the game executable and the player. */
-  if (brand) {
-    const char *icon_name = g->project.icon[0] ? bc_path_basename(g->project.icon) : "UPBGE icon";
-    snprintf(summary,
-             sizeof(summary),
-             "%s  \xc2\xb7  version %s%s%s",
-             icon_name,
-             g->project.game_version[0] ? g->project.game_version : "1.0.0.0",
-             g->project.company[0] ? "  \xc2\xb7  " : "",
-             g->project.company);
-    if (bc_section(y, windows_h, inner, "3 \xc2\xb7 Windows appearance", summary, check->icon.state == BC_FIELD_ERROR, g->windows_open ? 1 : 0, "Show or hide the Windows appearance\nIcon and version information of the game executable and of the player, as Explorer, the taskbar and Alt-Tab show them.")) {
+  /* 3 · Windows appearance: only where this build makes Windows games, folded and disabled
+   * elsewhere. Any value set brands both the game executable and the player. */
+  {
+    if (brand) {
+      const char *icon_name = g->project.icon[0] ? bc_path_basename(g->project.icon) : "UPBGE icon";
+      snprintf(summary,
+               sizeof(summary),
+               "%s  \xc2\xb7  version %s%s%s",
+               icon_name,
+               g->project.game_version[0] ? g->project.game_version : "1.0.0.0",
+               g->project.company[0] ? "  \xc2\xb7  " : "",
+               g->project.company);
+    }
+    else {
+      snprintf(summary, sizeof(summary), "Windows builds of bc_tool only");
+    }
+    const bool greyed = bc_enable_begin(brand);
+    /* Open, its fields say what the summary would. */
+    const bool clicked = bc_section(y, windows_h, inner, "3 \xc2\xb7 Windows appearance", windows_open ? NULL : summary, check->icon.state == BC_FIELD_ERROR, windows_open ? 1 : 0, "Show or hide the Windows appearance\nIcon and version information of the game executable and of the player, as Explorer, the taskbar and Alt-Tab show them.");
+    bc_enable_end(greyed);
+    if (clicked) {
       g->windows_open = !g->windows_open;
     }
-    else if (g->windows_open) {
+    else if (windows_open) {
       const float row_y = y + 2 * BC_GAP;
       if (bc_gui_path_row(x0, row_y, right, BC_LABEL_W, "Icon", "Windows: icon of the game\nOf the game executable and of the game window (taskbar, Alt-Tab), any sizes in one .ico. Empty: the UPBGE icon.", "Optional: the UPBGE icon", &check->icon, g->project.icon, g->icon_text, &g->icon_edit, &committed)) {
         r = bc_dialog_open_files("Game icon", "ico", false, path, sizeof(path));
@@ -2016,7 +2138,7 @@ static void bc_gui_draw(BC_Gui *g)
              check_names[g->project.integrity <= BC_INTEGRITY_PYTHON ? g->project.integrity : 0],
              g->project.manifest_mode == BC_MANIFEST_EXTERNAL ? "Separate manifest file" : "Embedded manifest");
     const bool error = check->provider.state == BC_FIELD_ERROR || (online && g->project.key_provider[0] == '\0');
-    if (bc_section(y, protection_h, inner, "4 \xc2\xb7 Protection", summary, error, g->protection_open ? 1 : 0, "Show or hide the protection settings\nWhere the content key comes from, what the game executable checks before every launch and where its manifest goes.")) {
+    if (bc_section(y, protection_h, inner, "4 \xc2\xb7 Protection", g->protection_open ? NULL : summary, error, g->protection_open ? 1 : 0, "Show or hide the protection settings\nWhere the content key comes from, what the game executable checks before every launch and where its manifest goes.")) {
       g->protection_open = !g->protection_open;
       g->check_edit = g->manifest_edit = g->key_edit = false;
     }
@@ -2242,7 +2364,9 @@ static void bc_gui_draw(BC_Gui *g)
    * message needs measuring to know where it is. */
   const float log_h = (float)log_lines * 24 + BC_GAP;
   const Rectangle log_box = bc_rect(BC_MARGIN, y, inner, log_h);
-  const float log_text_w = inner - 3 * BC_GAP; /* Room for the scroll bar. */
+  /* Copy log sits in the bottom right corner: no row runs under it. */
+  const float copy_w = bc_button_w("Copy log");
+  const float log_text_w = inner - 4 * BC_GAP - copy_w; /* Room for the scroll bar and Copy log. */
   if (!GuiIsLocked() && !page_wheeled && CheckCollisionPointRec(GetMousePosition(), log_box)) {
     const float wheel = GetMouseWheelMove();
     if (wheel != 0) {
@@ -2269,8 +2393,8 @@ static void bc_gui_draw(BC_Gui *g)
   g->log_scroll = g->log_scroll < 0 ? 0 : g->log_scroll > max_scroll ? max_scroll : g->log_scroll;
   GuiPanel(log_box, NULL);
   BeginScissorMode((int)BC_MARGIN, (int)y, (int)inner, (int)log_h);
-  BC_Span rows[BC_LOG_VISIBLE];
-  Color row_colors[BC_LOG_VISIBLE];
+  BC_Span rows[BC_LOG_ROWS_MAX];
+  Color row_colors[BC_LOG_ROWS_MAX];
   int row_count = 0;
   /* Rows left above the panel: the wheel has something to scroll back to. */
   bool log_more = false;
@@ -2297,9 +2421,10 @@ static void bc_gui_draw(BC_Gui *g)
     const int k = row_count - 1 - row;
     bc_draw_span(&rows[k], BC_MARGIN + BC_GAP, y + BC_GAP / 2 + (float)row * 24, text_spacing, row_colors[k]);
   }
-  /* Scroll bar once the log holds more messages than lines: its size and place in messages. */
+  /* Scroll bar once the log holds more messages than lines: its size and place in messages, above
+   * Copy log. */
   if (g->log_count > log_lines) {
-    const float track_h = log_h - 2 * BC_GAP;
+    const float track_h = log_h - 3 * BC_GAP - BC_STATUS_H;
     const float thumb_h = track_h * (float)log_lines / (float)g->log_count;
     const int range = g->log_count - log_lines; /* Messages, as for the thumb size. */
     const float at = 1.0f - (float)g->log_scroll / (float)(range > g->log_scroll ? range : g->log_scroll > 0 ? g->log_scroll : 1);
@@ -2307,10 +2432,15 @@ static void bc_gui_draw(BC_Gui *g)
     DrawRectangleRec(thumb, GetColor((unsigned int)GuiGetStyle(DEFAULT, BORDER_COLOR_NORMAL)));
   }
   EndScissorMode();
+  {
+    const Rectangle copy = bc_rect(BC_MARGIN + inner - copy_w - BC_GAP / 2, y + log_h - BC_STATUS_H - BC_GAP / 2, copy_w, BC_STATUS_H);
+    bc_tip(copy, "Copy the whole log\nTo the clipboard, to report a problem.");
+    if (GuiButton(copy, "Copy log")) {
+      bc_gui_copy_log(g);
+    }
+  }
   y += log_h + BC_GAP;
   const Rectangle help_box = bc_rect(BC_MARGIN, y, inner, BC_HELP_H);
-  const float copy_w = bc_button_w("Copy log");
-  bc_tip(bc_rect(help_box.x + help_box.width - copy_w - BC_GAP / 2, y + BC_GAP / 2, copy_w, BC_STATUS_H), "Copy the whole log\nTo the clipboard, to report a problem.");
 
   /* Dropdowns last: an open list lies over the rows below it. The open one is drawn after the
    * closed ones. */
@@ -2373,17 +2503,12 @@ static void bc_gui_draw(BC_Gui *g)
     GuiEnable();
   }
 
-  /* The help of what the pointer rests on, then its tooltip. The panel's own button stays live
-   * while a job runs (the log is what one reads then), not while a dropdown list is open. */
-  const bool lock_panel = dropdown_open && !GuiIsLocked();
-  if (lock_panel) {
-    GuiLock();
+  /* The help of what the pointer rests on, then its tooltip: its first line, or all of it while
+   * the panel is hidden. */
+  if (g->help) {
+    bc_gui_help_panel(help_box);
   }
-  bc_gui_help_panel(g, help_box, copy_w);
-  if (lock_panel) {
-    GuiUnlock();
-  }
-  bc_gui_draw_tip();
+  bc_gui_draw_tip(!g->help);
 
   /* Confirmation dialog on top of everything, over a dimmed editor: centered in the window, not on
    * the page. */
@@ -2429,28 +2554,31 @@ int bc_gui_run(const char *project_path)
   g.list_active = -1;
   bc_key_fingerprint(bc_build_key(), g.fingerprint);
 
+  int window_w, window_h;
+  bc_gui_load_settings(&g, &window_w, &window_h);
   SetConfigFlags(FLAG_WINDOW_RESIZABLE);
-  /* Tall enough for every row of a Windows build with online keys, and still within a 1080p
-   * screen with its taskbar. */
-  InitWindow(1100, 980, "UPBGE BinaryCrypt v" BC_TOOL_VERSION);
+  InitWindow(window_w, window_h, "UPBGE BinaryCrypt v" BC_TOOL_VERSION);
 #ifdef BC_WINDOW_ICON
   bc_gui_set_window_icon();
 #endif
-  /* A shorter screen (laptops) gets a window that fits it, room left for a taskbar and the title
-   * bar: the page scrolls. Centered again, as the window opened centered for its first size. */
+  /* A smaller screen (laptops, or another screen than last time) gets a window that fits it, room
+   * left for a taskbar and the title bar: the page scrolls. Centered again, as the window opened
+   * centered for its first size. */
   {
     const int monitor = GetCurrentMonitor();
+    const int fit_w = GetMonitorWidth(monitor) - 40;
     const int fit_h = GetMonitorHeight(monitor) - 100;
-    if (fit_h > 0 && fit_h < GetScreenHeight()) {
-      SetWindowSize(GetScreenWidth(), fit_h < 500 ? 500 : fit_h);
+    const int w = fit_w > 0 && fit_w < GetScreenWidth() ? (fit_w < BC_WINDOW_MIN_W ? BC_WINDOW_MIN_W : fit_w) : GetScreenWidth();
+    const int h = fit_h > 0 && fit_h < GetScreenHeight() ? (fit_h < BC_WINDOW_MIN_H ? BC_WINDOW_MIN_H : fit_h) : GetScreenHeight();
+    if (w != GetScreenWidth() || h != GetScreenHeight()) {
+      SetWindowSize(w, h);
       const Vector2 origin = GetMonitorPosition(monitor);
-      SetWindowPosition((int)origin.x + (GetMonitorWidth(monitor) - GetScreenWidth()) / 2,
-                        (int)origin.y + (GetMonitorHeight(monitor) - GetScreenHeight()) / 2);
+      SetWindowPosition((int)origin.x + (GetMonitorWidth(monitor) - w) / 2, (int)origin.y + (GetMonitorHeight(monitor) - h) / 2);
     }
   }
-  /* Narrower, the runtime path would have no room left beside the runtime check; any height, the
-   * page scrolls. */
-  SetWindowMinSize(1000, 500);
+  /* Narrower, the rows that share their width (game name and runtime, the list buttons and data
+   * files) run out of room; any height, the page scrolls. */
+  SetWindowMinSize(BC_WINDOW_MIN_W, BC_WINDOW_MIN_H);
   SetExitKey(KEY_NULL);
   SetTargetFPS(60);
   bc_gui_theme_upbge();
@@ -2468,6 +2596,7 @@ int bc_gui_run(const char *project_path)
   }
   bc_gui_rebuild_items(&g);
   bc_gui_update_title(&g);
+  bc_gui_logf(&g, BC_LOG_INFO, "Key %s built into this tool: bc_launcher must come from the same build", g.fingerprint);
   bc_gui_log(&g, BC_LOG_INFO, "Drop the game's files or folders on the window, copy the UPBGE runtime into the game folder's engine/, then Encrypt");
 
   /* Frames still to draw without waiting for input. The first ones: some systems send no expose
@@ -2483,6 +2612,9 @@ int bc_gui_run(const char *project_path)
         bc_gui_stop(&g, "Cancelled by closing the window");
       }
       bc_gui_request(&g, BC_PENDING_QUIT, NULL);
+      if (g.quit) {
+        break; /* Nothing unsaved: now, not after the next input event that event waiting waits for. */
+      }
     }
     if (IsFileDropped()) {
       bc_gui_handle_drop(&g);
@@ -2518,6 +2650,7 @@ int bc_gui_run(const char *project_path)
   if (g.job != NULL) {
     bc_job_destroy(g.job);
   }
+  bc_gui_save_settings(&g);
   for (int i = 0; i < g.item_count; i++) {
     free(g.items[i]);
   }

@@ -208,6 +208,18 @@ bool bc_shell_run(const char *program)
 }
 
 /* ============================================================================================ */
+bool bc_settings_path(char *out, const size_t size)
+{
+  wchar_t wbase[MAX_PATH];
+  char base[BC_PATH_MAX];
+  const DWORD n = GetEnvironmentVariableW(L"APPDATA", wbase, MAX_PATH);
+  if (n == 0 || n >= MAX_PATH || !bc_utf8(wbase, base, sizeof(base))) {
+    return false;
+  }
+  bc_path_normalize(base);
+  return (size_t)snprintf(out, size, "%s/UPBGE-BinaryCrypt/bc_tool.ini", base) < size;
+}
+
 #else /* macOS and Linux: run a helper and read the selection from its output. */
 
 #  include <errno.h>
@@ -266,6 +278,26 @@ bool bc_shell_open_folder(const char *folder)
   char *const argv[] = {(char *)"xdg-open", (char *)folder, NULL};
 #  endif
   return bc_spawn_detached(argv, NULL, true);
+}
+
+bool bc_settings_path(char *out, const size_t size)
+{
+  const char *home = getenv("HOME");
+#  ifdef __APPLE__
+  if (home == NULL || home[0] != '/') {
+    return false;
+  }
+  return (size_t)snprintf(out, size, "%s/Library/Application Support/UPBGE-BinaryCrypt/bc_tool.ini", home) < size;
+#  else
+  const char *xdg = getenv("XDG_CONFIG_HOME");
+  if (xdg != NULL && xdg[0] == '/') {
+    return (size_t)snprintf(out, size, "%s/upbge-binarycrypt/bc_tool.ini", xdg) < size;
+  }
+  if (home == NULL || home[0] != '/') {
+    return false;
+  }
+  return (size_t)snprintf(out, size, "%s/.config/upbge-binarycrypt/bc_tool.ini", home) < size;
+#  endif
 }
 
 bool bc_shell_run(const char *program)

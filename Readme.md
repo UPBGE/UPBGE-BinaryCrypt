@@ -169,8 +169,7 @@ Platform notes:
    are hashed: export *after* placing the final runtime and any store library
    (`steam_api64.dll`, a key provider...), and export again whenever you change one.
 2. **Describe the batch** in `bc_tool` (or write a `.bcproj` file, below). The editor has four
-   sections in the order of the task; the last two are folded and show a summary line until
-   opened:
+   sections in the order of the task. Each one folds to a summary line, by default the last two:
    1. *Game*, what gets encrypted:
       - *Source folder*: the root of your game sources (`.blend` files, Python modules, data files).
       - The list of files and folders to encrypt, dragged and dropped on the window. Folders are
@@ -180,16 +179,16 @@ Platform notes:
         data file. *All files* shows every file the list gives, with its kind and size.
       - The star marks the main file, the `.blend` the game starts: click the star of another
         `.blend` to change it.
-      - The section line counts what will be encrypted (scenes, scripts, data files, size, files
-        skipped because they are already encrypted).
+      - The section line counts what will be encrypted (`.blend` files, scripts, data files, size,
+        files skipped because they are already encrypted).
    2. *Build*, where the game goes:
       - *Output folder*: the game folder, always another folder than the sources (see *Output
         folder*, below).
       - *Game name*: name of the game executable (`.exe` is added on Windows). Empty: the main file
         name.
       - *UPBGE runtime*: the player inside the game folder; `engine/blenderplayer(.exe)` by default.
-   3. *Windows appearance* (Windows builds of `bc_tool` only): *Icon*, *Version*, *Company*,
-      *Copyright*, all optional; see below.
+   3. *Windows appearance*: *Icon*, *Version*, *Company*, *Copyright*, all optional; see below.
+      Disabled in Linux and macOS builds of `bc_tool`, which make no Windows games.
    4. *Protection*:
       - *Key*: per project (default), online from a key server (*Online types*: *Always online* or
         *Offline after 1st launch*), or the build key; *Key file*: see *Keys*, below.
@@ -199,13 +198,17 @@ Platform notes:
 
    The editor checks the fields as you go: a tick when what a field names exists, a red frame
    and a note when it does not (the runtime not yet copied into the game folder, for example).
-   The panel at the bottom explains the field under the pointer.
+   The panel at the bottom explains the field under the pointer; *Help* in the first row hides it,
+   and tooltips then carry the whole help. The editor remembers the help panel, the folded
+   sections, the *All files* view and the window size from one run to the next (`bc_tool.ini` in
+   `%APPDATA%\UPBGE-BinaryCrypt`, `~/Library/Application Support/UPBGE-BinaryCrypt` or
+   `~/.config/upbge-binarycrypt`).
 3. **Encrypt.** This writes the encrypted files and the game executable. The button stays
    disabled until the project is complete, and the line next to it says what is missing. Then
    *Open game folder* and *Run game* show and start the result. Save the project to run the same
    batch again later, or from a script: `bc_tool --batch mygame.bcproj`. Shortcuts: Ctrl+N, Ctrl+O,
    Ctrl+S, Ctrl+Shift+S and Ctrl+Enter (Cmd on macOS); the wheel scrolls the log back and *Copy
-   log* puts it on the clipboard. A window too short for every row (a laptop screen) gets a scroll
+   log*, in its bottom right corner, puts it on the clipboard. A window too short for every row (a laptop screen) gets a scroll
    bar: the wheel scrolls the page wherever no list under the pointer takes it.
 4. **Sign** (optional, recommended on Windows): sign the game executable after exporting, e.g.
    `signtool sign ... MyGame.exe`. The manifest sits in front of the signature and stays readable.

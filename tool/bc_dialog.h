@@ -46,6 +46,11 @@ bool bc_shell_open_folder(const char *folder);
 /** Start \a program detached from the tool, in its own folder. */
 bool bc_shell_run(const char *program);
 
+/** The file the editor keeps its settings in, in the user's configuration folder (Windows:
+ * %APPDATA%\UPBGE-BinaryCrypt, macOS: ~/Library/Application Support/UPBGE-BinaryCrypt, elsewhere:
+ * $XDG_CONFIG_HOME or ~/.config, upbge-binarycrypt). The folder may not exist yet. */
+bool bc_settings_path(char *out, size_t size);
+
 #ifdef __cplusplus
 }
 #endif
