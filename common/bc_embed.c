@@ -21,19 +21,6 @@ static bool bc_read_at(FILE *f, const uint64_t offset, void *dst, const size_t s
   return bc_fseek(f, (int64_t)offset, SEEK_SET) == 0 && fread(dst, 1, size, f) == size;
 }
 
-static uint32_t bc_load_u32(const uint8_t *p)
-{
-  return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
-}
-
-static void bc_store_u32(uint8_t *p, const uint32_t v)
-{
-  p[0] = (uint8_t)v;
-  p[1] = (uint8_t)(v >> 8);
-  p[2] = (uint8_t)(v >> 16);
-  p[3] = (uint8_t)(v >> 24);
-}
-
 /**
  * End of the data we wrote: the file size, or for a signed PE executable the start of its
  * Authenticode table (the security data directory, whose "address" is a plain file offset). Pure

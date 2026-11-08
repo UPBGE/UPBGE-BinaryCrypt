@@ -54,6 +54,10 @@
 extern "C" {
 #endif
 
+/* Project file version. Raise it when a release adds keys or values: every bc_tool reads the
+ * versions up to its own (keys an older version lacks keep their defaults) and refuses later ones
+ * by name instead of misreading them. Within a version unknown keys stay errors: a typo must not
+ * silently change what gets encrypted. */
 #define BC_PROJECT_VERSION 1
 #define BC_PROJECT_EXTENSION ".bcproj"
 #define BC_GAME_NAME_MAX 256

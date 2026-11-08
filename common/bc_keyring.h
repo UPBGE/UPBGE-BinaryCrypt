@@ -15,7 +15,11 @@
  *     file <update> <64 hex: BLAKE2b-256 of the source .blend> <path inside the game folder>
  *
  * The one key form reads as the key of update 1, so a game can switch to a key per update later
- * and keep its published files. Keys are kept sorted by update number. */
+ * and keep its published files. Keys are kept sorted by update number.
+ *
+ * Evolution: a later bc_tool may add lines starting with a new lowercase keyword. Readers (this
+ * one and the reference key server) skip keywords they do not know, so older ones keep reading
+ * the keys. */
 
 #ifndef BC_KEYRING_H
 #define BC_KEYRING_H

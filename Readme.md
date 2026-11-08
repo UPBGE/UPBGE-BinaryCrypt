@@ -77,6 +77,28 @@ The container format and the launcher to player hand-off are specified in
 [`common/binarycrypt_format.h`](common/binarycrypt_format.h). **This header exists as an identical
 copy in UPBGE (`intern/binarycrypt/binarycrypt_format.h`); both copies must be kept in sync.**
 
+### Format versions
+
+Every format is at version 1 and can grow without breaking what is already published:
+
+| Format | Room to grow |
+| --- | --- |
+| Container (encrypted `.blend`, `.py`, data) | 128 byte header: required and optional feature bits, 60 reserved bytes |
+| Manifest | required and optional feature bits, 62 reserved bytes, an extension block skipped by older launchers |
+| Key hand-off (launcher to player) | 32 byte header: key count, feature bits, an extension after the keys, 8 reserved bytes |
+| Project file (`.bcproj`) | `version`: a bc_tool reads every version up to its own and refuses later ones by name |
+| Key file | lines with a keyword a later bc_tool adds are skipped by bc_tool and the key server |
+
+The binary formats follow one rule. The version changes only for a redesign. A reader refuses a
+*required* feature it does not know (the file comes from a newer BinaryCrypt and would be
+misread) and ignores an unknown *optional* one. Reserved bytes are zero when written and never
+looked at: a feature bit gives them a meaning. Every byte is authenticated, reserved ones
+included. So a newer UPBGE player still opens the games of today, and today's player opens files
+of a newer bc_tool unless they need a feature it lacks, in which case it says so.
+
+The release version of the tool, shown in the `bc_tool` window title, is the `VERSION` of
+`project()` in `CMakeLists.txt`: raise it for each release.
+
 ## Building
 
 Requirements: CMake 3.18 or newer and a C99 compiler. `bc_tool` compresses with

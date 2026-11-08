@@ -11,18 +11,20 @@
  *
  * Layout (integers little endian):
  *    0   8  magic "UPBGEBCM"
- *    8   2  version (4)
+ *    8   2  version (BC_MANIFEST_VERSION)
  *   10   2  player path length P
  *   12   2  main path length M
- *   14   2  flags (BC_MANIFEST_ONLINE_KEY, BC_MANIFEST_KEY_CACHE, BC_MANIFEST_PROJECT_KEY,
- *           BC_MANIFEST_NATIVE_DIGEST, BC_MANIFEST_PYTHON_CHECK)
+ *   14   2  required features: BC_MANIFEST_ONLINE_KEY, BC_MANIFEST_KEY_CACHE,
+ *           BC_MANIFEST_PROJECT_KEY, BC_MANIFEST_NATIVE_DIGEST, BC_MANIFEST_PYTHON_CHECK
  *   16   8  key id of the build key (see bc_key_id)
  *   24  32  BLAKE3-256 of the player executable
  *   56   2  number K of content keys (online: 1..BC_KEYS_MAX, project key: 1, build key: 0)
- *   58   6  reserved, 0
- *   64   2  provider path length V (online key only, else 0)
- *   66   2  key server URL length U (online key only, may be 0)
- *   68   P  player path, UTF-8, relative to the manifest folder, '/' separators
+ *   58   2  provider path length V (online key only, else 0)
+ *   60   2  key server URL length U (online key only, may be 0)
+ *   62   2  optional features
+ *   64   2  extension size X, at most BC_MANIFEST_EXTENSION_MAX
+ *   66  62  reserved, 0
+ *  128   P  player path, UTF-8, relative to the manifest folder, '/' separators
  *       M  main blend path, same rules
  *       V  key provider path, same rules
  *       U  key server URL, UTF-8, no control characters (given to the provider as is)
@@ -31,7 +33,16 @@
  *      32  project key only: the project key XOR bc_manifest_key_mask (never stored as itself)
  *      32  native digest only: bc_native_digest of the game folder (bc_native.h), over native
  *          code, plus Python files with BC_MANIFEST_PYTHON_CHECK
+ *       X  extension: data a newer bc_tool adds under a feature bit, skipped by launchers that do
+ *          not know it
  *  end  32  MAC: keyed BLAKE2b-256 (build key) of BC_MANIFEST_CONTEXT || all preceding bytes
+ *
+ * Evolution, as for the container header (binarycrypt_format.h): the version changes only for a
+ * redesign; a launcher refuses a manifest with a required feature it does not know (exported by a
+ * newer bc_tool: it matters with the separate manifest, where a launcher signed once may outlive
+ * tool updates) and ignores unknown optional features; reserved bytes are zero when written and
+ * never looked at; new fixed fields go into them, new variable data into the extension. Every
+ * byte is under the MAC.
  */
 
 #ifndef BC_MANIFEST_H
@@ -49,15 +60,17 @@ extern "C" {
 #endif
 
 #define BC_MANIFEST_MAGIC "UPBGEBCM"
-#define BC_MANIFEST_VERSION 4
-#define BC_MANIFEST_FIXED_SIZE 68
+#define BC_MANIFEST_VERSION 1
+#define BC_MANIFEST_FIXED_SIZE 128
+#define BC_MANIFEST_EXTENSION_MAX 4096
 #define BC_MANIFEST_MAC_SIZE 32
 #define BC_MANIFEST_PATH_MAX 1024
 #define BC_MANIFEST_URL_MAX 1024
 #define BC_PLAYER_HASH_SIZE 32
 #define BC_MANIFEST_MAX_SIZE \
   (BC_MANIFEST_FIXED_SIZE + 3 * BC_MANIFEST_PATH_MAX + BC_MANIFEST_URL_MAX + \
-   BC_KEYS_MAX * BC_KEY_ID_SIZE + BC_KEY_SIZE + BC_NATIVE_DIGEST_SIZE + BC_MANIFEST_MAC_SIZE)
+   BC_KEYS_MAX * BC_KEY_ID_SIZE + BC_KEY_SIZE + BC_NATIVE_DIGEST_SIZE + BC_MANIFEST_EXTENSION_MAX + \
+   BC_MANIFEST_MAC_SIZE)
 
 /** The content key comes from a key server through the provider, not from the build key. */
 #define BC_MANIFEST_ONLINE_KEY (1 << 0)
@@ -71,6 +84,9 @@ extern "C" {
  * Python bytecode before the launch and after the player exits. */
 #define BC_MANIFEST_PYTHON_CHECK (1 << 4)
 #define BC_MANIFEST_KEY_FLAGS (BC_MANIFEST_ONLINE_KEY | BC_MANIFEST_KEY_CACHE | BC_MANIFEST_PROJECT_KEY)
+/* Required features this launcher understands. */
+#define BC_MANIFEST_REQUIRED_KNOWN \
+  (BC_MANIFEST_KEY_FLAGS | BC_MANIFEST_NATIVE_DIGEST | BC_MANIFEST_PYTHON_CHECK)
 #define BC_PROJECT_KEY_CONTEXT "UPBGE-BinaryCrypt project key v1"
 /* Domain separation: the MAC key is the build key, so the input is prefixed with a context that
  * no other keyed BLAKE2b in the system uses. */
@@ -109,6 +125,8 @@ typedef enum BC_ManifestResult {
   BC_MANIFEST_IO_ERROR,
   BC_MANIFEST_MISSING,
   BC_MANIFEST_BAD_FORMAT,
+  /** Another version, or a required feature this launcher does not know. */
+  BC_MANIFEST_NEWER,
   BC_MANIFEST_WRONG_KEY,
   BC_MANIFEST_BAD_MAC,
   BC_MANIFEST_BAD_PATH,

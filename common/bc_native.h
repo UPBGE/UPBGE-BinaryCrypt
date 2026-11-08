@@ -38,7 +38,7 @@
 extern "C" {
 #endif
 
-#define BC_NATIVE_CONTEXT "UPBGE-BinaryCrypt native code v2"
+#define BC_NATIVE_CONTEXT "UPBGE-BinaryCrypt native code v1"
 #define BC_NATIVE_DIGEST_SIZE 32
 
 /** True when \a name (a file name, not a path) is native code by the rule above. */

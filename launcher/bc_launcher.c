@@ -267,7 +267,7 @@ static int bc_run_player(BC_PlayerFile player_file,
                          const char *main_path,
                          const char *work_dir,
                          uint8_t *keys,
-                         const size_t keys_size)
+                         const int key_count)
 {
   (void)player_file; /* Held open by the caller until the process exists. */
   wchar_t *wplayer = bc_utf16(player_path);
@@ -338,7 +338,12 @@ static int bc_run_player(BC_PlayerFile player_file,
   if (!started) {
     goto cleanup;
   }
+  /* The hand-off header, then the keys straight from their locked table. */
+  const size_t keys_size = (size_t)key_count * BC_KEY_SIZE;
+  uint8_t handoff[BC_HANDOFF_HEADER_SIZE];
+  bc_handoff_header_write((uint16_t)key_count, handoff);
   DWORD written = 0;
+  WriteFile(write_end, handoff, sizeof(handoff), &written, NULL);
   WriteFile(write_end, keys, (DWORD)keys_size, &written, NULL);
   crypto_wipe(keys, keys_size); /* The player has them now; nothing here needs them any more. */
   CloseHandle(write_end);
@@ -393,7 +398,7 @@ static int bc_run_player(BC_PlayerFile player_file,
                          const char *main_path,
                          const char *work_dir,
                          uint8_t *keys,
-                         const size_t keys_size)
+                         const int key_count)
 {
   /* fds: key pipe, the read end is inherited by the player. status: close-on-exec pipe that
    * reports a failed exec (child writes errno) or closes silently once exec succeeded. */
@@ -461,17 +466,27 @@ static int bc_run_player(BC_PlayerFile player_file,
 
   /* If the player dies before reading, the write must fail instead of killing the launcher. */
   signal(SIGPIPE, SIG_IGN);
-  size_t done = 0;
-  while (done < keys_size) {
-    const ssize_t n = write(fds[1], keys + done, keys_size - done);
-    if (n > 0) {
-      done += (size_t)n;
-    }
-    else if (n < 0 && errno == EINTR) {
-      continue;
-    }
-    else {
-      break;
+  /* The hand-off header, then the keys straight from their locked table. */
+  const size_t keys_size = (size_t)key_count * BC_KEY_SIZE;
+  uint8_t handoff[BC_HANDOFF_HEADER_SIZE];
+  bc_handoff_header_write((uint16_t)key_count, handoff);
+  const struct {
+    const uint8_t *data;
+    size_t size;
+  } parts[2] = {{handoff, sizeof(handoff)}, {keys, keys_size}};
+  for (int part = 0; part < 2; part++) {
+    size_t done = 0;
+    while (done < parts[part].size) {
+      const ssize_t n = write(fds[1], parts[part].data + done, parts[part].size - done);
+      if (n > 0) {
+        done += (size_t)n;
+      }
+      else if (n < 0 && errno == EINTR) {
+        continue;
+      }
+      else {
+        break;
+      }
     }
   }
   crypto_wipe(keys, keys_size); /* The player has them now; nothing here needs them any more. */
@@ -637,7 +652,7 @@ int main(int argc, char **argv)
     memcpy(keys[0], bc_build_key(), BC_KEY_SIZE);
   }
   bc_build_key_forget();
-  const int exit_code = bc_run_player(player, player_path, main_path, dir, &keys[0][0], (size_t)key_count * BC_KEY_SIZE);
+  const int exit_code = bc_run_player(player, player_path, main_path, dir, &keys[0][0], key_count);
   crypto_wipe(keys, BC_KEY_TABLE_SIZE);
   bc_native_release(&hold);
   bc_player_close(player);

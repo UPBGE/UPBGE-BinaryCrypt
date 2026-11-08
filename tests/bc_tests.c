@@ -285,6 +285,16 @@ static void fake_sign(const char *path)
   free(signed_data);
 }
 
+/** The MAC bc_manifest_encode appends, over the first \a body bytes of \a data, written after them. */
+static void test_manifest_mac(uint8_t *data, const size_t body)
+{
+  crypto_blake2b_ctx ctx;
+  crypto_blake2b_keyed_init(&ctx, BC_MANIFEST_MAC_SIZE, bc_build_key(), BC_KEY_SIZE);
+  crypto_blake2b_update(&ctx, (const uint8_t *)BC_MANIFEST_CONTEXT, sizeof(BC_MANIFEST_CONTEXT) - 1);
+  crypto_blake2b_update(&ctx, data, body);
+  crypto_blake2b_final(&ctx, data + body);
+}
+
 static void test_manifest(void)
 {
   BC_Manifest m, r;
@@ -312,6 +322,36 @@ static void test_manifest(void)
     data[offsets[i]] ^= 1;
   }
   CHECK(bc_manifest_decode(data, size - 1, bc_build_key(), &r) == BC_MANIFEST_BAD_FORMAT);
+
+  /* What a newer bc_tool may add for this launcher to skip: optional features, fields in the
+   * reserved bytes, an extension. */
+  {
+    static uint8_t newer[BC_MANIFEST_MAX_SIZE];
+    const size_t body = size - BC_MANIFEST_MAC_SIZE;
+    const size_t extension = 50;
+    memcpy(newer, data, body);
+    bc_store_u16(newer + 62, 0xFFFF);
+    memset(newer + 66, 0xA5, BC_MANIFEST_FIXED_SIZE - 66);
+    bc_store_u16(newer + 64, (uint16_t)extension);
+    memset(newer + body, 0x5A, extension);
+    test_manifest_mac(newer, body + extension);
+    CHECK(bc_manifest_decode(newer, body + extension + BC_MANIFEST_MAC_SIZE, bc_build_key(), &r) == BC_MANIFEST_OK);
+    CHECK_STR(r.player_path, m.player_path);
+    CHECK_STR(r.main_path, m.main_path);
+    /* An unknown required feature or a later version: refused, by name. */
+    bc_store_u16(newer + 14, 1 << 15);
+    test_manifest_mac(newer, body + extension);
+    CHECK(bc_manifest_decode(newer, body + extension + BC_MANIFEST_MAC_SIZE, bc_build_key(), &r) == BC_MANIFEST_NEWER);
+    bc_store_u16(newer + 14, 0);
+    bc_store_u16(newer + 8, BC_MANIFEST_VERSION + 1);
+    test_manifest_mac(newer, body + extension);
+    CHECK(bc_manifest_decode(newer, body + extension + BC_MANIFEST_MAC_SIZE, bc_build_key(), &r) == BC_MANIFEST_NEWER);
+    /* An extension past its bound is corrupt, whatever its MAC. */
+    bc_store_u16(newer + 8, BC_MANIFEST_VERSION);
+    bc_store_u16(newer + 64, BC_MANIFEST_EXTENSION_MAX + 1);
+    CHECK(bc_manifest_decode(newer, body + BC_MANIFEST_EXTENSION_MAX + 1 + BC_MANIFEST_MAC_SIZE, bc_build_key(), &r) ==
+          BC_MANIFEST_BAD_FORMAT);
+  }
 
   /* Paths escaping the game folder are refused even before encoding. */
   snprintf(m.player_path, sizeof(m.player_path), "../evil");
@@ -944,6 +984,57 @@ static void test_native(void)
   }
 }
 
+/* The evolution rules of binarycrypt_format.h, on the parsers both repositories share. */
+static void test_format(void)
+{
+  BC_Header h, parsed;
+  memset(&h, 0, sizeof(h));
+  h.version = BC_FORMAT_VERSION;
+  h.chunk_log2 = BC_CHUNK_LOG2_DEFAULT;
+  h.plain_size = 1;
+  uint8_t raw[BC_HEADER_SIZE];
+  CHECK(BC_HEADER_SIZE == 128 && BC_OFS_RESERVED + BC_RESERVED_SIZE == BC_HEADER_SIZE);
+  /* Unknown optional features and reserved bytes, as a newer writer may set them: read as is. */
+  h.optional = 0xFFFFFFFFu;
+  bc_header_write(&h, raw);
+  CHECK(raw[BC_OFS_VERSION] == 1 && raw[BC_OFS_VERSION + 1] == 0 && raw[BC_OFS_RESERVED] == 0);
+  memset(raw + BC_OFS_RESERVED, 0xA5, BC_RESERVED_SIZE);
+  CHECK(bc_header_read(raw, &parsed) == BC_HEADER_OK && parsed.optional == h.optional);
+  /* An unknown required feature, another version: refused. */
+  h.required = 1u << 31;
+  bc_header_write(&h, raw);
+  CHECK(bc_header_read(raw, &parsed) == BC_HEADER_BAD_VERSION);
+  h.required = 0;
+  h.version = BC_FORMAT_VERSION + 1;
+  bc_header_write(&h, raw);
+  CHECK(bc_header_read(raw, &parsed) == BC_HEADER_BAD_VERSION);
+
+  /* Key hand-off header. */
+  uint8_t handoff[BC_HANDOFF_HEADER_SIZE];
+  uint32_t extension;
+  bc_handoff_header_write(3, handoff);
+  CHECK(bc_handoff_header_read(handoff, &extension) == 3 && extension == 0);
+  bc_store_u32(handoff + 16, 0xFFFFFFFFu); /* Optional features. */
+  bc_store_u32(handoff + 20, BC_HANDOFF_EXTENSION_MAX);
+  memset(handoff + 24, 0xA5, 8);
+  CHECK(bc_handoff_header_read(handoff, &extension) == 3 && extension == BC_HANDOFF_EXTENSION_MAX);
+  bc_store_u32(handoff + 20, BC_HANDOFF_EXTENSION_MAX + 1);
+  CHECK(bc_handoff_header_read(handoff, &extension) == 0);
+  bc_handoff_header_write(3, handoff);
+  bc_store_u32(handoff + 12, 1); /* Required feature. */
+  CHECK(bc_handoff_header_read(handoff, &extension) == 0);
+  bc_handoff_header_write(3, handoff);
+  bc_store_u16(handoff + 8, BC_HANDOFF_VERSION + 1);
+  CHECK(bc_handoff_header_read(handoff, &extension) == 0);
+  bc_handoff_header_write(0, handoff);
+  CHECK(bc_handoff_header_read(handoff, &extension) == 0);
+  bc_handoff_header_write(BC_KEYS_MAX + 1, handoff);
+  CHECK(bc_handoff_header_read(handoff, &extension) == 0);
+  bc_handoff_header_write(1, handoff);
+  handoff[0] ^= 1;
+  CHECK(bc_handoff_header_read(handoff, &extension) == 0);
+}
+
 static void test_seal(void)
 {
   /* Sizes around chunk boundaries (64 KiB). */
@@ -1206,6 +1297,13 @@ static void test_keyring(void)
   write_text("ring/empty.key", "# nothing\n");
   work_path(path, "ring/empty.key");
   CHECK(!bc_keyring_load(&q, path, err, sizeof(err)) && strstr(err, "no key") != NULL);
+  /* Keywords of a later bc_tool are skipped; a line that is neither keyword nor key is refused. */
+  write_text("ring/newer.key", "key 2 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f\nlabel 2 Winter update\nnew_flag\n");
+  work_path(path, "ring/newer.key");
+  CHECK(bc_keyring_load(&q, path, err, sizeof(err)) && q.key_count == 1 && q.updates[0] == 2);
+  write_text("ring/garbage.key", "key 2 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f\n2 Winter\n");
+  work_path(path, "ring/garbage.key");
+  CHECK(!bc_keyring_load(&q, path, err, sizeof(err)) && strstr(err, "line 2") != NULL);
   bc_keyring_free(&r);
   bc_keyring_free(&q);
 }
@@ -1369,9 +1467,13 @@ static void test_project(void)
   write_text("proj/mode.bcproj", "version = 1\noutput_mode = inplace\n");
   work_path(path, "proj/mode.bcproj");
   CHECK(!bc_project_load(&p, path, err, sizeof(err)) && strstr(err, "unknown key 'output_mode'") != NULL);
-  write_text("proj/version.bcproj", "version = 2\n");
+  /* A later version is refused by name, before its keys are read; a missing version is invalid. */
+  write_text("proj/version.bcproj", "version = 2\nfuture_key = 1\n");
   work_path(path, "proj/version.bcproj");
-  CHECK(!bc_project_load(&p, path, err, sizeof(err)));
+  CHECK(!bc_project_load(&p, path, err, sizeof(err)) && strstr(err, "newer bc_tool") != NULL);
+  write_text("proj/noversion.bcproj", "source_root = src\n");
+  work_path(path, "proj/noversion.bcproj");
+  CHECK(!bc_project_load(&p, path, err, sizeof(err)) && strstr(err, "project version") != NULL);
 }
 
 typedef struct LogCapture {
@@ -1558,7 +1660,7 @@ static void test_job(void)
     snprintf(p.key_file, sizeof(p.key_file), "%s", key_file);
     snprintf(p.key_provider, sizeof(p.key_provider), "engine/missing");
     CHECK(run_job(&p, &c) == -2 && strstr(c.last_error, "Key provider not found") != NULL);
-    write_text("job/bad.key", "not a key");
+    write_text("job/bad.key", "0123 not a key");
     work_path(p.key_file, "job/bad.key");
     snprintf(p.key_provider, sizeof(p.key_provider), "engine/provider");
     CHECK(run_job(&p, &c) == -2 && strstr(c.last_error, "key file") != NULL);
@@ -2100,6 +2202,7 @@ int main(int argc, char **argv)
   test_envelope();
   test_embed();
   test_native();
+  test_format();
   test_seal();
   test_compress();
   test_project();

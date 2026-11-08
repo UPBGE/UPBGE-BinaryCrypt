@@ -95,8 +95,9 @@ size_t bc_manifest_encode(const BC_Manifest *m,
   bc_key_id(key, out + 16);
   memcpy(out + 24, m->player_hash, BC_PLAYER_HASH_SIZE);
   bc_store_u16(out + 56, (uint16_t)key_count);
-  bc_store_u16(out + 64, (uint16_t)lengths[2]);
-  bc_store_u16(out + 66, (uint16_t)lengths[3]);
+  bc_store_u16(out + 58, (uint16_t)lengths[2]);
+  bc_store_u16(out + 60, (uint16_t)lengths[3]);
+  /* Optional features, extension size and reserved bytes stay zero: no feature uses them yet. */
   size_t size = BC_MANIFEST_FIXED_SIZE;
   for (int i = 0; i < 4; i++) {
     memcpy(out + size, fields[i], lengths[i]);
@@ -130,26 +131,32 @@ BC_ManifestResult bc_manifest_decode(const uint8_t *buffer,
                                      BC_Manifest *r_manifest)
 {
   if (total < BC_MANIFEST_FIXED_SIZE + BC_MANIFEST_MAC_SIZE || total > BC_MANIFEST_MAX_SIZE ||
-      memcmp(buffer, BC_MANIFEST_MAGIC, 8) != 0 || bc_load_u16(buffer + 8) != BC_MANIFEST_VERSION)
+      memcmp(buffer, BC_MANIFEST_MAGIC, 8) != 0)
   {
     return BC_MANIFEST_BAD_FORMAT;
   }
-  const size_t lengths[4] = {
-      bc_load_u16(buffer + 10), bc_load_u16(buffer + 12), bc_load_u16(buffer + 64), bc_load_u16(buffer + 66)};
+  const uint16_t version = bc_load_u16(buffer + 8);
   const uint16_t flags = bc_load_u16(buffer + 14);
+  if (version > BC_MANIFEST_VERSION || (flags & ~BC_MANIFEST_REQUIRED_KNOWN) != 0) {
+    return BC_MANIFEST_NEWER;
+  }
+  if (version != BC_MANIFEST_VERSION) {
+    return BC_MANIFEST_BAD_FORMAT;
+  }
+  const size_t lengths[4] = {
+      bc_load_u16(buffer + 10), bc_load_u16(buffer + 12), bc_load_u16(buffer + 58), bc_load_u16(buffer + 60)};
   const size_t key_count = bc_load_u16(buffer + 56);
+  const size_t extension_size = bc_load_u16(buffer + 64);
   const bool project = (flags & BC_MANIFEST_PROJECT_KEY) != 0;
   const bool native = (flags & BC_MANIFEST_NATIVE_DIGEST) != 0;
+  /* The extension sits last, under the MAC: skipped, as no feature this launcher knows uses it. */
   const size_t body_size = BC_MANIFEST_FIXED_SIZE + lengths[0] + lengths[1] + lengths[2] +
                            lengths[3] + key_count * BC_KEY_ID_SIZE + (project ? BC_KEY_SIZE : 0) +
-                           (native ? BC_NATIVE_DIGEST_SIZE : 0);
-  static const uint8_t zero[6] = {0};
+                           (native ? BC_NATIVE_DIGEST_SIZE : 0) + extension_size;
   if (lengths[0] >= BC_MANIFEST_PATH_MAX || lengths[1] >= BC_MANIFEST_PATH_MAX ||
       lengths[2] >= BC_MANIFEST_PATH_MAX || lengths[3] >= BC_MANIFEST_URL_MAX ||
-      key_count > BC_KEYS_MAX || memcmp(buffer + 58, zero, sizeof(zero)) != 0 ||
-      body_size + BC_MANIFEST_MAC_SIZE != total ||
-      (flags & ~(BC_MANIFEST_KEY_FLAGS | BC_MANIFEST_NATIVE_DIGEST | BC_MANIFEST_PYTHON_CHECK)) != 0 ||
-      ((flags & BC_MANIFEST_PYTHON_CHECK) && !native))
+      key_count > BC_KEYS_MAX || extension_size > BC_MANIFEST_EXTENSION_MAX ||
+      body_size + BC_MANIFEST_MAC_SIZE != total || ((flags & BC_MANIFEST_PYTHON_CHECK) && !native))
   {
     return BC_MANIFEST_BAD_FORMAT;
   }
@@ -211,6 +218,8 @@ const char *bc_manifest_result_string(const BC_ManifestResult result)
              "export the game with bc_tool";
     case BC_MANIFEST_BAD_FORMAT:
       return "the game manifest is corrupt";
+    case BC_MANIFEST_NEWER:
+      return "the game was exported by a newer bc_tool: use the bc_launcher of that bc_tool";
     case BC_MANIFEST_WRONG_KEY:
       return "the game was encrypted by a different tool build than this launcher";
     case BC_MANIFEST_BAD_MAC:

@@ -238,6 +238,16 @@ bool bc_project_load(BC_Project *p, const char *file_path, char *err, size_t err
 
     if (strcmp(key, "version") == 0) {
       version = atoi(value);
+      if (version > BC_PROJECT_VERSION) {
+        /* Its keys and values mean nothing here: refused before reading them. */
+        snprintf(err,
+                 err_size,
+                 "written by a newer bc_tool (project version %d, this one reads up to %d)",
+                 version,
+                 BC_PROJECT_VERSION);
+        ok = false;
+        break;
+      }
     }
     else if (strcmp(key, "source_root") == 0) {
       ok = bc_resolve(p->source_root, project_dir, value);
@@ -345,8 +355,8 @@ bool bc_project_load(BC_Project *p, const char *file_path, char *err, size_t err
     }
   }
   fclose(f);
-  if (ok && version != BC_PROJECT_VERSION) {
-    snprintf(err, err_size, "unsupported project version (expected %d)", BC_PROJECT_VERSION);
+  if (ok && version < 1) {
+    snprintf(err, err_size, "missing or invalid project version");
     ok = false;
   }
   if (!ok) {

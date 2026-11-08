@@ -160,6 +160,27 @@ static bool bc_parse_update(const char **p, uint32_t *r_update)
   return true;
 }
 
+/** Hex digits and spaces only: the one key form, whatever its length (checked by the caller). */
+static bool bc_is_hex_line(const char *p)
+{
+  for (; *p != '\0'; p++) {
+    if (!((*p >= '0' && *p <= '9') || (*p >= 'a' && *p <= 'f') || (*p >= 'A' && *p <= 'F') || *p == ' ')) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** A lowercase keyword, then a space or the end of the line. */
+static bool bc_is_keyword_line(const char *p)
+{
+  const char *c = p;
+  while ((*c >= 'a' && *c <= 'z') || *c == '_') {
+    c++;
+  }
+  return c > p && (*c == ' ' || *c == '\0');
+}
+
 bool bc_keyring_load(BC_KeyRing *r, const char *path, char *err, const size_t err_size)
 {
   bc_keyring_free(r);
@@ -194,10 +215,14 @@ bool bc_keyring_load(BC_KeyRing *r, const char *path, char *err, const size_t er
       ok = bc_parse_update(&p, &update) && bc_hex32(p, value) && p[BC_KEY_HEX_SIZE] == ' ' &&
            p[BC_KEY_HEX_SIZE + 1] != '\0' && bc_keyring_set_record(r, p + BC_KEY_HEX_SIZE + 1, value, update);
     }
-    else {
+    else if (bc_is_hex_line(line)) {
       /* The one key form: 64 hex digits, possibly with spaces (bc_key_from_hex rules). */
       ok = r->key_count == 0 && bc_key_from_hex(line, value) && bc_keyring_insert(r, 1, value);
       single = true;
+    }
+    else {
+      /* A keyword of a later bc_tool: skipped. Anything else is not a key file line. */
+      ok = bc_is_keyword_line(line);
     }
     crypto_wipe(value, sizeof(value));
   }

@@ -68,14 +68,14 @@ def seal(key, client_public):
 
 def read_key_file(path):
     """All keys of a key file: the one key form (64 hex digits) or "key <update> <hex>" lines
-    (common/bc_keyring.h; "file" lines are bc_tool's own bookkeeping)."""
-    keys = []
+    (common/bc_keyring.h; "file" lines are bc_tool's own bookkeeping, and lines with a keyword of
+    a later bc_tool are skipped, as bc_tool does)."""
     with open(path, encoding="utf-8") as f:
         lines = [line.strip() for line in f if line.strip() and not line.startswith("#")]
-    if lines and not lines[0].startswith(("key ", "file ")):
-        keys.append(bytes.fromhex("".join("".join(lines).split())))
-    else:
-        keys = [bytes.fromhex(line.split()[2]) for line in lines if line.startswith("key ")]
+    hex_lines = [line for line in lines if all(c in "0123456789abcdefABCDEF " for c in line)]
+    keys = [bytes.fromhex(line.split()[2]) for line in lines if line.split()[0] == "key"]
+    if not keys and len(hex_lines) == 1:
+        keys = [bytes.fromhex("".join(hex_lines[0].split()))]
     if not keys or any(len(key) != 32 for key in keys):
         raise ValueError(f"{path}: not a BinaryCrypt key file")
     return keys

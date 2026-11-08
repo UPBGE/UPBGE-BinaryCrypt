@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 cmake_minimum_required(VERSION 3.18)
-project(UPBGE_BinaryCrypt C)
+# Release version of the tool, shown in the bc_tool window title: raise it for each release. The
+# file formats carry their own versions (binarycrypt_format.h, bc_manifest.h, bc_project.h).
+project(UPBGE_BinaryCrypt VERSION 0.9 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -188,6 +190,7 @@ endif()
 add_executable(bc_tool tool/bc_tool_main.c)
 target_link_libraries(bc_tool PRIVATE bc_build_key)
 target_compile_options(bc_tool PRIVATE ${BC_WARNINGS})
+target_compile_definitions(bc_tool PRIVATE BC_TOOL_VERSION="${PROJECT_VERSION}")
 
 # Icon of bc_tool, and of game executables until the project sets one. res/binarycrypt.ico holds the
 # 256 px artwork and its Lanczos reductions to 16, 20, 24, 32, 40, 48 and 64 px, all PNG.

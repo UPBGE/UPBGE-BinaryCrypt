@@ -1,8 +1,8 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 
 /* Test stand-in for the UPBGE player. Follows the player side of the launcher contract
- * (binarycrypt_format.h): reads the keys from the pipe named by UPBGE_BC_KEY_PIPE up to end of
- * file, then checks that the main file it was given decrypts, with the key its header names, to
+ * (binarycrypt_format.h): reads the hand-off from the pipe named by UPBGE_BC_KEY_PIPE up to end
+ * of file, then checks that the main file it was given decrypts, with the key its header names, to
  * the file named by BC_TEST_EXPECTED (decompressed first when the export compressed it, as
  * Blender's reader does).
  *
@@ -28,12 +28,14 @@
 
 #include <zstd.h>
 
-/** \return the number of whole keys read, 0 on a malformed hand-off. */
+/** \return the number of keys of a well formed hand-off (header, keys, extension, then end of
+ * file), 0 otherwise. One byte of room past the largest one detects trailing data. */
 static int bc_read_keys(const char *value, uint8_t keys[BC_KEYS_MAX][BC_KEY_SIZE])
 {
+  static uint8_t data[BC_HANDOFF_HEADER_SIZE + BC_KEYS_MAX * BC_KEY_SIZE + BC_HANDOFF_EXTENSION_MAX + 1];
   const unsigned long long handle = strtoull(value, NULL, 10);
-  const size_t capacity = (size_t)BC_KEYS_MAX * BC_KEY_SIZE;
-  uint8_t *dst = &keys[0][0];
+  const size_t capacity = sizeof(data);
+  uint8_t *dst = data;
   size_t done = 0;
 #ifdef _WIN32
   while (done < capacity) {
@@ -52,7 +54,13 @@ static int bc_read_keys(const char *value, uint8_t keys[BC_KEYS_MAX][BC_KEY_SIZE
     done += (size_t)n;
   }
 #endif
-  return done % BC_KEY_SIZE == 0 ? (int)(done / BC_KEY_SIZE) : 0;
+  uint32_t extension_size = 0;
+  const int count = done >= BC_HANDOFF_HEADER_SIZE ? bc_handoff_header_read(data, &extension_size) : 0;
+  if (count == 0 || done != BC_HANDOFF_HEADER_SIZE + (size_t)count * BC_KEY_SIZE + extension_size) {
+    return 0;
+  }
+  memcpy(keys, data + BC_HANDOFF_HEADER_SIZE, (size_t)count * BC_KEY_SIZE);
+  return count;
 }
 
 /** True when the pipe named by BC_TEST_LEAK is open here and still holds the test's marker. */

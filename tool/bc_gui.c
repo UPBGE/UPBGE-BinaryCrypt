@@ -104,7 +104,7 @@ typedef struct BC_Gui {
   char output_text[BC_PATH_MAX];
   char player_text[BC_PATH_MAX];
   char main_text[BC_PATH_MAX];
-  char game_text[BC_GAME_NAME_MAX];
+  char game_text[BC_GAME_NAME_MAX + 16]; /* Room for the "  (main file)" note. */
   char icon_text[BC_PATH_MAX];
   char version_text[BC_PROJECT_VERSION_MAX];
   char company_text[BC_PROJECT_TEXT_MAX];
@@ -213,7 +213,7 @@ static void bc_gui_update_title(BC_Gui *g)
   char title[BC_PATH_MAX + 64];
   snprintf(title,
            sizeof(title),
-           "UPBGE BinaryCrypt - %s%s",
+           "UPBGE BinaryCrypt v" BC_TOOL_VERSION " - %s%s",
            g->project_path[0] ? bc_path_basename(g->project_path) : "new project",
            g->modified ? " *" : "");
   SetWindowTitle(title);
@@ -2037,7 +2037,7 @@ int bc_gui_run(const char *project_path)
   SetConfigFlags(FLAG_WINDOW_RESIZABLE);
   /* Tall enough for every row of a Windows build with online keys, and still within a 1080p
    * screen with its taskbar. */
-  InitWindow(1100, 980, "UPBGE BinaryCrypt");
+  InitWindow(1100, 980, "UPBGE BinaryCrypt v" BC_TOOL_VERSION);
 #ifdef BC_WINDOW_ICON
   bc_gui_set_window_icon();
 #endif
