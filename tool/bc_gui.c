@@ -2726,10 +2726,8 @@ static void bc_gui_draw(BC_Gui *g)
   const Rectangle help_box = bc_rect(BC_MARGIN, y, inner, BC_HELP_H);
 
   /* Dropdowns last: an open list lies over the rows below it. The open one is drawn after the
-   * closed ones. */
-  if (dropdown_open && !modal && !page_locked) {
-    GuiUnlock();
-  }
+   * closed ones, and only it is unlocked: raygui opens a closed dropdown on the press, and the
+   * press on an item can lie over the closed dropdown below (Key over Runtime Check). */
   if (running) {
     GuiDisable();
   }
@@ -2765,6 +2763,9 @@ static void bc_gui_draw(BC_Gui *g)
     const int i = pass < dropdown_count ? pass : open;
     if (i < 0 || (pass < dropdown_count && i == open) || dropdowns[i].box.width <= 0) {
       continue;
+    }
+    if (pass == dropdown_count && dropdown_open && !modal && !page_locked) {
+      GuiUnlock();
     }
     if (GuiDropdownBox(dropdowns[i].box, dropdowns[i].items, dropdowns[i].value, *dropdowns[i].edit)) {
       *dropdowns[i].edit = !*dropdowns[i].edit;
