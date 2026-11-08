@@ -39,8 +39,14 @@
 #define BC_BUTTON_W 130
 #define BC_LOG_LINES 256
 #define BC_LOG_VISIBLE 7
+/* Fewest log lines: below them the page scrolls instead. */
+#define BC_LOG_MIN 3
 #define BC_JOB_BUDGET 0.012
 #define BC_STATUS_H 26
+/* Page scroll bar, in the right margin: the content gives up this width while the page scrolls. */
+#define BC_SCROLL_W 8
+/* Page scrolled by one wheel notch: two rows. */
+#define BC_SCROLL_STEP (2 * (BC_ROW + BC_GAP))
 /* raygui's icons, drawn at one pixel per texel (RAYGUI_ICON_SIZE, private to its implementation). */
 #define BC_ICON_SIZE 16
 /* Seconds between two checks of the files the fields name: they may appear while the tool is
@@ -128,6 +134,15 @@ typedef struct BC_Gui {
   int log_next;
   /** Newest messages scrolled past, 0 when following the log. */
   int log_scroll;
+
+  /** Page scrolled past the top of the window, in whole pixels; 0 while everything fits. */
+  float scroll_y;
+  /** Page thumb held: where the pointer took it, from its top. */
+  bool scroll_drag;
+  float scroll_grab;
+  /** Where the file list and the log take the wheel themselves, as last drawn: empty while they
+   * have nothing to scroll, so the wheel moves the page there. */
+  Rectangle list_wheel, log_wheel;
 
   /** Bumped by every change of the project; the check follows it. */
   unsigned revision;
@@ -745,6 +760,9 @@ static Rectangle bc_rect(float x, float y, float w, float h)
 #define BC_RGB_OK 0x4ade80
 /* Placeholder text of an empty field: dimmer than labels, still legible. */
 #define BC_RGB_HINT 0x707070
+/* Page scroll thumb: quiet at rest, brighter under the pointer or held. */
+#define BC_RGB_THUMB 0x4a4a4a
+#define BC_RGB_THUMB_ACTIVE 0x6a6a6a
 
 static void bc_gui_theme_upbge(void)
 {
@@ -1173,11 +1191,72 @@ static bool bc_gui_path_row(float y,
   return GuiButton(bc_rect(x + BC_LABEL_W + box_w + BC_GAP, y, BC_BUTTON_W, BC_ROW), "Browse...");
 }
 
+/** The page scroll bar, in the right margin while the page is taller than the window: the wheel
+ * where no list under the pointer takes it, the thumb dragged, a click on the track pages. Run
+ * before anything is laid out, so every control of the frame sees one offset; drawn at once, as
+ * nothing else reaches the margin. Returns true when the wheel moved the page this frame: a list
+ * the move brings under the pointer must not take the same notch. */
+static bool bc_gui_scroll_page(BC_Gui *g, const float win_w, const float win_h, const float page_h, const bool interactive)
+{
+  const float max_scroll = page_h - win_h;
+  if (max_scroll <= 0 || !interactive) {
+    g->scroll_drag = false;
+  }
+  if (max_scroll <= 0) {
+    g->scroll_y = 0;
+    return false;
+  }
+  g->scroll_y = g->scroll_y > max_scroll ? max_scroll : g->scroll_y; /* The window grew. */
+  const Vector2 mouse = GetMousePosition();
+  const Rectangle hit = bc_rect(win_w - BC_MARGIN, 0, BC_MARGIN, win_h);
+  const Rectangle track = bc_rect(win_w - BC_MARGIN, BC_GAP / 2, BC_SCROLL_W, win_h - BC_GAP);
+  /* Thumb to track as window to page, never too short to grab. */
+  float thumb_h = track.height * win_h / page_h;
+  thumb_h = thumb_h < 3 * BC_GAP ? 3 * BC_GAP : thumb_h;
+  const float travel = track.height - thumb_h;
+  bool wheeled = false;
+  if (interactive) {
+    const float wheel = GetMouseWheelMove();
+    if (wheel != 0 && !CheckCollisionPointRec(mouse, g->list_wheel) && !CheckCollisionPointRec(mouse, g->log_wheel)) {
+      g->scroll_y -= wheel * BC_SCROLL_STEP;
+      wheeled = true;
+    }
+    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(mouse, hit)) {
+      const float thumb_y = track.y + travel * g->scroll_y / max_scroll;
+      if (mouse.y < thumb_y) {
+        g->scroll_y -= win_h - BC_ROW; /* A page, one row kept in sight. */
+      }
+      else if (mouse.y >= thumb_y + thumb_h) {
+        g->scroll_y += win_h - BC_ROW;
+      }
+      else {
+        g->scroll_drag = true;
+        g->scroll_grab = mouse.y - thumb_y;
+      }
+    }
+  }
+  if (g->scroll_drag) {
+    g->scroll_y = travel > 0 ? (mouse.y - g->scroll_grab - track.y) * max_scroll / travel : 0;
+    if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+      g->scroll_drag = false;
+    }
+  }
+  /* Whole pixels: the font is drawn 1:1, a fractional offset would shift glyphs off the texel grid
+   * and smear them. */
+  const float clamped = g->scroll_y < 0 ? 0 : g->scroll_y > max_scroll ? max_scroll : g->scroll_y;
+  g->scroll_y = (float)(int)(clamped + 0.5f);
+
+  const float thumb_y = track.y + travel * g->scroll_y / max_scroll;
+  const bool hot = g->scroll_drag || (interactive && CheckCollisionPointRec(mouse, hit));
+  DrawRectangleRec(track, GetColor((unsigned int)GuiGetStyle(DEFAULT, BASE_COLOR_NORMAL)));
+  DrawRectangleRec(bc_rect(track.x, thumb_y, track.width, thumb_h), GetColor((unsigned int)BC_RGB(hot ? BC_RGB_THUMB_ACTIVE : BC_RGB_THUMB)));
+  return wheeled;
+}
+
 static void bc_gui_draw(BC_Gui *g)
 {
   const float W = (float)GetScreenWidth();
-  const float H = (float)GetScreenHeight();
-  const float inner = W - 2 * BC_MARGIN;
+  const float win_h = (float)GetScreenHeight();
   const bool running = g->job != NULL;
   const bool modal = g->pending != BC_PENDING_NONE;
   char path[BC_PATH_MAX];
@@ -1188,14 +1267,35 @@ static void bc_gui_draw(BC_Gui *g)
   }
   /* An open dropdown takes every click until it closes: the rows under its list must not react. */
   const bool dropdown_open = g->check_edit || g->manifest_edit || g->key_edit;
-  if (modal || dropdown_open) {
+
+  /* Rows shown, known before anything is drawn: with the shortest file list (its buttons) and log
+   * (BC_LOG_MIN lines), they give the height of the page. A taller window stretches both; a shorter
+   * one scrolls the page. */
+  const bool online = g->project.key_mode == BC_KEY_ONLINE;
+  const bool key_file_row = g->project.key_mode != BC_KEY_BUILD;
+  /* Icon and version information only exist for Windows games: hidden where this build cannot make
+   * one (the project keeps them, the job ignores them with a warning). */
+  const bool brand_rows = bc_brand_supported();
+  const int settings_rows = (online ? 12 : key_file_row ? 10 : 9) - (brand_rows ? 0 : 2);
+  const float settings_h = (float)(settings_rows * (BC_ROW + BC_GAP) + 2 * BC_GAP);
+  const float files_min_h = 5 * (BC_ROW + BC_GAP) + 3 * BC_GAP;
+  const float bottom_min_h = BC_ROW + BC_LOG_MIN * 24 + 5 * BC_GAP + BC_STATUS_H; /* Run row, log, status bar. */
+  const float min_h = BC_MARGIN + (BC_ROW + 2 * BC_GAP) + (settings_h + 2 * BC_GAP) + files_min_h + bottom_min_h + BC_MARGIN;
+  const float page_h = min_h > win_h ? min_h : win_h;
+  const float inner = W - 2 * BC_MARGIN - (page_h > win_h ? BC_SCROLL_W : 0);
+  /* A held thumb owns the pointer up to the frame of its release: a button under the pointer must
+   * not take that release as a click. */
+  const bool thumb_held = g->scroll_drag;
+  const bool page_wheeled = bc_gui_scroll_page(g, W, win_h, page_h, !modal && !dropdown_open);
+  const bool page_locked = thumb_held || g->scroll_drag;
+  if (modal || dropdown_open || page_locked) {
     GuiLock();
   }
   bc_gui_refresh_check(g);
   const BC_Check *check = &g->check;
 
-  /* Toolbar. */
-  float y = BC_MARGIN;
+  /* Toolbar, the page scrolled. */
+  float y = BC_MARGIN - g->scroll_y;
   if (running) {
     GuiDisable();
   }
@@ -1222,13 +1322,6 @@ static void bc_gui_draw(BC_Gui *g)
   y += BC_ROW + 2 * BC_GAP;
 
   /* Settings. */
-  const bool online = g->project.key_mode == BC_KEY_ONLINE;
-  const bool key_file_row = g->project.key_mode != BC_KEY_BUILD;
-  /* Icon and version information only exist for Windows games: hidden where this build cannot make
-   * one (the project keeps them, the job ignores them with a warning). */
-  const bool brand_rows = bc_brand_supported();
-  const int settings_rows = (online ? 13 : key_file_row ? 11 : 10) - (brand_rows ? 0 : 2);
-  const float settings_h = (float)(settings_rows * (BC_ROW + BC_GAP) + 2 * BC_GAP);
   bc_group_box(bc_rect(BC_MARGIN, y, inner, settings_h), "Settings");
   y += 2 * BC_GAP;
   bool committed;
@@ -1285,15 +1378,16 @@ static void bc_gui_draw(BC_Gui *g)
   if (!g->game_edit) {
     snprintf(g->game_text, sizeof(g->game_text), "%s%s", game_name, game_is_default ? "  (main file)" : "");
   }
-  /* Manifest placement shares the row as a dropdown, right aligned with the path row buttons.
-   * Dropdowns are drawn last (a list opens over the rows below), as wide as their widest item plus
-   * room for the arrow. */
+  /* Manifest placement shares the row as a dropdown, right aligned with the path row buttons; the
+   * runtime check shares the runtime row below, in the same column: one label width, one dropdown
+   * width. Dropdowns are drawn last (a list opens over the rows below), as wide as the widest item
+   * of the column plus room for the arrow. */
   const float text_spacing = (float)GuiGetStyle(DEFAULT, TEXT_SPACING);
   const float dropdown_extra = 3 * BC_GAP + (float)(GuiGetStyle(DROPDOWNBOX, ARROW_PADDING) + BC_ICON_SIZE);
-  const float manifest_label_w = MeasureTextEx(GuiGetFont(), "Manifest", BC_TEXT_SIZE, text_spacing).x + 3 * BC_GAP;
-  const float manifest_group_w = MeasureTextEx(GuiGetFont(), "Separate file", BC_TEXT_SIZE, text_spacing).x + dropdown_extra;
-  const float manifest_x = BC_MARGIN + inner - 2 * BC_GAP - manifest_group_w;
-  const float game_box_w = manifest_x - manifest_label_w - BC_GAP - (BC_MARGIN + BC_GAP + BC_LABEL_W);
+  const float side_label_w = MeasureTextEx(GuiGetFont(), "Runtime Check", BC_TEXT_SIZE, text_spacing).x + 3 * BC_GAP;
+  const float side_w = MeasureTextEx(GuiGetFont(), "Player + Libraries + Python", BC_TEXT_SIZE, text_spacing).x + dropdown_extra;
+  const float side_x = BC_MARGIN + inner - 2 * BC_GAP - side_w;
+  const float game_box_w = side_x - side_label_w - BC_GAP - (BC_MARGIN + BC_GAP + BC_LABEL_W);
   bc_tip(bc_rect(BC_MARGIN + BC_GAP + BC_LABEL_W, y, game_box_w, BC_ROW),
          "Name of the game executable (\".exe\" is added on Windows): the only executable in the game folder. "
          "Empty: the name of the main file");
@@ -1320,11 +1414,15 @@ static void bc_gui_draw(BC_Gui *g)
     }
     g->game_edit = !g->game_edit;
   }
-  GuiLabel(bc_rect(manifest_x - manifest_label_w, y, manifest_label_w, BC_ROW), "Manifest");
-  const Rectangle manifest_box = bc_rect(manifest_x, y, manifest_group_w, BC_ROW);
+  GuiLabel(bc_rect(side_x - side_label_w, y, side_label_w, BC_ROW), "Manifest");
+  const Rectangle manifest_box = bc_rect(side_x, y, side_w, BC_ROW);
   y += BC_ROW + BC_GAP;
 
-  if (bc_gui_path_row(y, inner, "UPBGE runtime", "UPBGE player inside the game folder, with its runtime (DLLs, python, datafiles) next to it. It is hashed: the game refuses any other player", "Required: the UPBGE player inside the game folder", &check->runtime, g->project.player, g->player_text, &g->player_edit, &committed)) {
+  /* The runtime, then the check of it the game executable makes. Its Browse button ends where the
+   * game name field does (a path row ends 2 * BC_GAP inside its width). */
+  GuiLabel(bc_rect(side_x - side_label_w, y, side_label_w, BC_ROW), "Runtime Check");
+  const Rectangle check_box = bc_rect(side_x, y, side_w, BC_ROW);
+  if (bc_gui_path_row(y, side_x - side_label_w + BC_GAP - BC_MARGIN, "UPBGE runtime", "UPBGE player inside the game folder, with its runtime (DLLs, python, datafiles) next to it. It is hashed: the game refuses any other player", "Required: the UPBGE player inside the game folder", &check->runtime, g->project.player, g->player_text, &g->player_edit, &committed)) {
     r = bc_dialog_open_files("UPBGE player executable", NULL, false, path, sizeof(path));
     if (r == BC_DIALOG_OK) {
       bc_gui_set_player(g, path);
@@ -1336,13 +1434,6 @@ static void bc_gui_draw(BC_Gui *g)
   if (committed) {
     bc_gui_set_player(g, g->player_text);
   }
-  y += BC_ROW + BC_GAP;
-
-  /* Integrity level, under the runtime it checks first: a dropdown of its own row, the levels
-   * spelled out. */
-  GuiLabel(bc_rect(BC_MARGIN + BC_GAP, y, BC_LABEL_W, BC_ROW), "Runtime Check");
-  const float check_combo_w = MeasureTextEx(GuiGetFont(), "Player + Libraries + Python", BC_TEXT_SIZE, text_spacing).x + dropdown_extra;
-  const Rectangle check_box = bc_rect(BC_MARGIN + BC_GAP + BC_LABEL_W, y, check_combo_w, BC_ROW);
   y += BC_ROW + BC_GAP;
 
   if (bc_gui_path_row(y, inner, "Main file", "The .blend the game executable starts", "Required: the .blend the game starts", &check->main, g->project.main, g->main_text, &g->main_edit, &committed)) {
@@ -1429,24 +1520,29 @@ static void bc_gui_draw(BC_Gui *g)
     const float right = BC_MARGIN + inner - 2 * BC_GAP;
     const Font font = GuiGetFont();
     const float padding = (float)GuiGetStyle(TOGGLE, GROUP_PADDING);
-    /* A dropdown like the check level, drawn last. */
+    /* A dropdown like the other modes, drawn last. Online, the two ways a player gets the key follow
+     * it, labeled, as a toggle group: both always in sight. */
     float key_w = MeasureTextEx(font, "Per project", BC_TEXT_SIZE, text_spacing).x + dropdown_extra;
     float cache_w = MeasureTextEx(font, "Offline after 1st launch", BC_TEXT_SIZE, text_spacing).x + 2 * BC_GAP;
-    /* Narrow windows: both shrink together rather than overlap. One padding inside the cache
-     * group. */
-    const float needed = key_w + 2 * cache_w + padding + 2 * BC_GAP;
-    if (needed > right - x0) {
-      key_w *= (right - x0) / needed;
-      cache_w *= (right - x0) / needed;
+    const float types_label_w = MeasureTextEx(font, "Online types", BC_TEXT_SIZE, text_spacing).x + 3 * BC_GAP;
+    /* Narrow windows: dropdown and toggles shrink together rather than overlap, the label keeps its
+     * width. One padding inside the toggle group. */
+    const float room = right - x0 - BC_GAP - types_label_w - padding;
+    const float needed = key_w + 2 * cache_w;
+    if (needed > room) {
+      key_w *= room / needed;
+      cache_w *= room / needed;
     }
     GuiLabel(bc_rect(BC_MARGIN + BC_GAP, y, BC_LABEL_W, BC_ROW), "Key");
     key_box = bc_rect(x0, y, key_w, BC_ROW);
     if (online) {
       int cache = g->project.key_cache ? 1 : 0;
-      const float cache_x = right - 2 * cache_w - padding;
-      bc_tip(bc_rect(cache_x, y, 2 * cache_w + padding, BC_ROW),
+      float fx = x0 + key_w + BC_GAP;
+      GuiLabel(bc_rect(fx + BC_GAP, y, types_label_w, BC_ROW), "Online types");
+      fx += types_label_w;
+      bc_tip(bc_rect(fx, y, 2 * cache_w + padding, BC_ROW),
              "Always online: the key server is asked at every launch. Offline after the first launch: the key stays on the player's computer (protected for that user) and the game also starts without a connection");
-      GuiToggleGroup(bc_rect(cache_x, y, cache_w, BC_ROW), "Always online;Offline after 1st launch", &cache);
+      GuiToggleGroup(bc_rect(fx, y, cache_w, BC_ROW), "Always online;Offline after 1st launch", &cache);
       if (cache != (g->project.key_cache ? 1 : 0)) {
         g->project.key_cache = cache != 0;
         bc_gui_set_modified(g);
@@ -1575,25 +1671,33 @@ static void bc_gui_draw(BC_Gui *g)
   y += BC_ROW + 3 * BC_GAP;
 
   /* Files. */
-  /* The log gives up lines (down to 2) before the file list gets shorter than its buttons. */
-  const float files_min_h = 5 * (BC_ROW + BC_GAP) + 3 * BC_GAP;
-  const float spare = H - y - BC_MARGIN - files_min_h - (BC_ROW + 5 * BC_GAP + BC_STATUS_H);
+  /* The log gives up lines (down to BC_LOG_MIN) before the file list gets shorter than its
+   * buttons. Measured to the bottom of the page, in window coordinates like y. */
+  const float page_bottom = page_h - g->scroll_y;
+  const float spare = page_bottom - y - BC_MARGIN - files_min_h - (bottom_min_h - BC_LOG_MIN * 24);
   int log_lines = (int)(spare / 24);
-  log_lines = log_lines < 2 ? 2 : log_lines > BC_LOG_VISIBLE ? BC_LOG_VISIBLE : log_lines;
+  log_lines = log_lines < BC_LOG_MIN ? BC_LOG_MIN : log_lines > BC_LOG_VISIBLE ? BC_LOG_VISIBLE : log_lines;
   /* Run row, log, status bar. */
   const float bottom_h = BC_ROW + (float)log_lines * 24 + 5 * BC_GAP + BC_STATUS_H;
-  const float files_h = H - y - bottom_h - BC_MARGIN;
+  const float files_h = page_bottom - y - bottom_h - BC_MARGIN;
   bc_group_box(bc_rect(BC_MARGIN, y, inner, files_h), "Files to encrypt (drop files or folders here)");
   const float list_x = BC_MARGIN + BC_GAP;
   const float list_y = y + 2 * BC_GAP;
   const float list_w = inner - BC_BUTTON_W - 4 * BC_GAP;
   const float list_h = files_h - 4 * BC_GAP - BC_ROW;
-  GuiListViewEx(bc_rect(list_x, list_y, list_w, list_h),
-                (const char **)g->items,
-                g->item_count,
-                &g->list_scroll,
-                &g->list_active,
-                &g->list_focus);
+  const Rectangle list_box = bc_rect(list_x, list_y, list_w, list_h);
+  /* The wheel moved the page: the list it may have brought under the pointer sits this frame out. */
+  const bool list_locked = page_wheeled && !GuiIsLocked();
+  if (list_locked) {
+    GuiLock();
+  }
+  GuiListViewEx(list_box, (const char **)g->items, g->item_count, &g->list_scroll, &g->list_active, &g->list_focus);
+  if (list_locked) {
+    GuiUnlock();
+  }
+  /* raygui's list takes the wheel only while enabled and showing a scroll bar: its own test. */
+  const bool list_scrolls = !running && (float)((GuiGetStyle(LISTVIEW, LIST_ITEMS_HEIGHT) + GuiGetStyle(LISTVIEW, LIST_ITEMS_SPACING)) * g->item_count) > list_h;
+  g->list_wheel = list_scrolls ? list_box : bc_rect(0, 0, 0, 0);
   {
     /* Below the list, as wide: what else the folders give. */
     const float data_y = list_y + list_h + BC_GAP;
@@ -1738,7 +1842,7 @@ static void bc_gui_draw(BC_Gui *g)
   const float log_h = (float)log_lines * 24 + BC_GAP;
   const Rectangle log_box = bc_rect(BC_MARGIN, y, inner, log_h);
   const float log_text_w = inner - 3 * BC_GAP; /* Room for the scroll bar. */
-  if (!GuiIsLocked() && CheckCollisionPointRec(GetMousePosition(), log_box)) {
+  if (!GuiIsLocked() && !page_wheeled && CheckCollisionPointRec(GetMousePosition(), log_box)) {
     const float wheel = GetMouseWheelMove();
     if (wheel != 0) {
       g->log_scroll += wheel > 0 ? (int)(wheel + 0.5f) : (int)(wheel - 0.5f);
@@ -1767,19 +1871,27 @@ static void bc_gui_draw(BC_Gui *g)
   BC_Span rows[BC_LOG_VISIBLE];
   Color row_colors[BC_LOG_VISIBLE];
   int row_count = 0;
-  for (int i = g->log_scroll; i < g->log_count && row_count < log_lines; i++) {
-    const BC_LogLine *line = &g->log[(g->log_next - 1 - i + BC_LOG_LINES) % BC_LOG_LINES];
+  /* Rows left above the panel: the wheel has something to scroll back to. */
+  bool log_more = false;
+  int msg = g->log_scroll;
+  for (; msg < g->log_count && row_count < log_lines; msg++) {
+    const BC_LogLine *line = &g->log[(g->log_next - 1 - msg + BC_LOG_LINES) % BC_LOG_LINES];
     const int rgba = line->level == BC_LOG_ERROR   ? BC_RGB(BC_RGB_ERROR) :
                      line->level == BC_LOG_WARNING ? BC_RGB(BC_RGB_WARNING) :
                                                      GuiGetStyle(DEFAULT, TEXT_COLOR_NORMAL);
     BC_Span spans[BC_LOG_VISIBLE];
     const int n = bc_wrap(line->text, log_text_w, text_spacing, spans, BC_LOG_VISIBLE);
-    for (int k = n - 1; k >= 0 && row_count < log_lines; k--) {
+    int k = n - 1;
+    for (; k >= 0 && row_count < log_lines; k--) {
       rows[row_count] = spans[k];
       row_colors[row_count] = GetColor((unsigned int)rgba);
       row_count++;
     }
+    log_more = log_more || k >= 0;
   }
+  log_more = log_more || msg < g->log_count;
+  /* The log keeps the wheel wherever it can move: back to older rows, or forward to the newest. */
+  g->log_wheel = log_more || g->log_scroll > 0 ? log_box : bc_rect(0, 0, 0, 0);
   for (int row = 0; row < row_count; row++) {
     const int k = row_count - 1 - row;
     bc_draw_span(&rows[k], BC_MARGIN + BC_GAP, y + BC_GAP / 2 + (float)row * 24, text_spacing, row_colors[k]);
@@ -1811,7 +1923,7 @@ static void bc_gui_draw(BC_Gui *g)
 
   /* Dropdowns last: an open list lies over the rows below it. The open one is drawn after the
    * closed ones. */
-  if (dropdown_open && !modal) {
+  if (dropdown_open && !modal && !page_locked) {
     GuiUnlock();
   }
   if (running) {
@@ -1878,11 +1990,12 @@ static void bc_gui_draw(BC_Gui *g)
 
   bc_gui_draw_tip();
 
-  /* Confirmation dialog on top of everything, over a dimmed editor. */
+  /* Confirmation dialog on top of everything, over a dimmed editor: centered in the window, not on
+   * the page. */
   if (modal) {
     GuiUnlock();
-    DrawRectangleRec(bc_rect(0, 0, W, H), Fade(BLACK, 0.5f));
-    const Rectangle box = bc_rect(W / 2 - 260, H / 2 - 90, 520, 180);
+    DrawRectangleRec(bc_rect(0, 0, W, win_h), Fade(BLACK, 0.5f));
+    const Rectangle box = bc_rect(W / 2 - 260, win_h / 2 - 90, 520, 180);
     if (g->pending == BC_PENDING_QUIT) {
       const int answer = GuiMessageBox(box, "Unsaved changes", "Save the project before closing?", "Save;Discard");
       if (answer >= 0) {
@@ -1904,6 +2017,9 @@ static void bc_gui_draw(BC_Gui *g)
       }
     }
   }
+  if (page_locked) {
+    GuiUnlock(); /* raygui's lock outlives the frame. */
+  }
 }
 
 /* -------------------------------------------------------------------------------------------- */
@@ -1921,11 +2037,25 @@ int bc_gui_run(const char *project_path)
   SetConfigFlags(FLAG_WINDOW_RESIZABLE);
   /* Tall enough for every row of a Windows build with online keys, and still within a 1080p
    * screen with its taskbar. */
-  InitWindow(1100, 1000, "UPBGE BinaryCrypt");
+  InitWindow(1100, 980, "UPBGE BinaryCrypt");
 #ifdef BC_WINDOW_ICON
   bc_gui_set_window_icon();
 #endif
-  SetWindowMinSize(900, 860);
+  /* A shorter screen (laptops) gets a window that fits it, room left for a taskbar and the title
+   * bar: the page scrolls. Centered again, as the window opened centered for its first size. */
+  {
+    const int monitor = GetCurrentMonitor();
+    const int fit_h = GetMonitorHeight(monitor) - 100;
+    if (fit_h > 0 && fit_h < GetScreenHeight()) {
+      SetWindowSize(GetScreenWidth(), fit_h < 500 ? 500 : fit_h);
+      const Vector2 origin = GetMonitorPosition(monitor);
+      SetWindowPosition((int)origin.x + (GetMonitorWidth(monitor) - GetScreenWidth()) / 2,
+                        (int)origin.y + (GetMonitorHeight(monitor) - GetScreenHeight()) / 2);
+    }
+  }
+  /* Narrower, the runtime path would have no room left beside the runtime check; any height, the
+   * page scrolls. */
+  SetWindowMinSize(1000, 500);
   SetExitKey(KEY_NULL);
   SetTargetFPS(60);
   bc_gui_theme_upbge();

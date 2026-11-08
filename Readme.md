@@ -152,15 +152,15 @@ Platform notes:
      folder*, below).
    - *Game name*: name of the game executable (`.exe` is added on Windows). Empty: the main file
      name.
-   - *Runtime Check* (default *Player + Libraries + Python*): see *Integrity check*, below.
    - *Manifest*: inside the game executable (default) or in a separate `binarycrypt.manifest`
      file next to it (see below).
+   - *UPBGE runtime*: the player inside the game folder; `engine/blenderplayer(.exe)` by default.
+   - *Runtime Check* (default *Player + Libraries + Python*): see *Integrity check*, below.
+   - *Main file*: the `.blend` the game starts.
    - *Icon*, *Version*, *Company*, *Copyright* (Windows, optional, shown by Windows builds of
      `bc_tool` only): see below.
-   - *Key*: per project (default), online from a key server, or the build key; *Key file*: see
-     *Keys*, below.
-   - *UPBGE runtime*: the player inside the game folder; `engine/blenderplayer(.exe)` by default.
-   - *Main file*: the `.blend` the game starts.
+   - *Key*: per project (default), online from a key server (*Online types*: *Always online* or
+     *Offline after 1st launch*), or the build key; *Key file*: see *Keys*, below.
    - *Files to encrypt*: files and folders, dragged and dropped on the window. Folders are scanned
      recursively (hidden folders skipped) for `.blend` files, `.py` modules and the files of the
      *Data files* extensions (for example `json csv`). A file listed
@@ -173,7 +173,8 @@ Platform notes:
    *Open game folder* and *Run game* show and start the result. Save the project to run the same
    batch again later, or from a script: `bc_tool --batch mygame.bcproj`. Shortcuts: Ctrl+N, Ctrl+O,
    Ctrl+S, Ctrl+Shift+S and Ctrl+Enter (Cmd on macOS); the wheel scrolls the log back and *Copy
-   log* puts it on the clipboard.
+   log* puts it on the clipboard. A window too short for every row (a laptop screen) gets a scroll
+   bar: the wheel scrolls the page wherever no list under the pointer takes it.
 4. **Sign** (optional, recommended on Windows): sign the game executable after exporting, e.g.
    `signtool sign ... MyGame.exe`. The manifest sits in front of the signature and stays readable.
    With the external manifest and no icon or version information, sign `bc_launcher` once
