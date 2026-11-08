@@ -202,8 +202,8 @@ Platform notes:
 
    The editor checks the fields as you go: a tick when what a field names exists, a red frame
    and a note when it does not (the runtime not yet copied into the game folder, for example).
-   The panel at the bottom explains the field under the pointer; *Help* in the first row hides it,
-   and tooltips then carry the whole help. The editor remembers the help panel, the folded
+   The panel at the bottom explains the field under the pointer and a tooltip names it; *Help* in
+   the first row hides both. The editor remembers the help panel, the folded
    sections and the window size from one run to the next (`bc_tool.ini` in
    `%APPDATA%\UPBGE-BinaryCrypt`, `~/Library/Application Support/UPBGE-BinaryCrypt` or
    `~/.config/upbge-binarycrypt`).

@@ -1349,11 +1349,11 @@ static void bc_draw_span(const BC_Span *span, const float x, const float y, cons
 }
 
 /** Draw the tooltip registered this frame on top of everything, below its control or above it
- * when there is no room, inside the window: the short line of its help, or with \a full all of
- * it (the help panel is hidden). */
-static void bc_gui_draw_tip(const bool full)
+ * when there is no room, inside the window: the short line of its help. Nothing without \a show
+ * (Help off): the frame's registration is still consumed, so no countdown keeps frames coming. */
+static void bc_gui_draw_tip(const bool show)
 {
-  const char *help = g_tip_text;
+  const char *help = show ? g_tip_text : NULL;
   g_tip_text = NULL;
   /* Identity of the control: the pointer to its help, unchanged frame to frame. */
   const char *text = help;
@@ -1380,11 +1380,7 @@ static void bc_gui_draw_tip(const bool full)
   const float line_h = BC_TEXT_SIZE + 4;
   const float max_w = (W - 2 * BC_MARGIN < 640 ? W - 2 * BC_MARGIN : 640) - 2 * BC_GAP;
   BC_Span spans[24];
-  int n = bc_wrap(text, max_w, spacing, spans, 24);
-  if (full && end != NULL) {
-    /* The rest below the short line, wrapped on its own. */
-    n += bc_wrap(end + 1, max_w, spacing, spans + n, 24 - n);
-  }
+  const int n = bc_wrap(text, max_w, spacing, spans, 24);
   float text_w = 0;
   for (int i = 0; i < n; i++) {
     char buffer[BC_SPAN_MAX];
@@ -1996,7 +1992,7 @@ static void bc_gui_types_list(BC_Gui *g, const Rectangle bounds, const bool page
  * frame (call before #bc_gui_draw_tip), else what the editor is about. */
 static void bc_gui_help_panel(const Rectangle bounds)
 {
-  const char *idle = "Point at a field or a button to see what it does here. Help, in the first row, hides this panel.";
+  const char *idle = "Point at a field or a button to see what it does here. Help, in the first row, hides this panel and the tooltips.";
   const char *help = g_tip_text;
   const char *text = idle;
   if (help != NULL) {
@@ -2114,10 +2110,10 @@ static void bc_gui_draw(BC_Gui *g)
     bc_gui_save(g, true);
   }
   {
-    /* The help panel at the bottom, on or off. Off, tooltips carry the whole help. */
+    /* The help panel at the bottom and the tooltips, on or off together. */
     const float help_w = bc_button_w("Help");
     const Rectangle help_toggle = bc_rect(BC_MARGIN + inner - help_w, y, help_w, BC_ROW);
-    bc_tip(help_toggle, "Show or hide the help panel\nThe panel at the bottom explains the field under the pointer. Hidden, tooltips show the whole help instead.");
+    bc_tip(help_toggle, "Show or hide the help\nThe panel at the bottom explains the field under the pointer, and a tooltip names it. Off: neither.");
     GuiToggle(help_toggle, "Help", &g->help);
   }
   y += BC_ROW + 2 * BC_GAP;
@@ -2790,12 +2786,11 @@ static void bc_gui_draw(BC_Gui *g)
     GuiEnable();
   }
 
-  /* The help of what the pointer rests on, then its tooltip: its first line, or all of it while
-   * the panel is hidden. */
+  /* The help of what the pointer rests on, then its tooltip (its first line). Help off: neither. */
   if (g->help) {
     bc_gui_help_panel(help_box);
   }
-  bc_gui_draw_tip(!g->help);
+  bc_gui_draw_tip(g->help);
 
   /* Confirmation dialog on top of everything, over a dimmed editor: centered in the window, not on
    * the page. */
