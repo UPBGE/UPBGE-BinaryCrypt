@@ -2,7 +2,8 @@
 
 /* Native file dialogs: Win32 common dialogs on Windows, osascript on macOS, zenity or kdialog on
  * Linux (the same strategy as tinyfiledialogs, reduced to the three calls the tool needs). Only
- * constant strings from this program are ever passed to a shell, never user paths.
+ * constant strings from this program are ever passed to a shell, never user paths. Also the two
+ * hand-offs to the desktop after an export: showing the game folder and starting the game.
  *
  * Kept free of raylib headers on purpose: raylib and windows.h define conflicting names. */
 
@@ -38,6 +39,12 @@ BC_DialogResult bc_dialog_save_file(const char *title,
                                     char *out,
                                     size_t size);
 BC_DialogResult bc_dialog_pick_folder(const char *title, char *out, size_t size);
+
+/** Show \a folder in the system file manager. False when no file manager could be started. Paths
+ * reach the programs as arguments, never through a shell. */
+bool bc_shell_open_folder(const char *folder);
+/** Start \a program detached from the tool, in its own folder. */
+bool bc_shell_run(const char *program);
 
 #ifdef __cplusplus
 }

@@ -45,6 +45,7 @@ static void bc_normalize_list(char *list)
 #  endif
 #  include <windows.h>
 #  include <commdlg.h>
+#  include <shellapi.h>
 #  include <shlobj.h>
 
 #  define BC_WBUFFER 65536
@@ -181,8 +182,99 @@ BC_DialogResult bc_dialog_pick_folder(const char *title, char *out, size_t size)
   return BC_DIALOG_OK;
 }
 
+/** ShellExecute on \a path from \a dir: the file manager for a folder, the program itself for an
+ * executable. */
+static bool bc_shell_execute(const char *path, const char *dir)
+{
+  wchar_t *wpath = bc_utf16(path);
+  wchar_t *wdir = dir ? bc_utf16(dir) : NULL;
+  /* Values above 32 mean success (an HINSTANCE kept for 16-bit compatibility). */
+  const INT_PTR r = wpath ? (INT_PTR)ShellExecuteW(NULL, L"open", wpath, NULL, wdir, SW_SHOWNORMAL) : 0;
+  free(wpath);
+  free(wdir);
+  return r > 32;
+}
+
+bool bc_shell_open_folder(const char *folder)
+{
+  return bc_shell_execute(folder, NULL);
+}
+
+bool bc_shell_run(const char *program)
+{
+  char dir[BC_PATH_MAX];
+  bc_path_dirname(dir, sizeof(dir), program);
+  return bc_shell_execute(program, dir);
+}
+
 /* ============================================================================================ */
 #else /* macOS and Linux: run a helper and read the selection from its output. */
+
+#  include <errno.h>
+#  include <fcntl.h>
+#  include <sys/wait.h>
+#  include <unistd.h>
+
+/** Start argv[0] (looked up in PATH when \a search) as a grandchild in its own session: it
+ * outlives the tool and is never left as its zombie. A close-on-exec pipe reports whether the exec
+ * itself succeeded. Between fork and exec only async-signal-safe calls. */
+static bool bc_spawn_detached(char *const argv[], const char *dir, const bool search)
+{
+  int status_pipe[2];
+  if (pipe(status_pipe) != 0) {
+    return false;
+  }
+  fcntl(status_pipe[1], F_SETFD, FD_CLOEXEC);
+  const pid_t pid = fork();
+  if (pid == 0) {
+    close(status_pipe[0]);
+    if (fork() == 0) {
+      setsid();
+      if (dir == NULL || chdir(dir) == 0) {
+        if (search) {
+          execvp(argv[0], argv);
+        }
+        else {
+          execv(argv[0], argv);
+        }
+      }
+      const int error = errno;
+      (void)!write(status_pipe[1], &error, sizeof(error));
+      _exit(127);
+    }
+    _exit(0);
+  }
+  close(status_pipe[1]);
+  if (pid < 0) {
+    close(status_pipe[0]);
+    return false;
+  }
+  int child_status;
+  waitpid(pid, &child_status, 0);
+  /* End of file: the exec closed the write end. Data: the errno of a failed exec. */
+  int error = 0;
+  const ssize_t n = read(status_pipe[0], &error, sizeof(error));
+  close(status_pipe[0]);
+  return n == 0;
+}
+
+bool bc_shell_open_folder(const char *folder)
+{
+#  ifdef __APPLE__
+  char *const argv[] = {(char *)"open", (char *)folder, NULL};
+#  else
+  char *const argv[] = {(char *)"xdg-open", (char *)folder, NULL};
+#  endif
+  return bc_spawn_detached(argv, NULL, true);
+}
+
+bool bc_shell_run(const char *program)
+{
+  char dir[BC_PATH_MAX];
+  bc_path_dirname(dir, sizeof(dir), program);
+  char *const argv[] = {(char *)program, NULL};
+  return bc_spawn_detached(argv, dir, false);
+}
 
 /** Run \a command (constant text only) and capture its output. Returns the exit status, 127 when
  * the helper is not installed. */

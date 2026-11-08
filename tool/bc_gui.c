@@ -40,6 +40,19 @@
 #define BC_LOG_LINES 256
 #define BC_LOG_VISIBLE 7
 #define BC_JOB_BUDGET 0.012
+#define BC_STATUS_H 26
+/* raygui's icons, drawn at one pixel per texel (RAYGUI_ICON_SIZE, private to its implementation). */
+#define BC_ICON_SIZE 16
+/* Seconds between two checks of the files the fields name: they may appear while the tool is
+ * open (the runtime copied into the game folder). Edits check again at once. */
+#define BC_CHECK_PERIOD 1.0
+
+/* Modifier of the keyboard shortcuts. */
+#ifdef __APPLE__
+#  define BC_SHORTCUT "Cmd"
+#else
+#  define BC_SHORTCUT "Ctrl"
+#endif
 
 typedef enum BC_Pending {
   BC_PENDING_NONE,
@@ -53,6 +66,27 @@ typedef struct BC_LogLine {
   BC_LogLevel level;
   char text[320];
 } BC_LogLine;
+
+/** What a field check found. A note is a few words drawn inside the field. */
+typedef enum BC_FieldState {
+  BC_FIELD_NONE,
+  BC_FIELD_OK,
+  BC_FIELD_ERROR,
+} BC_FieldState;
+
+typedef struct BC_Field {
+  BC_FieldState state;
+  const char *note;
+} BC_Field;
+
+/** Readiness of the project: per field, and what still blocks Encrypt. A subset of the checks of
+ * bc_job_create, so a disabled Encrypt never blocks an export the job would accept. */
+typedef struct BC_Check {
+  BC_Field source, output, runtime, main, icon, provider;
+  bool no_inputs;
+  /** What to do before encrypting, empty when ready. */
+  char todo[512];
+} BC_Check;
 
 typedef struct BC_Gui {
   BC_Project project;
@@ -77,6 +111,8 @@ typedef struct BC_Gui {
   bool source_edit, output_edit, player_edit, main_edit, game_edit;
   bool icon_edit, version_edit, company_edit, copyright_edit;
   bool key_file_edit, provider_edit, url_edit, update_edit, data_edit;
+  /** Open dropdowns: drawn last, over the rows below them. */
+  bool check_edit, key_edit;
 
   char **items;
   int item_count;
@@ -90,6 +126,19 @@ typedef struct BC_Gui {
   BC_LogLine log[BC_LOG_LINES];
   int log_count;
   int log_next;
+  /** Newest messages scrolled past, 0 when following the log. */
+  int log_scroll;
+
+  /** Bumped by every change of the project; the check follows it. */
+  unsigned revision;
+  unsigned check_revision;
+  double check_time;
+  BC_Check check;
+
+  /** After a successful export: the game folder and executable, for Open and Run. */
+  bool built;
+  char built_dir[BC_PATH_MAX];
+  char built_exe[BC_PATH_MAX];
 
   BC_Pending pending;
   char pending_path[BC_PATH_MAX];
@@ -111,6 +160,9 @@ static void bc_gui_log(void *user, BC_LogLevel level, const char *message)
   if (g->log_count < BC_LOG_LINES) {
     g->log_count++;
   }
+  if (g->log_scroll > 0 && g->log_scroll < g->log_count - 1) {
+    g->log_scroll++; /* A reader scrolled back keeps the lines in front of them. */
+  }
   fprintf(level == BC_LOG_INFO ? stdout : stderr, "%s\n", message);
 }
 
@@ -122,6 +174,20 @@ static void bc_gui_logf(BC_Gui *g, BC_LogLevel level, const char *format, ...)
   vsnprintf(message, sizeof(message), format, args);
   va_end(args);
   bc_gui_log(g, level, message);
+}
+
+/** The whole log, oldest first, to the clipboard. */
+static void bc_gui_copy_log(BC_Gui *g)
+{
+  static char text[BC_LOG_LINES * (sizeof(((BC_LogLine *)0)->text) + 1)];
+  size_t n = 0;
+  for (int i = g->log_count - 1; i >= 0; i--) {
+    const BC_LogLine *line = &g->log[(g->log_next - 1 - i + BC_LOG_LINES) % BC_LOG_LINES];
+    n += (size_t)snprintf(text + n, sizeof(text) - n, "%s\n", line->text);
+  }
+  SetClipboardText(text);
+  g->log_scroll = 0; /* Back to the newest line: the confirmation. */
+  bc_gui_log(g, BC_LOG_INFO, "Log copied to the clipboard");
 }
 
 /* -------------------------------------------------------------------------------------------- */
@@ -140,6 +206,7 @@ static void bc_gui_update_title(BC_Gui *g)
 
 static void bc_gui_set_modified(BC_Gui *g)
 {
+  g->revision++;
   if (!g->modified) {
     g->modified = true;
     bc_gui_update_title(g);
@@ -150,6 +217,7 @@ static void bc_gui_set_modified(BC_Gui *g)
  * the main file marked. */
 static void bc_gui_rebuild_items(BC_Gui *g)
 {
+  g->revision++;
   for (int i = 0; i < g->item_count; i++) {
     free(g->items[i]);
   }
@@ -315,6 +383,7 @@ static void bc_gui_load(BC_Gui *g, const char *path)
   bc_path_make_absolute(g->project_path, sizeof(g->project_path), path);
   g->modified = false;
   g->list_active = -1;
+  g->built = false;
   bc_gui_rebuild_items(g);
   bc_gui_update_title(g);
   bc_gui_logf(g, BC_LOG_INFO, "Opened %s", g->project_path);
@@ -361,6 +430,7 @@ static void bc_gui_reset(BC_Gui *g)
   g->project_path[0] = '\0';
   g->modified = false;
   g->list_active = -1;
+  g->built = false;
   bc_gui_rebuild_items(g);
   bc_gui_update_title(g);
 }
@@ -423,6 +493,8 @@ static void bc_gui_start(BC_Gui *g)
   bc_tool_launcher_path(launcher, sizeof(launcher));
   g->job = bc_job_create(&g->project, bc_build_key(), launcher, bc_gui_log, g);
   g->progress = 0.0f;
+  g->built = false;
+  g->log_scroll = 0;
   if (g->job != NULL) {
     g->job_start = GetTime();
   }
@@ -446,15 +518,194 @@ static void bc_gui_tick_job(BC_Gui *g)
   }
   if (result == 0) {
     bc_gui_logf(g, BC_LOG_INFO, "Finished in %.2f s", GetTime() - g->job_start);
+    char name[BC_GAME_NAME_MAX + 8];
+    bool is_default;
+    bc_gui_effective_game_name(g, name, BC_GAME_NAME_MAX, &is_default);
+    strcat(name, bc_exe_extension());
+    snprintf(g->built_dir, sizeof(g->built_dir), "%s", g->project.output_dir);
+    g->built = bc_path_join(g->built_exe, sizeof(g->built_exe), g->built_dir, name);
   }
   else {
     bc_gui_log(g, BC_LOG_ERROR, "Encryption failed");
   }
   bc_gui_stop(g, NULL);
+  g->revision++; /* Outputs exist now. */
+}
+
+/* -------------------------------------------------------------------------------------------- */
+/* Readiness */
+
+static void bc_field_set(BC_Field *f, const BC_FieldState state, const char *note)
+{
+  f->state = state;
+  f->note = note;
+}
+
+static void bc_todo(BC_Check *c, const char *action)
+{
+  const size_t n = strlen(c->todo);
+  snprintf(c->todo + n, sizeof(c->todo) - n, "%s%s", n ? "  \xc2\xb7  " : "", action);
+}
+
+/** Check what the fields name. Only stat calls, and only on change or every BC_CHECK_PERIOD:
+ * nothing per frame. An empty required field is no error: its placeholder says "Required" and the
+ * Encrypt row lists it, so a new project does not open in red. */
+static void bc_gui_refresh_check(BC_Gui *g)
+{
+  if (g->check_revision == g->revision && GetTime() - g->check_time < BC_CHECK_PERIOD) {
+    return;
+  }
+  g->check_revision = g->revision;
+  g->check_time = GetTime();
+  const BC_Project *p = &g->project;
+  BC_Check *c = &g->check;
+  memset(c, 0, sizeof(*c));
+
+  if (p->source_root[0] == '\0') {
+    bc_field_set(&c->source, BC_FIELD_NONE, NULL);
+    bc_todo(c, "set the source folder");
+  }
+  else if (!bc_is_dir(p->source_root)) {
+    bc_field_set(&c->source, BC_FIELD_ERROR, "not found");
+    bc_todo(c, "the source folder does not exist");
+  }
+  else {
+    bc_field_set(&c->source, BC_FIELD_OK, NULL);
+  }
+
+  if (p->output_dir[0] == '\0') {
+    bc_field_set(&c->output, BC_FIELD_NONE, NULL);
+    bc_todo(c, "set the output folder");
+  }
+  else if (p->source_root[0] != '\0' && bc_path_is_inside(p->output_dir, p->source_root)) {
+    bc_field_set(&c->output, BC_FIELD_ERROR, "holds the sources");
+    bc_todo(c, "choose an output folder outside the source folder");
+  }
+  else {
+    bc_field_set(&c->output, BC_FIELD_OK, NULL);
+  }
+
+  /* The runtime lives in the game folder: nothing to check before there is one. */
+  char path[BC_PATH_MAX];
+  if (p->player[0] == '\0') {
+    bc_field_set(&c->runtime, BC_FIELD_NONE, NULL);
+    bc_todo(c, "set the UPBGE runtime");
+  }
+  else if (c->output.state == BC_FIELD_OK) {
+    if (bc_path_join(path, sizeof(path), p->output_dir, p->player) && bc_is_file(path)) {
+      bc_field_set(&c->runtime, BC_FIELD_OK, NULL);
+    }
+    else {
+      bc_field_set(&c->runtime, BC_FIELD_ERROR, "not found");
+      bc_todo(c, "copy the UPBGE runtime into the output folder");
+    }
+  }
+
+  bool listed = false;
+  for (int i = 0; i < p->input_count && !listed; i++) {
+    listed = bc_path_is_inside(p->inputs[i], p->main);
+  }
+  if (p->main[0] == '\0') {
+    bc_field_set(&c->main, BC_FIELD_NONE, NULL);
+    bc_todo(c, "set the main file");
+  }
+  else if (!bc_is_file(p->main)) {
+    bc_field_set(&c->main, BC_FIELD_ERROR, "not found");
+    bc_todo(c, "the main file does not exist");
+  }
+  else if (!bc_path_has_extension(p->main, ".blend")) {
+    bc_field_set(&c->main, BC_FIELD_ERROR, "not a .blend");
+    bc_todo(c, "the main file must be a .blend");
+  }
+  else if (p->input_count > 0 && !listed) {
+    bc_field_set(&c->main, BC_FIELD_ERROR, "not listed");
+    bc_todo(c, "add the main file to the files to encrypt");
+  }
+  else {
+    bc_field_set(&c->main, BC_FIELD_OK, NULL);
+  }
+
+  if (p->input_count == 0) {
+    c->no_inputs = true;
+    bc_todo(c, "add files to encrypt");
+  }
+
+  if (bc_brand_supported() && p->icon[0] != '\0') {
+    if (bc_is_file(p->icon)) {
+      bc_field_set(&c->icon, BC_FIELD_OK, NULL);
+    }
+    else {
+      bc_field_set(&c->icon, BC_FIELD_ERROR, "not found");
+      bc_todo(c, "the icon does not exist");
+    }
+  }
+
+  if (p->key_mode == BC_KEY_ONLINE) {
+    if (p->key_provider[0] == '\0') {
+      bc_field_set(&c->provider, BC_FIELD_NONE, NULL);
+      bc_todo(c, "set the key provider");
+    }
+    else if (c->output.state == BC_FIELD_OK) {
+      if (bc_path_join(path, sizeof(path), p->output_dir, p->key_provider) && bc_is_file(path)) {
+        bc_field_set(&c->provider, BC_FIELD_OK, NULL);
+      }
+      else {
+        bc_field_set(&c->provider, BC_FIELD_ERROR, "not found");
+        bc_todo(c, "copy the key provider into the output folder");
+      }
+    }
+  }
+}
+
+static bool bc_gui_ready(BC_Gui *g)
+{
+  bc_gui_refresh_check(g);
+  return g->check.todo[0] == '\0';
+}
+
+/** A text field or a dropdown has the keyboard: shortcuts stay off. */
+static bool bc_gui_editing(const BC_Gui *g)
+{
+  return g->source_edit || g->output_edit || g->player_edit || g->main_edit || g->game_edit ||
+         g->icon_edit || g->version_edit || g->company_edit || g->copyright_edit ||
+         g->key_file_edit || g->provider_edit || g->url_edit || g->update_edit || g->data_edit ||
+         g->check_edit || g->key_edit;
 }
 
 /* -------------------------------------------------------------------------------------------- */
 /* Input events */
+
+/** Ctrl (Cmd on macOS) + N, O, S, Shift+S and Enter. \return true when one was used. */
+static bool bc_gui_shortcuts(BC_Gui *g)
+{
+  if (g->pending != BC_PENDING_NONE || g->job != NULL || bc_gui_editing(g)) {
+    return false;
+  }
+#ifdef __APPLE__
+  const bool command = IsKeyDown(KEY_LEFT_SUPER) || IsKeyDown(KEY_RIGHT_SUPER);
+#else
+  const bool command = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
+#endif
+  if (!command) {
+    return false;
+  }
+  if (IsKeyPressed(KEY_N)) {
+    bc_gui_request(g, BC_PENDING_NEW, NULL);
+  }
+  else if (IsKeyPressed(KEY_O)) {
+    bc_gui_request(g, BC_PENDING_OPEN_DIALOG, NULL);
+  }
+  else if (IsKeyPressed(KEY_S)) {
+    bc_gui_save(g, IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT));
+  }
+  else if ((IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER)) && bc_gui_ready(g)) {
+    bc_gui_start(g);
+  }
+  else {
+    return false;
+  }
+  return true;
+}
 
 static void bc_gui_handle_drop(BC_Gui *g)
 {
@@ -490,6 +741,10 @@ static Rectangle bc_rect(float x, float y, float w, float h)
 /* Log levels: yellow and red, so a warning never reads as the accent. */
 #define BC_RGB_WARNING 0xfbbf24
 #define BC_RGB_ERROR 0xf87171
+/* A field that checks out: green, never confused with the accent. */
+#define BC_RGB_OK 0x4ade80
+/* Placeholder text of an empty field: dimmer than labels, still legible. */
+#define BC_RGB_HINT 0x707070
 
 static void bc_gui_theme_upbge(void)
 {
@@ -744,9 +999,99 @@ static void bc_gui_draw_tip(void)
   }
 }
 
-/** Plain text box mirroring \a value, trimmed when confirmed. Returns true when \a value changed. */
+/** \a s cut at its end with "..." to fit \a width: hints read from their start. */
+static void bc_fit_right(const char *s, const float width, char *out, const size_t size)
+{
+  const Font font = GuiGetFont();
+  const float spacing = (float)GuiGetStyle(DEFAULT, TEXT_SPACING);
+  snprintf(out, size, "%s", s);
+  size_t n = strlen(out);
+  while (n > 0 && MeasureTextEx(font, out, BC_TEXT_SIZE, spacing).x > width) {
+    n--;
+    snprintf(out, size, "%.*s...", (int)n, s);
+  }
+}
+
+/** Where a text box draws its text (raygui: border, then padding), vertically centered. */
+static Vector2 bc_text_origin(const Rectangle bounds)
+{
+  const Vector2 origin = {bounds.x + (float)(GuiGetStyle(TEXTBOX, BORDER_WIDTH) + GuiGetStyle(TEXTBOX, TEXT_PADDING)),
+                          bounds.y + (bounds.height - BC_TEXT_SIZE) / 2};
+  return origin;
+}
+
+/** Grey hint in an empty field that is not being edited: what goes there, or what empty means. */
+static void bc_draw_placeholder(const Rectangle bounds, const char *hint, const float reserved)
+{
+  if (hint == NULL || GuiGetState() == STATE_DISABLED) {
+    return;
+  }
+  char text[BC_PATH_MAX];
+  bc_fit_right(hint, bounds.width - 16 - reserved, text, sizeof(text));
+  DrawTextEx(GuiGetFont(), text, bc_text_origin(bounds), BC_TEXT_SIZE, (float)GuiGetStyle(DEFAULT, TEXT_SPACING), GetColor((unsigned int)BC_RGB(BC_RGB_HINT)));
+}
+
+/** Width a field check takes at the right end of its field. */
+static float bc_field_width(const BC_Field *f)
+{
+  if (f == NULL || f->state == BC_FIELD_NONE) {
+    return 0;
+  }
+  if (f->state == BC_FIELD_OK || f->note == NULL) {
+    return BC_ICON_SIZE + BC_GAP;
+  }
+  return MeasureTextEx(GuiGetFont(), f->note, BC_TEXT_SIZE, (float)GuiGetStyle(DEFAULT, TEXT_SPACING)).x + 2 * BC_GAP;
+}
+
+/** A field check over a field that is not being edited: a green tick when it checks out; a red
+ * frame and a short note at its right end when not. */
+static void bc_draw_field(const Rectangle bounds, const BC_Field *f)
+{
+  if (f == NULL || f->state == BC_FIELD_NONE || GuiGetState() == STATE_DISABLED) {
+    return;
+  }
+  const float cy = bounds.y + bounds.height / 2;
+  if (f->state == BC_FIELD_OK) {
+    /* A tick two pixels thick: raygui's icon is one pixel and reads grey at this size. */
+    const float x0 = bounds.x + bounds.width - BC_ICON_SIZE - BC_GAP;
+    const Color green = GetColor((unsigned int)BC_RGB(BC_RGB_OK));
+    const Vector2 a = {x0 + 2, cy}, b = {x0 + 6, cy + 4}, c = {x0 + 14, cy - 5};
+    DrawLineEx(a, b, 2.2f, green);
+    DrawLineEx(b, c, 2.2f, green);
+    return;
+  }
+  const Color red = GetColor((unsigned int)BC_RGB(BC_RGB_ERROR));
+  DrawRectangleLinesEx(bounds, 1, red);
+  if (f->note != NULL) {
+    const float spacing = (float)GuiGetStyle(DEFAULT, TEXT_SPACING);
+    const float w = MeasureTextEx(GuiGetFont(), f->note, BC_TEXT_SIZE, spacing).x;
+    const Vector2 position = {bounds.x + bounds.width - BC_GAP - w, bounds.y + (bounds.height - BC_TEXT_SIZE) / 2};
+    DrawTextEx(GuiGetFont(), f->note, position, BC_TEXT_SIZE, spacing, red);
+  }
+}
+
+/** The one action of the window in the accent color. Disabled, it takes the disabled style. */
+static bool bc_primary_button(const Rectangle bounds, const char *text)
+{
+  const int props[] = {BASE_COLOR_NORMAL, BORDER_COLOR_NORMAL, TEXT_COLOR_NORMAL, BASE_COLOR_FOCUSED, TEXT_COLOR_FOCUSED};
+  const int values[] = {BC_RGB(BC_RGB_ACCENT), BC_RGB(BC_RGB_ACCENT), BC_RGB(BC_RGB_ON_ACCENT), BC_RGB(0xfbb072), BC_RGB(BC_RGB_ON_ACCENT)};
+  int saved[5];
+  for (int i = 0; i < 5; i++) {
+    saved[i] = GuiGetStyle(BUTTON, props[i]);
+    GuiSetStyle(BUTTON, props[i], values[i]);
+  }
+  const bool pressed = GuiButton(bounds, text) != 0;
+  for (int i = 0; i < 5; i++) {
+    GuiSetStyle(BUTTON, props[i], saved[i]);
+  }
+  return pressed;
+}
+
+/** Plain text box mirroring \a value, trimmed when confirmed. \a placeholder shows while it is
+ * empty. Returns true when \a value changed. */
 static bool bc_gui_text_field(Rectangle bounds,
                               const char *tooltip,
+                              const char *placeholder,
                               char *text,
                               const size_t text_size,
                               char *value,
@@ -777,15 +1122,21 @@ static bool bc_gui_text_field(Rectangle bounds,
     }
     *edit = !*edit;
   }
+  if (!*edit && value[0] == '\0') {
+    bc_draw_placeholder(bounds, placeholder, 0);
+  }
   return changed;
 }
 
-/** Editable path row: label, text box, browse button. Returns true when the button was hit and
- * sets *r_committed when an edit was just confirmed. */
+/** Editable path row: label, text box, browse button. \a placeholder shows while it is empty and
+ * \a field (may be NULL) tells whether what it names checks out. Returns true when the button was
+ * hit and sets *r_committed when an edit was just confirmed. */
 static bool bc_gui_path_row(float y,
                             float width,
                             const char *label,
                             const char *tooltip,
+                            const char *placeholder,
+                            const BC_Field *field,
                             const char *value,
                             char *text,
                             bool *edit,
@@ -793,13 +1144,23 @@ static bool bc_gui_path_row(float y,
 {
   const float x = BC_MARGIN + BC_GAP;
   const float box_w = width - BC_LABEL_W - BC_BUTTON_W - 4 * BC_GAP;
+  const Rectangle box = bc_rect(x + BC_LABEL_W, y, box_w, BC_ROW);
   GuiLabel(bc_rect(x, y, BC_LABEL_W, BC_ROW), label);
-  bc_tip(bc_rect(x + BC_LABEL_W, y, box_w, BC_ROW), tooltip);
+  bc_tip(box, tooltip);
   *r_committed = false;
+  /* The path gives up its start, never the check at the right end. */
+  const float reserved = bc_field_width(field);
   if (!*edit) {
-    bc_fit_left(value, box_w - 16, text, BC_PATH_MAX);
+    bc_fit_left(value, box_w - 16 - reserved, text, BC_PATH_MAX);
   }
-  if (GuiTextBox(bc_rect(x + BC_LABEL_W, y, box_w, BC_ROW), text, BC_PATH_MAX - 1, *edit)) {
+  const bool toggled = GuiTextBox(box, text, BC_PATH_MAX - 1, *edit) != 0;
+  if (!*edit && !toggled) {
+    if (value[0] == '\0') {
+      bc_draw_placeholder(box, placeholder, reserved);
+    }
+    bc_draw_field(box, field);
+  }
+  if (toggled) {
     if (*edit) {
       *r_committed = true;
     }
@@ -823,8 +1184,15 @@ static void bc_gui_draw(BC_Gui *g)
   BC_DialogResult r;
 
   if (modal) {
+    g->check_edit = g->key_edit = false;
+  }
+  /* An open dropdown takes every click until it closes: the rows under its list must not react. */
+  const bool dropdown_open = g->check_edit || g->key_edit;
+  if (modal || dropdown_open) {
     GuiLock();
   }
+  bc_gui_refresh_check(g);
+  const BC_Check *check = &g->check;
 
   /* Toolbar. */
   float y = BC_MARGIN;
@@ -832,39 +1200,41 @@ static void bc_gui_draw(BC_Gui *g)
     GuiDisable();
   }
   float x = BC_MARGIN;
+  bc_tip(bc_rect(x, y, BC_BUTTON_W, BC_ROW), "New project (" BC_SHORTCUT "+N)");
   if (GuiButton(bc_rect(x, y, BC_BUTTON_W, BC_ROW), "New")) {
     bc_gui_request(g, BC_PENDING_NEW, NULL);
   }
   x += BC_BUTTON_W + BC_GAP;
+  bc_tip(bc_rect(x, y, BC_BUTTON_W, BC_ROW), "Open a project (" BC_SHORTCUT "+O)");
   if (GuiButton(bc_rect(x, y, BC_BUTTON_W, BC_ROW), "Open...")) {
     bc_gui_request(g, BC_PENDING_OPEN_DIALOG, NULL);
   }
   x += BC_BUTTON_W + BC_GAP;
+  bc_tip(bc_rect(x, y, BC_BUTTON_W, BC_ROW), "Save the project (" BC_SHORTCUT "+S)");
   if (GuiButton(bc_rect(x, y, BC_BUTTON_W, BC_ROW), "Save")) {
     bc_gui_save(g, false);
   }
   x += BC_BUTTON_W + BC_GAP;
+  bc_tip(bc_rect(x, y, BC_BUTTON_W, BC_ROW), "Save the project under another name (" BC_SHORTCUT "+Shift+S)");
   if (GuiButton(bc_rect(x, y, BC_BUTTON_W, BC_ROW), "Save as...")) {
     bc_gui_save(g, true);
   }
-  x += BC_BUTTON_W + 2 * BC_GAP;
-  char key_label[64];
-  snprintf(key_label, sizeof(key_label), "Key %s", g->fingerprint);
-  bc_tip(bc_rect(W - BC_MARGIN - 260, y, 260, BC_ROW),
-         "Fingerprint of the key built into this tool: the launcher must come from the same build");
-  GuiLabel(bc_rect(W - BC_MARGIN - 260, y, 260, BC_ROW), key_label);
   y += BC_ROW + 2 * BC_GAP;
 
   /* Settings. */
   const bool online = g->project.key_mode == BC_KEY_ONLINE;
   const bool key_file_row = g->project.key_mode != BC_KEY_BUILD;
-  const float settings_h = (float)((online ? 12 : key_file_row ? 10 : 9) * (BC_ROW + BC_GAP) + 2 * BC_GAP);
+  /* Icon and version information only exist for Windows games: hidden where this build cannot make
+   * one (the project keeps them, the job ignores them with a warning). */
+  const bool brand_rows = bc_brand_supported();
+  const int settings_rows = (online ? 12 : key_file_row ? 10 : 9) - (brand_rows ? 0 : 2);
+  const float settings_h = (float)(settings_rows * (BC_ROW + BC_GAP) + 2 * BC_GAP);
   bc_group_box(bc_rect(BC_MARGIN, y, inner, settings_h), "Settings");
   y += 2 * BC_GAP;
   bool committed;
   char resolved[BC_PATH_MAX];
 
-  if (bc_gui_path_row(y, inner, "Source folder", "Root of the game sources: .blend files, Python modules, data files", g->project.source_root, g->source_text, &g->source_edit, &committed)) {
+  if (bc_gui_path_row(y, inner, "Source folder", "Root of the game sources: .blend files, Python modules, data files", "Required: drop your game folder on the window", &check->source, g->project.source_root, g->source_text, &g->source_edit, &committed)) {
     r = bc_dialog_pick_folder("Source folder", path, sizeof(path));
     if (r == BC_DIALOG_OK) {
       snprintf(g->project.source_root, sizeof(g->project.source_root), "%s", path);
@@ -883,7 +1253,14 @@ static void bc_gui_draw(BC_Gui *g)
   }
   y += BC_ROW + BC_GAP;
 
-  if (bc_gui_path_row(y, inner, "Output folder", "Encrypted copy of the source tree, with the same names: this is the game folder you ship", g->project.output_dir, g->output_text, &g->output_edit, &committed)) {
+  char output_hint[BC_PATH_MAX];
+  if (g->project.source_root[0] != '\0') {
+    snprintf(output_hint, sizeof(output_hint), "Required, outside the source folder: for example %s_build", bc_path_basename(g->project.source_root));
+  }
+  else {
+    snprintf(output_hint, sizeof(output_hint), "Required: the game folder you ship, outside the source folder");
+  }
+  if (bc_gui_path_row(y, inner, "Output folder", "Encrypted copy of the source tree, with the same names: this is the game folder you ship", output_hint, &check->output, g->project.output_dir, g->output_text, &g->output_edit, &committed)) {
     r = bc_dialog_pick_folder("Output folder", path, sizeof(path));
     if (r == BC_DIALOG_OK) {
       snprintf(g->project.output_dir, sizeof(g->project.output_dir), "%s", path);
@@ -914,12 +1291,11 @@ static void bc_gui_draw(BC_Gui *g)
   const float manifest_label_w = MeasureTextEx(GuiGetFont(), "Manifest", BC_TEXT_SIZE, text_spacing).x + 3 * BC_GAP;
   const float manifest_group_w = 2 * manifest_item_w + GuiGetStyle(TOGGLE, GROUP_PADDING);
   const float manifest_x = BC_MARGIN + inner - 2 * BC_GAP - manifest_group_w;
-  /* Integrity level: a combo box between the name and the manifest group. */
+  /* Integrity level: a dropdown between the name and the manifest group, drawn last (its list
+   * opens over the rows below). Dropdowns: the widest item, then room for the arrow. */
   const float check_label_w = MeasureTextEx(GuiGetFont(), "Check", BC_TEXT_SIZE, text_spacing).x + 2 * BC_GAP;
-  /* The selector button shows "2/3": the default style is too narrow for this font. */
-  const int combo_button_w = (int)(MeasureTextEx(GuiGetFont(), "3/3", BC_TEXT_SIZE, text_spacing).x + 3 * BC_GAP);
-  const float check_combo_w = MeasureTextEx(GuiGetFont(), "+ Libraries", BC_TEXT_SIZE, text_spacing).x + 4 * BC_GAP +
-                              combo_button_w + GuiGetStyle(COMBOBOX, COMBO_BUTTON_SPACING);
+  const float dropdown_extra = 3 * BC_GAP + (float)(GuiGetStyle(DROPDOWNBOX, ARROW_PADDING) + BC_ICON_SIZE);
+  const float check_combo_w = MeasureTextEx(GuiGetFont(), "+ Libraries", BC_TEXT_SIZE, text_spacing).x + dropdown_extra;
   const float check_x = manifest_x - manifest_label_w - BC_GAP - check_combo_w;
   const float game_box_w = check_x - check_label_w - BC_GAP - (BC_MARGIN + BC_GAP + BC_LABEL_W);
   bc_tip(bc_rect(BC_MARGIN + BC_GAP + BC_LABEL_W, y, game_box_w, BC_ROW),
@@ -949,20 +1325,7 @@ static void bc_gui_draw(BC_Gui *g)
     g->game_edit = !g->game_edit;
   }
   GuiLabel(bc_rect(check_x - check_label_w, y, check_label_w, BC_ROW), "Check");
-  bc_tip(bc_rect(check_x, y, check_combo_w, BC_ROW),
-         "What the game executable checks before every launch. Player: the player executable. + Libraries: "
-         "also every .dll, .so, .dylib, .pyd and .exe of the game folder (a proxy DLL would run inside the "
-         "player). + Python: also .py, .pth and .zip files, and Python bytecode is removed (the game then "
-         "compiles its scripts at every launch). Each level costs a hash of those files at every launch");
-  int integrity = (int)g->project.integrity;
-  const int default_button_w = GuiGetStyle(COMBOBOX, COMBO_BUTTON_WIDTH);
-  GuiSetStyle(COMBOBOX, COMBO_BUTTON_WIDTH, combo_button_w);
-  GuiComboBox(bc_rect(check_x, y, check_combo_w, BC_ROW), "Player;+ Libraries;+ Python", &integrity);
-  GuiSetStyle(COMBOBOX, COMBO_BUTTON_WIDTH, default_button_w);
-  if (integrity != (int)g->project.integrity) {
-    g->project.integrity = (BC_Integrity)integrity;
-    bc_gui_set_modified(g);
-  }
+  const Rectangle check_box = bc_rect(check_x, y, check_combo_w, BC_ROW);
   GuiLabel(bc_rect(manifest_x - manifest_label_w, y, manifest_label_w, BC_ROW), "Manifest");
   bc_tip(bc_rect(manifest_x, y, manifest_group_w, BC_ROW),
          "Embedded: one self-contained game executable. Separate file: the game executable is an "
@@ -976,7 +1339,7 @@ static void bc_gui_draw(BC_Gui *g)
   }
   y += BC_ROW + BC_GAP;
 
-  if (bc_gui_path_row(y, inner, "Player", "UPBGE player inside the game folder, with its runtime (DLLs, python, datafiles) next to it. It is hashed: the game refuses any other player", g->project.player, g->player_text, &g->player_edit, &committed)) {
+  if (bc_gui_path_row(y, inner, "UPBGE runtime", "UPBGE player inside the game folder, with its runtime (DLLs, python, datafiles) next to it. It is hashed: the game refuses any other player", "Required: the UPBGE player inside the game folder", &check->runtime, g->project.player, g->player_text, &g->player_edit, &committed)) {
     r = bc_dialog_open_files("UPBGE player executable", NULL, false, path, sizeof(path));
     if (r == BC_DIALOG_OK) {
       bc_gui_set_player(g, path);
@@ -990,7 +1353,7 @@ static void bc_gui_draw(BC_Gui *g)
   }
   y += BC_ROW + BC_GAP;
 
-  if (bc_gui_path_row(y, inner, "Main file", "The .blend the game executable starts", g->project.main, g->main_text, &g->main_edit, &committed)) {
+  if (bc_gui_path_row(y, inner, "Main file", "The .blend the game executable starts", "Required: the .blend the game starts", &check->main, g->project.main, g->main_text, &g->main_edit, &committed)) {
     r = bc_dialog_open_files("Main .blend file", "blend", false, path, sizeof(path));
     if (r == BC_DIALOG_OK) {
       snprintf(g->project.main, sizeof(g->project.main), "%s", path);
@@ -1017,13 +1380,10 @@ static void bc_gui_draw(BC_Gui *g)
   }
   y += BC_ROW + BC_GAP;
 
-  /* Windows branding: greyed out where it cannot apply (the launcher of this build is not a
-   * Windows executable). Any value set brands both the game executable and the player. */
-  const bool brand_off = !bc_brand_supported() && !running;
-  if (brand_off) {
-    GuiDisable();
-  }
-  if (bc_gui_path_row(y, inner, "Icon", "Windows: icon of the game executable and of the game window (taskbar, Alt-Tab), any sizes. Empty: keep the UPBGE icon", g->project.icon, g->icon_text, &g->icon_edit, &committed)) {
+  /* Windows branding, only where this build makes Windows games. Any value set brands both the
+   * game executable and the player. */
+  if (brand_rows) {
+  if (bc_gui_path_row(y, inner, "Icon", "Windows: icon of the game executable and of the game window (taskbar, Alt-Tab), any sizes. Empty: keep the UPBGE icon", "Optional: the UPBGE icon", &check->icon, g->project.icon, g->icon_text, &g->icon_edit, &committed)) {
     r = bc_dialog_open_files("Game icon", "ico", false, path, sizeof(path));
     if (r == BC_DIALOG_OK) {
       snprintf(g->project.icon, sizeof(g->project.icon), "%s", path);
@@ -1050,53 +1410,45 @@ static void bc_gui_draw(BC_Gui *g)
     const float company_w = free_w / 2;
     float fx = x0;
     GuiLabel(bc_rect(BC_MARGIN + BC_GAP, y, BC_LABEL_W, BC_ROW), "Version");
-    if (bc_gui_text_field(bc_rect(fx, y, version_w, BC_ROW), "Windows: game version, up to four numbers (1.2.0). Empty: 1.0.0.0", g->version_text, sizeof(g->version_text), g->project.game_version, sizeof(g->project.game_version), &g->version_edit)) {
+    if (bc_gui_text_field(bc_rect(fx, y, version_w, BC_ROW), "Windows: game version, up to four numbers (1.2.0). Empty: 1.0.0.0", "1.0.0.0", g->version_text, sizeof(g->version_text), g->project.game_version, sizeof(g->project.game_version), &g->version_edit)) {
       bc_gui_set_modified(g);
     }
     fx += version_w + BC_GAP;
     GuiLabel(bc_rect(fx + BC_GAP, y, company_label_w, BC_ROW), "Company");
     fx += company_label_w;
-    if (bc_gui_text_field(bc_rect(fx, y, company_w, BC_ROW), "Windows: company shown in the executable properties", g->company_text, sizeof(g->company_text), g->project.company, sizeof(g->project.company), &g->company_edit)) {
+    if (bc_gui_text_field(bc_rect(fx, y, company_w, BC_ROW), "Windows: company shown in the executable properties", "Optional", g->company_text, sizeof(g->company_text), g->project.company, sizeof(g->project.company), &g->company_edit)) {
       bc_gui_set_modified(g);
     }
     fx += company_w + BC_GAP;
     GuiLabel(bc_rect(fx + BC_GAP, y, copyright_label_w, BC_ROW), "Copyright");
     fx += copyright_label_w;
-    if (bc_gui_text_field(bc_rect(fx, y, right - fx, BC_ROW), "Windows: copyright shown in the executable properties", g->copyright_text, sizeof(g->copyright_text), g->project.copyright, sizeof(g->project.copyright), &g->copyright_edit)) {
+    if (bc_gui_text_field(bc_rect(fx, y, right - fx, BC_ROW), "Windows: copyright shown in the executable properties", "Optional", g->copyright_text, sizeof(g->copyright_text), g->project.copyright, sizeof(g->project.copyright), &g->copyright_edit)) {
       bc_gui_set_modified(g);
     }
   }
-  if (brand_off) {
-    GuiEnable();
-  }
   y += BC_ROW + BC_GAP;
+  }
 
   /* Content key: the project's own (masked in the manifest), given by a key server through the
    * provider, or the one compiled into the launcher. */
+  Rectangle key_box;
   {
     const float x0 = BC_MARGIN + BC_GAP + BC_LABEL_W;
     const float right = BC_MARGIN + inner - 2 * BC_GAP;
     const Font font = GuiGetFont();
     const float padding = (float)GuiGetStyle(TOGGLE, GROUP_PADDING);
-    float key_w = MeasureTextEx(font, "Per project", BC_TEXT_SIZE, text_spacing).x + 4 * BC_GAP;
-    const int key_count = 3;
+    /* A dropdown like the check level, drawn last. */
+    float key_w = MeasureTextEx(font, "Per project", BC_TEXT_SIZE, text_spacing).x + dropdown_extra;
     float cache_w = MeasureTextEx(font, "Offline after 1st launch", BC_TEXT_SIZE, text_spacing).x + 2 * BC_GAP;
-    /* Narrow windows: both groups shrink together rather than overlap. Paddings: two inside the
-     * key group, one inside the cache group. */
-    const float needed = key_count * key_w + 2 * cache_w + 3 * padding + 2 * BC_GAP;
+    /* Narrow windows: both shrink together rather than overlap. One padding inside the cache
+     * group. */
+    const float needed = key_w + 2 * cache_w + padding + 2 * BC_GAP;
     if (needed > right - x0) {
       key_w *= (right - x0) / needed;
       cache_w *= (right - x0) / needed;
     }
     GuiLabel(bc_rect(BC_MARGIN + BC_GAP, y, BC_LABEL_W, BC_ROW), "Key");
-    bc_tip(bc_rect(x0, y, (float)key_count * key_w + (float)(key_count - 1) * padding, BC_ROW),
-           "Per project: a key of this project, from its key file, travels masked in the game executable (another game made with this tool has another key). Online: a key server gives it to players who own the game (Steam, Epic...) through the key provider; no shipped file holds it. Build key: the key compiled into this tool and the launcher");
-    int key_mode = (int)g->project.key_mode;
-    GuiToggleGroup(bc_rect(x0, y, key_w, BC_ROW), "Per project;Online;Build key", &key_mode);
-    if (key_mode != (int)g->project.key_mode) {
-      g->project.key_mode = (BC_KeyMode)key_mode;
-      bc_gui_set_modified(g);
-    }
+    key_box = bc_rect(x0, y, key_w, BC_ROW);
     if (online) {
       int cache = g->project.key_cache ? 1 : 0;
       const float cache_x = right - 2 * cache_w - padding;
@@ -1112,7 +1464,18 @@ static void bc_gui_draw(BC_Gui *g)
   }
   if (key_file_row) {
     const char *tip = online ? "Content keys of this game, created on the first export. Keep the file private, back it up and install it on the key server; it must not be inside the game folder. Empty: next to the project file, named after it" : "Key of this project, created on the first export. Keep it private and back it up: updates of the published game need it. It must not be inside the game folder. Empty: next to the project file, named after it";
-    if (bc_gui_path_row(y, inner, "Key file", tip, g->project.key_file, g->key_file_text, &g->key_file_edit, &committed)) {
+    /* Empty: the default key file, shown as the path it resolves to. */
+    char key_hint[BC_PATH_MAX + 16];
+    char key_default[BC_PATH_MAX];
+    if (g->project.project_file[0] != '\0' && bc_project_key_file(&g->project, key_default, sizeof(key_default))) {
+      char shown[BC_PATH_MAX];
+      bc_fit_left(key_default, inner - BC_LABEL_W - BC_BUTTON_W - 4 * BC_GAP - 16 - 120, shown, sizeof(shown));
+      snprintf(key_hint, sizeof(key_hint), "%s  (default)", shown);
+    }
+    else {
+      snprintf(key_hint, sizeof(key_hint), "Next to the project file once it is saved  (default)");
+    }
+    if (bc_gui_path_row(y, inner, "Key file", tip, key_hint, NULL, g->project.key_file, g->key_file_text, &g->key_file_edit, &committed)) {
       r = bc_dialog_save_file("Key file", "key", path, sizeof(path));
       if (r == BC_DIALOG_OK) {
         snprintf(g->project.key_file, sizeof(g->project.key_file), "%s", path);
@@ -1135,10 +1498,14 @@ static void bc_gui_draw(BC_Gui *g)
     const float url_label_w = MeasureTextEx(GuiGetFont(), "URL", BC_TEXT_SIZE, text_spacing).x + 3 * BC_GAP;
     const float provider_w = (right - x0 - BC_BUTTON_W - url_label_w - 2 * BC_GAP) * 0.45f;
     GuiLabel(bc_rect(BC_MARGIN + BC_GAP, y, BC_LABEL_W, BC_ROW), "Provider");
-    if (bc_gui_text_field(bc_rect(x0, y, provider_w, BC_ROW), "Key provider inside the game folder (for example engine/bc_provider_steam.exe): proves to the key server that the player owns the game", g->provider_text, sizeof(g->provider_text), g->project.key_provider, sizeof(g->project.key_provider), &g->provider_edit)) {
+    const Rectangle provider_box = bc_rect(x0, y, provider_w, BC_ROW);
+    if (bc_gui_text_field(provider_box, "Key provider inside the game folder (for example engine/bc_provider_steam.exe): proves to the key server that the player owns the game", "Required: engine/bc_provider_steam.exe, for example", g->provider_text, sizeof(g->provider_text), g->project.key_provider, sizeof(g->project.key_provider), &g->provider_edit)) {
       char entered[BC_PATH_MAX];
       snprintf(entered, sizeof(entered), "%s", g->project.key_provider);
       bc_gui_set_dist_path(g, entered, g->project.key_provider, sizeof(g->project.key_provider), "key provider");
+    }
+    if (!g->provider_edit && g->project.key_provider[0] != '\0') {
+      bc_draw_field(provider_box, &check->provider);
     }
     float fx = x0 + provider_w + BC_GAP;
     if (GuiButton(bc_rect(fx, y, BC_BUTTON_W, BC_ROW), "Browse...")) {
@@ -1153,7 +1520,7 @@ static void bc_gui_draw(BC_Gui *g)
     fx += BC_BUTTON_W;
     GuiLabel(bc_rect(fx + 2 * BC_GAP, y, url_label_w, BC_ROW), "URL");
     fx += url_label_w + BC_GAP;
-    if (bc_gui_text_field(bc_rect(fx, y, right - fx, BC_ROW), "Key server address, given to the provider (https://...). Optional: a provider may know its server", g->url_text, sizeof(g->url_text), g->project.key_url, sizeof(g->project.key_url), &g->url_edit)) {
+    if (bc_gui_text_field(bc_rect(fx, y, right - fx, BC_ROW), "Key server address, given to the provider (https://...). Optional: a provider may know its server", "Optional: https://...", g->url_text, sizeof(g->url_text), g->project.key_url, sizeof(g->project.key_url), &g->url_edit)) {
       bc_gui_set_modified(g);
     }
     y += BC_ROW + BC_GAP;
@@ -1176,7 +1543,7 @@ static void bc_gui_draw(BC_Gui *g)
       GuiLabel(bc_rect(update_x, y, update_label_w, BC_ROW), "Update number");
       char update_value[16];
       snprintf(update_value, sizeof(update_value), "%u", g->project.key_update ? g->project.key_update : 1u);
-      if (bc_gui_text_field(bc_rect(update_x + update_label_w, y, 90, BC_ROW), "Raise it for each update you publish (then install the key file on the key server again). Exports with the same number reuse its key", g->update_text, sizeof(g->update_text), update_value, sizeof(update_value), &g->update_edit)) {
+      if (bc_gui_text_field(bc_rect(update_x + update_label_w, y, 90, BC_ROW), "Raise it for each update you publish (then install the key file on the key server again). Exports with the same number reuse its key", NULL, g->update_text, sizeof(g->update_text), update_value, sizeof(update_value), &g->update_edit)) {
         char *end;
         const unsigned long update = strtoul(update_value, &end, 10);
         if (update_value[0] >= '0' && update_value[0] <= '9' && *end == '\0' && update >= 1 && update <= 0xFFFFFFFFul) {
@@ -1218,10 +1585,11 @@ static void bc_gui_draw(BC_Gui *g)
   /* Files. */
   /* The log gives up lines (down to 3) before the file list gets shorter than its buttons. */
   const float files_min_h = 5 * (BC_ROW + BC_GAP) + 3 * BC_GAP;
-  const float spare = H - y - BC_MARGIN - files_min_h - (BC_ROW + 4 * BC_GAP);
+  const float spare = H - y - BC_MARGIN - files_min_h - (BC_ROW + 5 * BC_GAP + BC_STATUS_H);
   int log_lines = (int)(spare / 24);
   log_lines = log_lines < 3 ? 3 : log_lines > BC_LOG_VISIBLE ? BC_LOG_VISIBLE : log_lines;
-  const float bottom_h = BC_ROW + BC_GAP + (float)log_lines * 24 + 3 * BC_GAP;
+  /* Run row, log, status bar. */
+  const float bottom_h = BC_ROW + (float)log_lines * 24 + 5 * BC_GAP + BC_STATUS_H;
   const float files_h = H - y - bottom_h - BC_MARGIN;
   bc_group_box(bc_rect(BC_MARGIN, y, inner, files_h), "Files to encrypt (drop files or folders here)");
   const float list_x = BC_MARGIN + BC_GAP;
@@ -1241,6 +1609,7 @@ static void bc_gui_draw(BC_Gui *g)
     GuiLabel(bc_rect(list_x, data_y, label_w, BC_ROW), "Data files");
     if (bc_gui_text_field(bc_rect(list_x + label_w, data_y, list_w - label_w, BC_ROW),
                           "Extensions of the data files the folders also give, encrypted too (for example: json txt csv). The game reads them with bge.logic.decryptFile(path). Python modules (.py) are always encrypted",
+                          "Optional: json txt csv, for example",
                           g->data_text,
                           sizeof(g->data_text),
                           g->project.data_extensions,
@@ -1306,42 +1675,113 @@ static void bc_gui_draw(BC_Gui *g)
   }
   y += files_h + 2 * BC_GAP;
 
-  /* Run controls. */
-  if (GuiButton(bc_rect(BC_MARGIN, y, 200, BC_ROW), running ? "Cancel" : "Encrypt")) {
-    if (running) {
-      bc_gui_stop(g, "Cancelled: the file in progress was removed, finished files are kept");
+  /* Run controls: the one action; what it still needs, or how far it got; then, once the game
+   * is written, the two ways to look at it. */
+  {
+    const bool ready = check->todo[0] == '\0';
+    const Font font = GuiGetFont();
+    const float run_w = 200;
+    float right_x = BC_MARGIN + inner;
+    Rectangle open_box = {0}, play_box = {0};
+    const bool show_built = g->built && !running;
+    if (show_built) {
+      const float play_w = MeasureTextEx(font, "Run game", BC_TEXT_SIZE, text_spacing).x + 4 * BC_GAP;
+      const float open_w = MeasureTextEx(font, "Open game folder", BC_TEXT_SIZE, text_spacing).x + 4 * BC_GAP;
+      right_x -= play_w;
+      play_box = bc_rect(right_x, y, play_w, BC_ROW);
+      right_x -= BC_GAP + open_w;
+      open_box = bc_rect(right_x, y, open_w, BC_ROW);
+    }
+    const Rectangle run_box = bc_rect(BC_MARGIN, y, run_w, BC_ROW);
+    bc_tip(run_box, running ? "Stop: the file in progress is removed, finished files are kept" : "Encrypt the files and write the game executable (" BC_SHORTCUT "+Enter)");
+    if (!running && !ready) {
+      GuiDisable();
+    }
+    const bool hit = running ? GuiButton(run_box, "Cancel") != 0 : bc_primary_button(run_box, "Encrypt");
+    if (!running && !ready) {
+      GuiEnable();
+    }
+    if (hit) {
+      if (running) {
+        bc_gui_stop(g, "Cancelled: the file in progress was removed, finished files are kept");
+      }
+      else {
+        bc_gui_start(g);
+      }
+    }
+    const float mid_x = BC_MARGIN + run_w + BC_GAP;
+    const float mid_w = right_x - BC_GAP - mid_x;
+    if (!running && !ready) {
+      char todo[sizeof(check->todo) + 16];
+      char shown[sizeof(todo)];
+      snprintf(todo, sizeof(todo), "To encrypt: %s", check->todo);
+      bc_fit_right(todo, mid_w, shown, sizeof(shown));
+      bc_tip(bc_rect(mid_x, y, mid_w, BC_ROW), todo);
+      const Vector2 position = {mid_x, y + (BC_ROW - BC_TEXT_SIZE) / 2};
+      DrawTextEx(font, shown, position, BC_TEXT_SIZE, text_spacing, GetColor((unsigned int)BC_RGB(BC_RGB_WARNING)));
     }
     else {
-      bc_gui_start(g);
+      float progress = g->progress;
+      char percent[16];
+      snprintf(percent, sizeof(percent), show_built ? "Done" : "%3d%%", (int)(progress * 100.0f + 0.5f));
+      GuiProgressBar(bc_rect(mid_x, y, mid_w - 70, BC_ROW), NULL, percent, &progress, 0.0f, 1.0f);
+    }
+    if (show_built) {
+      bc_tip(open_box, g->built_dir);
+      if (GuiButton(open_box, "Open game folder") && !bc_shell_open_folder(g->built_dir)) {
+        bc_gui_logf(g, BC_LOG_ERROR, "Cannot show '%s' in a file manager", g->built_dir);
+      }
+      bc_tip(play_box, g->built_exe);
+      if (GuiButton(play_box, "Run game") && !bc_shell_run(g->built_exe)) {
+        bc_gui_logf(g, BC_LOG_ERROR, "Cannot start '%s'", g->built_exe);
+      }
     }
   }
-  float progress = g->progress;
-  char percent[16];
-  snprintf(percent, sizeof(percent), "%3d%%", (int)(progress * 100.0f + 0.5f));
-  GuiProgressBar(bc_rect(BC_MARGIN + 200 + BC_GAP, y, inner - 200 - BC_GAP - 70, BC_ROW),
-                 NULL,
-                 percent,
-                 &progress,
-                 0.0f,
-                 1.0f);
   y += BC_ROW + BC_GAP;
 
   /* Log: newest lines at the bottom, colored by level, wrapped to the panel. Rows are gathered from
-   * the newest message back, so only the visible messages are measured (the oldest one may keep
-   * only its last rows), then drawn from the top. */
+   * the newest message shown back, so only the visible messages are measured (the oldest one may
+   * keep only its last rows), then drawn from the top. The wheel scrolls back by messages: no
+   * message needs measuring to know where it is. */
   const float log_h = (float)log_lines * 24 + BC_GAP;
-  GuiPanel(bc_rect(BC_MARGIN, y, inner, log_h), NULL);
+  const Rectangle log_box = bc_rect(BC_MARGIN, y, inner, log_h);
+  const float log_text_w = inner - 3 * BC_GAP; /* Room for the scroll bar. */
+  if (!GuiIsLocked() && CheckCollisionPointRec(GetMousePosition(), log_box)) {
+    const float wheel = GetMouseWheelMove();
+    if (wheel != 0) {
+      g->log_scroll += wheel > 0 ? (int)(wheel + 0.5f) : (int)(wheel - 0.5f);
+    }
+  }
+  /* Scrolled all the way back, the oldest messages fill the panel: as many as fit, measured from
+   * the oldest (a few wraps, and only while scrolled back). */
+  int max_scroll = 0;
+  if (g->log_scroll > 0) {
+    int fit = 0;
+    int used = 0;
+    for (int i = g->log_count - 1; i >= 0; i--) {
+      BC_Span spans[BC_LOG_VISIBLE];
+      const int n = bc_wrap(g->log[(g->log_next - 1 - i + BC_LOG_LINES) % BC_LOG_LINES].text, log_text_w, text_spacing, spans, BC_LOG_VISIBLE);
+      if (fit > 0 && used + n > log_lines) {
+        break;
+      }
+      used += n;
+      fit++;
+    }
+    max_scroll = g->log_count - fit;
+  }
+  g->log_scroll = g->log_scroll < 0 ? 0 : g->log_scroll > max_scroll ? max_scroll : g->log_scroll;
+  GuiPanel(log_box, NULL);
   BeginScissorMode((int)BC_MARGIN, (int)y, (int)inner, (int)log_h);
   BC_Span rows[BC_LOG_VISIBLE];
   Color row_colors[BC_LOG_VISIBLE];
   int row_count = 0;
-  for (int i = 0; i < g->log_count && row_count < log_lines; i++) {
+  for (int i = g->log_scroll; i < g->log_count && row_count < log_lines; i++) {
     const BC_LogLine *line = &g->log[(g->log_next - 1 - i + BC_LOG_LINES) % BC_LOG_LINES];
     const int rgba = line->level == BC_LOG_ERROR   ? BC_RGB(BC_RGB_ERROR) :
                      line->level == BC_LOG_WARNING ? BC_RGB(BC_RGB_WARNING) :
                                                      GuiGetStyle(DEFAULT, TEXT_COLOR_NORMAL);
     BC_Span spans[BC_LOG_VISIBLE];
-    const int n = bc_wrap(line->text, inner - 2 * BC_GAP, text_spacing, spans, BC_LOG_VISIBLE);
+    const int n = bc_wrap(line->text, log_text_w, text_spacing, spans, BC_LOG_VISIBLE);
     for (int k = n - 1; k >= 0 && row_count < log_lines; k--) {
       rows[row_count] = spans[k];
       row_colors[row_count] = GetColor((unsigned int)rgba);
@@ -1352,7 +1792,74 @@ static void bc_gui_draw(BC_Gui *g)
     const int k = row_count - 1 - row;
     bc_draw_span(&rows[k], BC_MARGIN + BC_GAP, y + BC_GAP / 2 + (float)row * 24, text_spacing, row_colors[k]);
   }
+  /* Scroll bar once the log holds more messages than lines: its size and place in messages. */
+  if (g->log_count > log_lines) {
+    const float track_h = log_h - 2 * BC_GAP;
+    const float thumb_h = track_h * (float)log_lines / (float)g->log_count;
+    const int range = g->log_count - log_lines; /* Messages, as for the thumb size. */
+    const float at = 1.0f - (float)g->log_scroll / (float)(range > g->log_scroll ? range : g->log_scroll > 0 ? g->log_scroll : 1);
+    const Rectangle thumb = {BC_MARGIN + inner - BC_GAP, y + BC_GAP + (track_h - thumb_h) * at, 4, thumb_h};
+    DrawRectangleRec(thumb, GetColor((unsigned int)GuiGetStyle(DEFAULT, BORDER_COLOR_NORMAL)));
+  }
   EndScissorMode();
+  y += log_h + BC_GAP;
+
+  /* Status bar: the key of this build, and the log to the clipboard. */
+  {
+    char status[64];
+    snprintf(status, sizeof(status), "Key %s", g->fingerprint);
+    const float copy_w = MeasureTextEx(GuiGetFont(), "Copy log", BC_TEXT_SIZE, text_spacing).x + 4 * BC_GAP;
+    bc_tip(bc_rect(BC_MARGIN, y, 300, BC_STATUS_H), "Fingerprint of the key built into this tool: the launcher must come from the same build");
+    GuiStatusBar(bc_rect(BC_MARGIN, y, inner - copy_w - BC_GAP, BC_STATUS_H), status);
+    bc_tip(bc_rect(BC_MARGIN + inner - copy_w, y, copy_w, BC_STATUS_H), "Copy the whole log, to report a problem");
+    if (GuiButton(bc_rect(BC_MARGIN + inner - copy_w, y, copy_w, BC_STATUS_H), "Copy log")) {
+      bc_gui_copy_log(g);
+    }
+  }
+
+  /* Dropdowns last: an open list lies over the rows below it. The open one is drawn after the
+   * closed one. */
+  if (dropdown_open && !modal) {
+    GuiUnlock();
+  }
+  if (running) {
+    GuiDisable();
+  }
+  if (!dropdown_open) {
+    bc_tip(check_box,
+           "What the game executable checks before every launch. Player: the player executable. + Libraries: "
+           "also every .dll, .so, .dylib, .pyd and .exe of the game folder (a proxy DLL would run inside the "
+           "player). + Python: also .py, .pth and .zip files, and Python bytecode is removed (the game then "
+           "compiles its scripts at every launch). Each level costs a hash of those files at every launch");
+    bc_tip(key_box,
+           "Per project: a key of this project, from its key file, travels masked in the game executable (another game made with this tool has another key). Online: a key server gives it to players who own the game (Steam, Epic...) through the key provider; no shipped file holds it. Build key: the key compiled into this tool and the launcher");
+  }
+  int integrity = (int)g->project.integrity;
+  int key_mode = (int)g->project.key_mode;
+  /* Fixed before drawing: a click flips the flag, and the same click must not reach the
+   * dropdown twice. */
+  const bool check_last = g->check_edit;
+  for (int pass = 0; pass < 2; pass++) {
+    if ((pass == 0) != check_last) {
+      if (GuiDropdownBox(check_box, "Player;+ Libraries;+ Python", &integrity, g->check_edit)) {
+        g->check_edit = !g->check_edit;
+      }
+    }
+    else if (GuiDropdownBox(key_box, "Per project;Online;Build key", &key_mode, g->key_edit)) {
+      g->key_edit = !g->key_edit;
+    }
+  }
+  if (running) {
+    GuiEnable();
+  }
+  if (integrity != (int)g->project.integrity) {
+    g->project.integrity = (BC_Integrity)integrity;
+    bc_gui_set_modified(g);
+  }
+  if (key_mode != (int)g->project.key_mode) {
+    g->project.key_mode = (BC_KeyMode)key_mode;
+    bc_gui_set_modified(g);
+  }
 
   bc_gui_draw_tip();
 
@@ -1410,6 +1917,9 @@ int bc_gui_run(const char *project_path)
   GuiSetStyle(LISTVIEW, LIST_ITEMS_HEIGHT, 28);
   GuiSetStyle(LISTVIEW, TEXT_ALIGNMENT, TEXT_ALIGN_LEFT);
   GuiSetStyle(LISTVIEW, TEXT_PADDING, 8);
+  /* Dropdowns read like the fields around them. */
+  GuiSetStyle(DROPDOWNBOX, TEXT_ALIGNMENT, TEXT_ALIGN_LEFT);
+  GuiSetStyle(DROPDOWNBOX, TEXT_PADDING, 8);
 
   if (project_path != NULL) {
     bc_gui_load(&g, project_path);
@@ -1435,13 +1945,14 @@ int bc_gui_run(const char *project_path)
     if (IsFileDropped()) {
       bc_gui_handle_drop(&g);
     }
+    const bool shortcut = bc_gui_shortcuts(&g);
     if (g.job != NULL) {
       bc_gui_tick_job(&g);
     }
     BeginDrawing();
     ClearBackground(GetColor((unsigned int)GuiGetStyle(DEFAULT, BACKGROUND_COLOR)));
     bc_gui_draw(&g);
-    const bool acted = IsMouseButtonPressed(MOUSE_BUTTON_LEFT) || IsMouseButtonReleased(MOUSE_BUTTON_LEFT) ||
+    const bool acted = shortcut || IsMouseButtonPressed(MOUSE_BUTTON_LEFT) || IsMouseButtonReleased(MOUSE_BUTTON_LEFT) ||
                        IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER);
     eager_frames = eager_frames > 1 ? eager_frames - 1 : acted ? 1 : 0;
     /* Decided before EndDrawing: it polls the input of the next frame, blocking when waiting. A
