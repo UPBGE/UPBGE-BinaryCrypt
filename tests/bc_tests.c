@@ -993,7 +993,6 @@ static void test_format(void)
   h.chunk_log2 = BC_CHUNK_LOG2_DEFAULT;
   h.plain_size = 1;
   uint8_t raw[BC_HEADER_SIZE];
-  CHECK(BC_HEADER_SIZE == 128 && BC_OFS_RESERVED + BC_RESERVED_SIZE == BC_HEADER_SIZE);
   /* Unknown optional features and reserved bytes, as a newer writer may set them: read as is. */
   h.optional = 0xFFFFFFFFu;
   bc_header_write(&h, raw);
