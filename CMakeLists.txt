@@ -3,7 +3,8 @@
 cmake_minimum_required(VERSION 3.18)
 # Release version of the tool, shown in the bc_tool window title: raise it for each release. The
 # file formats carry their own versions (binarycrypt_format.h, bc_manifest.h, bc_project.h).
-project(UPBGE_BinaryCrypt VERSION 0.9 LANGUAGES C)
+project(UPBGE_BinaryCrypt LANGUAGES C)
+set(PROJECT_VERSION 1.0-alpha)
 
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
