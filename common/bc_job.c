@@ -89,7 +89,6 @@ struct BC_Job {
 
   BC_JobFile *files;
   int file_count;
-  int file_capacity;
 
   int current;
   bool compressing;
@@ -144,45 +143,66 @@ static const char *bc_display(const BC_Job *job, const char *path)
 /* -------------------------------------------------------------------------------------------- */
 /* File list */
 
-static bool bc_job_add_file(BC_Job *job, const char *in)
+typedef struct BC_ListRules {
+  char (*data_ext)[BC_DATA_EXT_SIZE];
+  int data_ext_count;
+  const char *skip_dir;
+  BC_LogFn log;
+  void *user;
+} BC_ListRules;
+
+static void bc_list_log(const BC_ListRules *rules, const BC_LogLevel level, const char *format, ...)
 {
-  if (job->file_count == job->file_capacity) {
-    const int capacity = job->file_capacity ? job->file_capacity * 2 : 64;
-    BC_JobFile *files = (BC_JobFile *)realloc(job->files, sizeof(BC_JobFile) * (size_t)capacity);
+  if (rules->log == NULL) {
+    return;
+  }
+  char message[BC_PATH_MAX + 256];
+  va_list args;
+  va_start(args, format);
+  vsnprintf(message, sizeof(message), format, args);
+  va_end(args);
+  rules->log(rules->user, level, message);
+}
+
+static bool bc_list_add(BC_FileList *list, const char *path)
+{
+  if (list->count == list->capacity) {
+    const int capacity = list->capacity ? list->capacity * 2 : 64;
+    BC_ListedFile *files = (BC_ListedFile *)realloc(list->files, sizeof(BC_ListedFile) * (size_t)capacity);
     if (files == NULL) {
       return false;
     }
-    job->files = files;
-    job->file_capacity = capacity;
+    list->files = files;
+    list->capacity = capacity;
   }
-  BC_JobFile *file = &job->files[job->file_count];
+  BC_ListedFile *file = &list->files[list->count];
   memset(file, 0, sizeof(*file));
-  file->in = (char *)malloc(strlen(in) + 1);
-  if (file->in == NULL) {
+  file->path = (char *)malloc(strlen(path) + 1);
+  if (file->path == NULL) {
     return false;
   }
-  strcpy(file->in, in);
-  job->file_count++;
+  strcpy(file->path, path);
+  list->count++;
   return true;
 }
 
 typedef struct BC_ScanContext {
-  BC_Job *job;
+  BC_FileList *list;
+  const BC_ListRules *rules;
   const char *dir;
-  const char *skip_dir;
   bool ok;
 } BC_ScanContext;
 
-static void bc_scan_dir(BC_Job *job, const char *dir, const char *skip_dir, bool *ok);
+static void bc_scan_dir(BC_FileList *list, const BC_ListRules *rules, const char *dir, bool *ok);
 
 /** What a folder gives: .blend files, Python modules and data files. */
-static bool bc_job_scans(const BC_Job *job, const char *name)
+static bool bc_list_scans(const BC_ListRules *rules, const char *name)
 {
   if (bc_path_has_extension(name, ".blend") || bc_path_has_extension(name, ".py")) {
     return true;
   }
-  for (int i = 0; i < job->data_ext_count; i++) {
-    if (bc_path_has_extension(name, job->data_ext[i])) {
+  for (int i = 0; i < rules->data_ext_count; i++) {
+    if (bc_path_has_extension(name, rules->data_ext[i])) {
       return true;
     }
   }
@@ -199,35 +219,113 @@ static void bc_scan_entry(void *user, const char *name, bool is_dir)
   if (is_dir) {
     /* Hidden folders (.git, .svn...) never hold game data. The output folder may live inside
      * the source tree and must not be encrypted again. */
-    if (name[0] != '.' && strcmp(path, ctx->skip_dir) != 0) {
-      bc_scan_dir(ctx->job, path, ctx->skip_dir, &ctx->ok);
+    if (name[0] != '.' && strcmp(path, ctx->rules->skip_dir) != 0) {
+      bc_scan_dir(ctx->list, ctx->rules, path, &ctx->ok);
     }
   }
-  else if (bc_job_scans(ctx->job, name)) {
+  else if (bc_list_scans(ctx->rules, name)) {
     /* Found by scanning, not listed: an encrypted file is most likely an old output (for example
      * from an earlier output folder inside the sources). Skip it instead of failing the whole
      * batch. Explicitly listed files still fail loudly in bc_seal_begin. */
     if (bc_file_is_container(path)) {
-      bc_log(ctx->job, BC_LOG_WARNING, "Skipped '%s': already encrypted", path);
+      ctx->list->skipped++;
+      bc_list_log(ctx->rules, BC_LOG_WARNING, "Skipped '%s': already encrypted", path);
     }
     else {
-      ctx->ok = bc_job_add_file(ctx->job, path);
+      ctx->ok = bc_list_add(ctx->list, path);
     }
   }
 }
 
-static void bc_scan_dir(BC_Job *job, const char *dir, const char *skip_dir, bool *ok)
+static void bc_scan_dir(BC_FileList *list, const BC_ListRules *rules, const char *dir, bool *ok)
 {
-  BC_ScanContext ctx = {job, dir, skip_dir, true};
+  BC_ScanContext ctx = {list, rules, dir, true};
   if (!bc_list_dir(dir, bc_scan_entry, &ctx)) {
-    bc_log(job, BC_LOG_WARNING, "Cannot list folder '%s'", dir);
+    bc_list_log(rules, BC_LOG_WARNING, "Cannot list folder '%s'", dir);
   }
   *ok = *ok && ctx.ok;
 }
 
-static int bc_compare_files(const void *a, const void *b)
+static int bc_compare_listed(const void *a, const void *b)
 {
-  return strcmp(((const BC_JobFile *)a)->in, ((const BC_JobFile *)b)->in);
+  return strcmp(((const BC_ListedFile *)a)->path, ((const BC_ListedFile *)b)->path);
+}
+
+void bc_file_list_free(BC_FileList *list)
+{
+  for (int i = 0; i < list->count; i++) {
+    free(list->files[i].path);
+  }
+  free(list->files);
+  memset(list, 0, sizeof(*list));
+}
+
+static bool bc_list_fail(BC_FileList *list)
+{
+  bc_file_list_free(list);
+  return false;
+}
+
+bool bc_project_list_files(const BC_Project *p,
+                           char (*data_ext)[BC_DATA_EXT_SIZE],
+                           const int data_ext_count,
+                           BC_LogFn log,
+                           void *user,
+                           BC_FileList *r_list)
+{
+  memset(r_list, 0, sizeof(*r_list));
+  const BC_ListRules rules = {data_ext, data_ext_count, p->output_dir, log, user};
+  /* Expand folders, then sort and drop duplicates (a file can be listed and also be found inside
+   * a listed folder). */
+  bool ok = true;
+  for (int i = 0; ok && i < p->input_count; i++) {
+    const char *input = p->inputs[i];
+    if (!bc_path_is_inside(p->source_root, input)) {
+      bc_list_log(&rules, BC_LOG_ERROR, "'%s' is outside the source folder", input);
+      return bc_list_fail(r_list);
+    }
+    if (bc_path_is_inside(p->output_dir, input)) {
+      bc_list_log(&rules, BC_LOG_ERROR, "'%s' is inside the output folder", input);
+      return bc_list_fail(r_list);
+    }
+    if (bc_is_dir(input)) {
+      bc_scan_dir(r_list, &rules, input, &ok);
+    }
+    else if (bc_is_file(input)) {
+      ok = bc_list_add(r_list, input);
+    }
+    else {
+      bc_list_log(&rules, BC_LOG_ERROR, "Input '%s' does not exist", input);
+      return bc_list_fail(r_list);
+    }
+  }
+  if (!ok) {
+    bc_list_log(&rules, BC_LOG_ERROR, "Out of memory while listing the input files");
+    return bc_list_fail(r_list);
+  }
+  if (r_list->count > 0) {
+    qsort(r_list->files, (size_t)r_list->count, sizeof(BC_ListedFile), bc_compare_listed);
+  }
+  int unique = 0;
+  for (int i = 0; i < r_list->count; i++) {
+    if (unique > 0 && strcmp(r_list->files[unique - 1].path, r_list->files[i].path) == 0) {
+      free(r_list->files[i].path);
+      continue;
+    }
+    r_list->files[unique++] = r_list->files[i];
+  }
+  r_list->count = unique;
+  for (int i = 0; i < r_list->count; i++) {
+    BC_ListedFile *file = &r_list->files[i];
+    file->kind = bc_path_has_extension(file->path, ".blend") ? BC_KIND_BLEND :
+                 bc_path_has_extension(file->path, ".py")    ? BC_KIND_PYTHON :
+                                                               BC_KIND_DATA;
+    if (!bc_file_size(file->path, &file->size)) {
+      bc_list_log(&rules, BC_LOG_ERROR, "Cannot read '%s'", file->path);
+      return bc_list_fail(r_list);
+    }
+  }
+  return true;
 }
 
 /** Output of one source file: the same relative path below output_dir, so relative paths
@@ -575,59 +673,34 @@ BC_Job *bc_job_create(const BC_Project *p,
     return bc_job_fail_create(job);
   }
 
-  /* Expand folders, then sort and drop duplicates (a file can be listed and also be found inside
-   * a listed folder). */
-  bool ok = true;
-  const char *skip_dir = p->output_dir;
-  for (int i = 0; ok && i < p->input_count; i++) {
-    const char *input = p->inputs[i];
-    if (!bc_path_is_inside(p->source_root, input)) {
-      bc_log(job, BC_LOG_ERROR, "'%s' is outside the source folder", input);
-      return bc_job_fail_create(job);
-    }
-    if (bc_path_is_inside(skip_dir, input)) {
-      bc_log(job, BC_LOG_ERROR, "'%s' is inside the output folder", input);
-      return bc_job_fail_create(job);
-    }
-    if (bc_is_dir(input)) {
-      bc_scan_dir(job, input, skip_dir, &ok);
-    }
-    else if (bc_is_file(input)) {
-      ok = bc_job_add_file(job, input);
-    }
-    else {
-      bc_log(job, BC_LOG_ERROR, "Input '%s' does not exist", input);
-      return bc_job_fail_create(job);
-    }
-  }
-  if (!ok) {
-    bc_log(job, BC_LOG_ERROR, "Out of memory while listing the input files");
+  BC_FileList list;
+  if (!bc_project_list_files(p, job->data_ext, job->data_ext_count, job->log, job->log_user, &list)) {
     return bc_job_fail_create(job);
   }
-  if (job->file_count > 0) {
-    qsort(job->files, (size_t)job->file_count, sizeof(BC_JobFile), bc_compare_files);
-  }
-  int unique = 0;
-  for (int i = 0; i < job->file_count; i++) {
-    if (unique > 0 && strcmp(job->files[unique - 1].in, job->files[i].in) == 0) {
-      free(job->files[i].in);
-      continue;
-    }
-    job->files[unique++] = job->files[i];
-  }
-  job->file_count = unique;
-  if (job->file_count == 0) {
+  if (list.count == 0) {
+    bc_file_list_free(&list);
     bc_log(job, BC_LOG_ERROR, "No files to encrypt found in the inputs");
     return bc_job_fail_create(job);
   }
+  job->files = (BC_JobFile *)calloc((size_t)list.count, sizeof(BC_JobFile));
+  if (job->files == NULL) {
+    bc_file_list_free(&list);
+    bc_log(job, BC_LOG_ERROR, "Out of memory while listing the input files");
+    return bc_job_fail_create(job);
+  }
+  /* The paths change hands: the list array goes, its strings stay. */
+  for (int i = 0; i < list.count; i++) {
+    job->files[i].in = list.files[i].path;
+    job->files[i].size = list.files[i].size;
+    job->files[i].kind = list.files[i].kind;
+  }
+  job->file_count = list.count;
+  free(list.files);
 
   /* Outputs, sizes and the main file. */
   bool main_found = false;
   for (int i = 0; i < job->file_count; i++) {
     BC_JobFile *file = &job->files[i];
-    file->kind = bc_path_has_extension(file->in, ".blend") ? BC_KIND_BLEND :
-                 bc_path_has_extension(file->in, ".py")    ? BC_KIND_PYTHON :
-                                                             BC_KIND_DATA;
     char out[BC_PATH_MAX];
     if (!bc_output_path(p, file->in, out, sizeof(out)) ||
         (file->out = (char *)malloc(strlen(out) + 1)) == NULL)
@@ -636,10 +709,6 @@ BC_Job *bc_job_create(const BC_Project *p,
       return bc_job_fail_create(job);
     }
     strcpy(file->out, out);
-    if (!bc_file_size(file->in, &file->size)) {
-      bc_log(job, BC_LOG_ERROR, "Cannot read '%s'", file->in);
-      return bc_job_fail_create(job);
-    }
     job->total_bytes += 2 * file->size; /* Hashed, then sealed. */
     file->key = -1;
     file->copy = file->size == 0 && file->kind != BC_KIND_BLEND;

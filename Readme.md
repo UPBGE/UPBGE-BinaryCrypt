@@ -168,28 +168,38 @@ Platform notes:
    location, so the whole runtime moves together. The player and the libraries of the game folder
    are hashed: export *after* placing the final runtime and any store library
    (`steam_api64.dll`, a key provider...), and export again whenever you change one.
-2. **Describe the batch** in `bc_tool` (or write a `.bcproj` file, below):
-   - *Source folder*: the root of your game sources (`.blend` files, Python modules, data files).
-   - *Output folder*: the game folder, always another folder than the sources (see *Output
-     folder*, below).
-   - *Game name*: name of the game executable (`.exe` is added on Windows). Empty: the main file
-     name.
-   - *Manifest*: inside the game executable (default) or in a separate `binarycrypt.manifest`
-     file next to it (see below).
-   - *UPBGE runtime*: the player inside the game folder; `engine/blenderplayer(.exe)` by default.
-   - *Runtime Check* (default *Player + Libraries + Python*): see *Integrity check*, below.
-   - *Main file*: the `.blend` the game starts.
-   - *Icon*, *Version*, *Company*, *Copyright* (Windows, optional, shown by Windows builds of
-     `bc_tool` only): see below.
-   - *Key*: per project (default), online from a key server (*Online types*: *Always online* or
-     *Offline after 1st launch*), or the build key; *Key file*: see *Keys*, below.
-   - *Files to encrypt*: files and folders, dragged and dropped on the window. Folders are scanned
-     recursively (hidden folders skipped) for `.blend` files, `.py` modules and the files of the
-     *Data files* extensions (for example `json csv`). A file listed
-     on its own is encrypted whatever its extension: `.blend` as a scene, `.py` as a module, any
-     other as a data file.
+2. **Describe the batch** in `bc_tool` (or write a `.bcproj` file, below). The editor has four
+   sections in the order of the task; the last two are folded and show a summary line until
+   opened:
+   1. *Game*, what gets encrypted:
+      - *Source folder*: the root of your game sources (`.blend` files, Python modules, data files).
+      - The list of files and folders to encrypt, dragged and dropped on the window. Folders are
+        scanned recursively (hidden folders skipped) for `.blend` files, `.py` modules and the files
+        of the *Data files* extensions (for example `json csv`). A file listed on its own is
+        encrypted whatever its extension: `.blend` as a scene, `.py` as a module, any other as a
+        data file. *All files* shows every file the list gives, with its kind and size.
+      - The star marks the main file, the `.blend` the game starts: click the star of another
+        `.blend` to change it.
+      - The section line counts what will be encrypted (scenes, scripts, data files, size, files
+        skipped because they are already encrypted).
+   2. *Build*, where the game goes:
+      - *Output folder*: the game folder, always another folder than the sources (see *Output
+        folder*, below).
+      - *Game name*: name of the game executable (`.exe` is added on Windows). Empty: the main file
+        name.
+      - *UPBGE runtime*: the player inside the game folder; `engine/blenderplayer(.exe)` by default.
+   3. *Windows appearance* (Windows builds of `bc_tool` only): *Icon*, *Version*, *Company*,
+      *Copyright*, all optional; see below.
+   4. *Protection*:
+      - *Key*: per project (default), online from a key server (*Online types*: *Always online* or
+        *Offline after 1st launch*), or the build key; *Key file*: see *Keys*, below.
+      - *Runtime Check* (default *Player + Libraries + Python*): see *Integrity check*, below.
+      - *Manifest*: inside the game executable (default) or in a separate `binarycrypt.manifest`
+        file next to it (see below).
+
    The editor checks the fields as you go: a tick when what a field names exists, a red frame
    and a note when it does not (the runtime not yet copied into the game folder, for example).
+   The panel at the bottom explains the field under the pointer.
 3. **Encrypt.** This writes the encrypted files and the game executable. The button stays
    disabled until the project is complete, and the line next to it says what is missing. Then
    *Open game folder* and *Run game* show and start the result. Save the project to run the same
