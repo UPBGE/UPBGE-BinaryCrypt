@@ -1227,7 +1227,7 @@ static void bc_gui_draw(BC_Gui *g)
   /* Icon and version information only exist for Windows games: hidden where this build cannot make
    * one (the project keeps them, the job ignores them with a warning). */
   const bool brand_rows = bc_brand_supported();
-  const int settings_rows = (online ? 12 : key_file_row ? 10 : 9) - (brand_rows ? 0 : 2);
+  const int settings_rows = (online ? 13 : key_file_row ? 11 : 10) - (brand_rows ? 0 : 2);
   const float settings_h = (float)(settings_rows * (BC_ROW + BC_GAP) + 2 * BC_GAP);
   bc_group_box(bc_rect(BC_MARGIN, y, inner, settings_h), "Settings");
   y += 2 * BC_GAP;
@@ -1285,18 +1285,15 @@ static void bc_gui_draw(BC_Gui *g)
   if (!g->game_edit) {
     snprintf(g->game_text, sizeof(g->game_text), "%s%s", game_name, game_is_default ? "  (main file)" : "");
   }
-  /* Integrity level and manifest placement share the row as dropdowns, the manifest right aligned
-   * with the path row buttons. Dropdowns are drawn last (a list opens over the rows below), as wide
-   * as their widest item plus room for the arrow. */
+  /* Manifest placement shares the row as a dropdown, right aligned with the path row buttons.
+   * Dropdowns are drawn last (a list opens over the rows below), as wide as their widest item plus
+   * room for the arrow. */
   const float text_spacing = (float)GuiGetStyle(DEFAULT, TEXT_SPACING);
   const float dropdown_extra = 3 * BC_GAP + (float)(GuiGetStyle(DROPDOWNBOX, ARROW_PADDING) + BC_ICON_SIZE);
   const float manifest_label_w = MeasureTextEx(GuiGetFont(), "Manifest", BC_TEXT_SIZE, text_spacing).x + 3 * BC_GAP;
   const float manifest_group_w = MeasureTextEx(GuiGetFont(), "Separate file", BC_TEXT_SIZE, text_spacing).x + dropdown_extra;
   const float manifest_x = BC_MARGIN + inner - 2 * BC_GAP - manifest_group_w;
-  const float check_label_w = MeasureTextEx(GuiGetFont(), "Check", BC_TEXT_SIZE, text_spacing).x + 2 * BC_GAP;
-  const float check_combo_w = MeasureTextEx(GuiGetFont(), "+ Libraries", BC_TEXT_SIZE, text_spacing).x + dropdown_extra;
-  const float check_x = manifest_x - manifest_label_w - BC_GAP - check_combo_w;
-  const float game_box_w = check_x - check_label_w - BC_GAP - (BC_MARGIN + BC_GAP + BC_LABEL_W);
+  const float game_box_w = manifest_x - manifest_label_w - BC_GAP - (BC_MARGIN + BC_GAP + BC_LABEL_W);
   bc_tip(bc_rect(BC_MARGIN + BC_GAP + BC_LABEL_W, y, game_box_w, BC_ROW),
          "Name of the game executable (\".exe\" is added on Windows): the only executable in the game folder. "
          "Empty: the name of the main file");
@@ -1323,8 +1320,6 @@ static void bc_gui_draw(BC_Gui *g)
     }
     g->game_edit = !g->game_edit;
   }
-  GuiLabel(bc_rect(check_x - check_label_w, y, check_label_w, BC_ROW), "Check");
-  const Rectangle check_box = bc_rect(check_x, y, check_combo_w, BC_ROW);
   GuiLabel(bc_rect(manifest_x - manifest_label_w, y, manifest_label_w, BC_ROW), "Manifest");
   const Rectangle manifest_box = bc_rect(manifest_x, y, manifest_group_w, BC_ROW);
   y += BC_ROW + BC_GAP;
@@ -1341,6 +1336,13 @@ static void bc_gui_draw(BC_Gui *g)
   if (committed) {
     bc_gui_set_player(g, g->player_text);
   }
+  y += BC_ROW + BC_GAP;
+
+  /* Integrity level, under the runtime it checks first: a dropdown of its own row, the levels
+   * spelled out. */
+  GuiLabel(bc_rect(BC_MARGIN + BC_GAP, y, BC_LABEL_W, BC_ROW), "Runtime Check");
+  const float check_combo_w = MeasureTextEx(GuiGetFont(), "Player + Libraries + Python", BC_TEXT_SIZE, text_spacing).x + dropdown_extra;
+  const Rectangle check_box = bc_rect(BC_MARGIN + BC_GAP + BC_LABEL_W, y, check_combo_w, BC_ROW);
   y += BC_ROW + BC_GAP;
 
   if (bc_gui_path_row(y, inner, "Main file", "The .blend the game executable starts", "Required: the .blend the game starts", &check->main, g->project.main, g->main_text, &g->main_edit, &committed)) {
@@ -1573,11 +1575,11 @@ static void bc_gui_draw(BC_Gui *g)
   y += BC_ROW + 3 * BC_GAP;
 
   /* Files. */
-  /* The log gives up lines (down to 3) before the file list gets shorter than its buttons. */
+  /* The log gives up lines (down to 2) before the file list gets shorter than its buttons. */
   const float files_min_h = 5 * (BC_ROW + BC_GAP) + 3 * BC_GAP;
   const float spare = H - y - BC_MARGIN - files_min_h - (BC_ROW + 5 * BC_GAP + BC_STATUS_H);
   int log_lines = (int)(spare / 24);
-  log_lines = log_lines < 3 ? 3 : log_lines > BC_LOG_VISIBLE ? BC_LOG_VISIBLE : log_lines;
+  log_lines = log_lines < 2 ? 2 : log_lines > BC_LOG_VISIBLE ? BC_LOG_VISIBLE : log_lines;
   /* Run row, log, status bar. */
   const float bottom_h = BC_ROW + (float)log_lines * 24 + 5 * BC_GAP + BC_STATUS_H;
   const float files_h = H - y - bottom_h - BC_MARGIN;
@@ -1817,10 +1819,11 @@ static void bc_gui_draw(BC_Gui *g)
   }
   if (!dropdown_open) {
     bc_tip(check_box,
-           "What the game executable checks before every launch. Player: the player executable. + Libraries: "
-           "also every .dll, .so, .dylib, .pyd and .exe of the game folder (a proxy DLL would run inside the "
-           "player). + Python: also .py, .pth and .zip files, and Python bytecode is removed (the game then "
-           "compiles its scripts at every launch). Each level costs a hash of those files at every launch");
+           "What the game executable checks before every launch. Player only: the player executable. Player + "
+           "Libraries: also every .dll, .so, .dylib, .pyd and .exe of the game folder (a proxy DLL would run "
+           "inside the player). Player + Libraries + Python: also .py, .pth and .zip files, and Python bytecode is "
+           "removed (the game then compiles its scripts at every launch). Each level costs a hash of those files at "
+           "every launch");
     bc_tip(manifest_box,
            "Embedded: one self-contained game executable. Separate file: the game executable is an "
            "untouched copy of bc_launcher and " BC_MANIFEST_FILENAME " goes next to it (sign "
@@ -1837,7 +1840,7 @@ static void bc_gui_draw(BC_Gui *g)
     int *value;
     bool *edit;
   } dropdowns[] = {
-      {check_box, "Player;+ Libraries;+ Python", &integrity, &g->check_edit},
+      {check_box, "Player only;Player + Libraries;Player + Libraries + Python", &integrity, &g->check_edit},
       {manifest_box, "Embedded;Separate file", &manifest_mode, &g->manifest_edit},
       {key_box, "Per project;Online;Build key", &key_mode, &g->key_edit},
   };
@@ -1916,7 +1919,9 @@ int bc_gui_run(const char *project_path)
   bc_key_fingerprint(bc_build_key(), g.fingerprint);
 
   SetConfigFlags(FLAG_WINDOW_RESIZABLE);
-  InitWindow(1100, 980, "UPBGE BinaryCrypt");
+  /* Tall enough for every row of a Windows build with online keys, and still within a 1080p
+   * screen with its taskbar. */
+  InitWindow(1100, 1000, "UPBGE BinaryCrypt");
 #ifdef BC_WINDOW_ICON
   bc_gui_set_window_icon();
 #endif

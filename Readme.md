@@ -152,7 +152,7 @@ Platform notes:
      folder*, below).
    - *Game name*: name of the game executable (`.exe` is added on Windows). Empty: the main file
      name.
-   - *Check* (default *+ Python*): see *Integrity check*, below.
+   - *Runtime Check* (default *Player + Libraries + Python*): see *Integrity check*, below.
    - *Manifest*: inside the game executable (default) or in a separate `binarycrypt.manifest`
      file next to it (see below).
    - *Icon*, *Version*, *Company*, *Copyright* (Windows, optional, shown by Windows builds of
@@ -189,17 +189,17 @@ The game executable keeps working when renamed.
 The player loads more code than its executable: the DLLs and shared libraries next to it
 (searched there first), Python extension modules, Python modules. Replacing one, or adding one
 where the loader looks (a proxy `version.dll`, a `.pth` or `sitecustomize.py` in site-packages),
-would run code inside the player with the keys in memory. *Check* (`integrity`) chooses what the
+would run code inside the player with the keys in memory. *Runtime Check* (`integrity`) chooses what the
 game executable verifies before every launch, against a digest the export stores in the manifest;
 a file changed, added or removed since the export stops the game.
 
 | Level | Checked | Cost at every launch (warm file cache, 2.3 GHz Xeon) |
 |---|---|---|
-| *Player* (`player`) | The player executable | Its hash only |
-| *+ Libraries* (`native`) | And every `.exe`, `.dll`, `.so`, `.so.N`, `.dylib`, `.pyd` of the game folder, recursively | 300 MB of libraries in a folder of 10,000 files: 0.13 s with AVX-512, 0.19 s with AVX2, 0.31 s with SSE4.1 (MinGW builds) |
-| *+ Python* (`python`, default) | And every `.py`, `.pyw`, `.pth`, `.zip` (the default `sys.path` names a `python3XX.zip` before the standard library) | 4,850 `.py` files (9.7 MB): +0.03 s. **And** the game recompiles every script it imports at every launch: about 0.15 s per MB of imported Python |
+| *Player only* (`player`) | The player executable | Its hash only |
+| *Player + Libraries* (`native`) | And every `.exe`, `.dll`, `.so`, `.so.N`, `.dylib`, `.pyd` of the game folder, recursively | 300 MB of libraries in a folder of 10,000 files: 0.13 s with AVX-512, 0.19 s with AVX2, 0.31 s with SSE4.1 (MinGW builds) |
+| *Player + Libraries + Python* (`python`, default) | And every `.py`, `.pyw`, `.pth`, `.zip` (the default `sys.path` names a `python3XX.zip` before the standard library) | 4,850 `.py` files (9.7 MB): +0.03 s. **And** the game recompiles every script it imports at every launch: about 0.15 s per MB of imported Python |
 
-*+ Python* is the default because the player runs Python with every decrypted datablock at
+*Player + Libraries + Python* is the default because the player runs Python with every decrypted datablock at
 reach: one edited line in a module of the runtime's standard library (imported before the game
 starts) can save its textures, meshes and scripts to disk. The lower levels suit a game that
 accepts that risk for a faster start.
@@ -210,7 +210,7 @@ reading only: none can be replaced between the check and the moment the player l
 module imported long after the start. Linux and macOS have no such lock (a file can be renamed
 over while open): there, a file swapped right after the check goes unnoticed.
 
-**Python bytecode at the *+ Python* level.** The player writes `.pyc` files next to the modules
+**Python bytecode at the *Player + Libraries + Python* level.** The player writes `.pyc` files next to the modules
 it imports, so they cannot be part of a digest, and checking `.py` alone would be pointless: a
 `.pyc` that claims its source's time and size is loaded without reading the source. So bytecode
 is removed instead, everywhere in the game folder: by the export, before every launch and after
@@ -220,7 +220,7 @@ cannot be removed was put there by someone else, and the game refuses to start. 
 loss of Python's bytecode cache: in a writable folder (a Steam library) the game compiles its
 scripts at every launch, as it already does in a read-only one.
 
-- Export again after adding a store library, updating the runtime or, at *+ Python*, changing a
+- Export again after adding a store library, updating the runtime or, at *Player + Libraries + Python*, changing a
   script.
 - **Not covered at any level:** code injected into the running process, which needs no file, and
   a patched game executable.
@@ -392,7 +392,7 @@ compress it in the game's own format before the export.
 
 **What it protects.** The source and the data never reach the disk in clear, but once imported, a
 module's code objects live in the player, where Python code can disassemble them; what keeps
-foreign Python out of the player is the integrity check. At *+ Python* (the default) an encrypted
+foreign Python out of the player is the integrity check. At *Player + Libraries + Python* (the default) an encrypted
 module replaced by a plain one stops the game, as any changed `.py` does; at the lower levels it
 would be imported. Python scripts that use Blender's API may have to be made available as source
 anyway (see *Your game's license*, below).
@@ -439,7 +439,7 @@ input = src                     # a folder (scanned for *.blend, *.py and the da
 | *this executable carries no game and there is no binarycrypt.manifest next to it* | `bc_launcher` started directly, data was appended after the embedded manifest, or the manifest file was not shipped. Export with `bc_tool`. |
 | *... is missing* | The player or the main file is not where the manifest says. |
 | *a library or program (or Python file) of the game folder was changed, added or removed* | Integrity check: a file it covers differs from the export. Export again after changing the runtime or a script. |
-| *... cannot be removed (Python bytecode that was not part of the game ...)* | *+ Python* level: a `.pyc` in a folder the player cannot write. The game shipped without any; reinstall it. |
+| *... cannot be removed (Python bytecode that was not part of the game ...)* | *Player + Libraries + Python* level: a `.pyc` in a folder the player cannot write. The game shipped without any; reinstall it. |
 | *cannot reach the key server*, *access denied*, ... | Online key: the provider's or key server's own message. |
 | *the key provider did not answer within 60 seconds* | Online key: the provider hung (store client not running?). |
 | *the key server sent the key of another game* | Online key: the key server's configuration maps this game to the wrong key file. |
