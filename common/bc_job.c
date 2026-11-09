@@ -29,7 +29,7 @@ typedef enum BC_JobPhase {
 typedef struct BC_JobFile {
   char *in;
   char *out;
-  uint64_t size;
+  uint64_t size, mtime;
   /** Hash of the source: its container's source id (bc_seal.h), and tells changed files from
    * unchanged ones. Also the plaintext hash when the file is sealed as it is. */
   uint8_t hash[BC_PLAIN_HASH_SIZE];
@@ -57,9 +57,11 @@ struct BC_Job {
   /** What the game executable checks before every launch (bc_native.h). */
   BC_Integrity integrity;
   BC_KeyRing ring;
-  BC_KeyRecord *old_records; /* As loaded, sorted by path for bsearch. */
+  BC_KeyRecord *old_records; /* As loaded: sorted by path, for bsearch. */
   int old_record_count;
   int current_key;
+  /** A key per update whose key an earlier export created: changed files get a key in use. */
+  bool key_reused;
   char key_file[BC_PATH_MAX];
   bool key_file_single;
   int changed_files;
@@ -328,7 +330,7 @@ bool bc_project_list_files(const BC_Project *p,
     file->kind = bc_path_has_extension(file->path, ".blend") ? BC_KIND_BLEND :
                  bc_path_has_extension(file->path, ".py")    ? BC_KIND_PYTHON :
                                                                BC_KIND_DATA;
-    if (!bc_file_size(file->path, &file->size)) {
+    if (!bc_file_stat(file->path, &file->size, &file->mtime)) {
       bc_list_log(&rules, BC_LOG_ERROR, "Cannot read '%s'", file->path);
       return bc_list_fail(r_list);
     }
@@ -483,6 +485,7 @@ static bool bc_job_setup_key(BC_Job *job, const BC_Project *p)
     }
   }
   const bool add = update > newest;
+  job->key_reused = job->rotation && !add;
   if (add && !bc_keyring_add(&job->ring, update)) {
     bc_log(job, BC_LOG_ERROR, "The key file holds %d keys, the most one game can use", BC_KEYS_MAX);
     return false;
@@ -523,9 +526,6 @@ static bool bc_job_setup_key(BC_Job *job, const BC_Project *p)
   job->old_record_count = job->ring.record_count;
   job->ring.records = NULL;
   job->ring.record_count = job->ring.record_capacity = 0;
-  if (job->old_record_count > 1) {
-    qsort(job->old_records, (size_t)job->old_record_count, sizeof(BC_KeyRecord), bc_record_compare);
-  }
   if (!online) {
     job->key_flags = BC_MANIFEST_PROJECT_KEY;
     return true;
@@ -552,6 +552,7 @@ static bool bc_job_setup_key(BC_Job *job, const BC_Project *p)
     return false;
   }
   snprintf(job->key_url, sizeof(job->key_url), "%s", p->key_url);
+  bc_project_store_notes(p, job->log, job->log_user);
   job->key_flags = BC_MANIFEST_ONLINE_KEY | (p->key_cache ? BC_MANIFEST_KEY_CACHE : 0);
   bc_log(job,
          BC_LOG_INFO,
@@ -560,6 +561,62 @@ static bool bc_job_setup_key(BC_Job *job, const BC_Project *p)
          job->provider_rel,
          p->key_cache ? ", kept after the first launch" : "");
   return true;
+}
+
+int bc_file_list_changed(const BC_Project *p, const BC_FileList *list, const BC_KeyRecord *records, const int record_count)
+{
+  int changed = 0;
+  for (int i = 0; i < list->count; i++) {
+    const BC_ListedFile *file = &list->files[i];
+    if (file->size == 0 && file->kind != BC_KIND_BLEND) {
+      continue; /* Copied, never recorded (BC_JobFile::copy). */
+    }
+    /* The record path is the job's: the output, inside the game folder. */
+    char out[BC_PATH_MAX], rel[BC_PATH_MAX];
+    const BC_KeyRecord *record = NULL;
+    if (record_count > 0 && bc_output_path(p, file->path, out, sizeof(out)) &&
+        bc_path_relative(rel, sizeof(rel), bc_project_dist_root(p), out))
+    {
+      const BC_KeyRecord probe = {rel, {0}, 0, 0, 0};
+      record = (const BC_KeyRecord *)bsearch(&probe, records, (size_t)record_count, sizeof(BC_KeyRecord), bc_record_compare);
+    }
+    changed += record == NULL || record->size != file->size || record->mtime != file->mtime;
+  }
+  return changed;
+}
+
+int bc_project_store_notes(const BC_Project *p, BC_LogFn log, void *user)
+{
+  const BC_KeyStore store = p->key_mode == BC_KEY_ONLINE ? bc_project_key_store(p) : BC_STORE_CUSTOM;
+  const char *dist = bc_project_dist_root(p);
+  if (store == BC_STORE_CUSTOM || dist[0] == '\0') {
+    return 0;
+  }
+  int notes = 0;
+  char provider[BC_PATH_MAX], dir[BC_PATH_MAX], path[BC_PATH_MAX], message[BC_PATH_MAX + 128];
+  /* Only once the provider is there: a missing provider is an error of its own. */
+  if (bc_path_join(provider, sizeof(provider), dist, p->key_provider) && bc_is_file(provider)) {
+    bc_path_dirname(dir, sizeof(dir), provider);
+    const char *library = bc_key_store_library(store);
+    if (bc_path_join(path, sizeof(path), dir, library) && !bc_is_file(path)) {
+      char shown[BC_PATH_MAX];
+      bc_path_dirname(shown, sizeof(shown), p->key_provider);
+      snprintf(message,
+               sizeof(message),
+               "%s is missing next to the key provider%s%s%s: copy it there before exporting",
+               library,
+               shown[0] ? " (" : "",
+               shown,
+               shown[0] ? "/)" : "");
+      log(user, BC_LOG_WARNING, message);
+      notes++;
+    }
+  }
+  if (store == BC_STORE_STEAM && bc_path_join(path, sizeof(path), dist, "steam_appid.txt") && bc_is_file(path)) {
+    log(user, BC_LOG_WARNING, "steam_appid.txt is in the game folder: it is for testing outside Steam, remove it before publishing");
+    notes++;
+  }
+  return notes;
 }
 
 static BC_Job *bc_job_fail_create(BC_Job *job)
@@ -696,10 +753,24 @@ BC_Job *bc_job_create(const BC_Project *p,
     bc_log(job, BC_LOG_ERROR, "Out of memory while listing the input files");
     return bc_job_fail_create(job);
   }
+  /* Said before any file is sealed: the export can still be cancelled to raise the number. */
+  if (job->key_reused) {
+    const int changed = bc_file_list_changed(p, &list, job->old_records, job->old_record_count);
+    if (changed > 0) {
+      bc_log(job,
+             BC_LOG_WARNING,
+             "%d file(s) changed since the last export get the key of update %u, which that export "
+             "already used: if update %u is published, cancel and raise the update number",
+             changed,
+             job->ring.updates[job->current_key],
+             job->ring.updates[job->current_key]);
+    }
+  }
   /* The paths change hands: the list array goes, its strings stay. */
   for (int i = 0; i < list.count; i++) {
     job->files[i].in = list.files[i].path;
     job->files[i].size = list.files[i].size;
+    job->files[i].mtime = list.files[i].mtime;
     job->files[i].kind = list.files[i].kind;
   }
   job->file_count = list.count;
@@ -881,7 +952,7 @@ static bool bc_job_choose_key(BC_Job *job, BC_JobFile *file)
   if (!bc_path_relative(rel, sizeof(rel), job->dist_root, file->out)) {
     return false;
   }
-  const BC_KeyRecord probe = {rel, {0}, 0};
+  const BC_KeyRecord probe = {rel, {0}, 0, 0, 0};
   const BC_KeyRecord *old = job->old_record_count > 0 ?
                                 (const BC_KeyRecord *)bsearch(&probe, job->old_records, (size_t)job->old_record_count, sizeof(BC_KeyRecord), bc_record_compare) :
                                 NULL;
@@ -897,7 +968,7 @@ static bool bc_job_choose_key(BC_Job *job, BC_JobFile *file)
     job->unchanged_files++;
   }
   file->key = index;
-  return bc_keyring_set_record(&job->ring, rel, file->hash, job->ring.updates[index]);
+  return bc_keyring_set_record(&job->ring, rel, file->hash, job->ring.updates[index], file->size, file->mtime);
 }
 
 /** One slice of the plaintext hash pass of the current file. */

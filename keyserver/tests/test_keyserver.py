@@ -102,7 +102,7 @@ class ServerTest(unittest.TestCase):
         # A key per update: the bc_tool key file form, with its file records, and a line with a
         # keyword of a later bc_tool, which must be skipped.
         with open(os.path.join(cls.dir, "updates.key"), "w") as f:
-            f.write(f"# comment\nkey 1 {KEY2.hex()}\nkey 2 {bytes(32).hex()}\nfile 1 {bytes(32).hex()} levels/a b.blend\n"
+            f.write(f"# comment\nkey 1 {KEY2.hex()}\nkey 2 {bytes(32).hex()}\nfile 1 {bytes(32).hex()} 4096 1700000000000000000 levels/a b.blend\n"
                     "label 2 Winter update\n")
         config = {"games": [{"name": "Test", "key_file": "game.key", "dev_tokens": ["letmein"]},
                             {"name": "Updated", "key_file": "updates.key", "dev_tokens": ["letmein"]}]}

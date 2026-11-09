@@ -1269,18 +1269,27 @@ static void test_keyring(void)
   CHECK(r.updates[0] == 1 && r.updates[1] == 3 && r.updates[2] == 5 && bc_keyring_newest(&r) == 5);
   uint8_t hash[BC_FILE_HASH_SIZE];
   memset(hash, 0xAB, sizeof(hash));
-  CHECK(bc_keyring_set_record(&r, "levels/level 1.blend", hash, 3));
-  CHECK(bc_keyring_set_record(&r, "game.blend", hash, 1));
+  /* Out of path order on purpose: records stay sorted, the last write of a path wins. */
+  CHECK(bc_keyring_set_record(&r, "levels/level 1.blend", hash, 3, 7, 1700000000123456789ull));
+  CHECK(bc_keyring_set_record(&r, "game.blend", hash, 1, 0, 0));
+  CHECK(bc_keyring_set_record(&r, "a.py", hash, 1, 1, 2));
+  CHECK(bc_keyring_set_record(&r, "game.blend", hash, 2, UINT64_MAX, 5));
+  CHECK(r.record_count == 3 && strcmp(r.records[0].path, "a.py") == 0 && strcmp(r.records[1].path, "game.blend") == 0 &&
+        strcmp(r.records[2].path, "levels/level 1.blend") == 0);
   work_path(path, "ring/ring.key");
   CHECK(bc_keyring_save(&r, path, false, err, sizeof(err)));
 #ifndef _WIN32
   struct stat st;
   CHECK(stat(path, &st) == 0 && (st.st_mode & 0777) == 0600);
 #endif
-  CHECK(bc_keyring_load(&q, path, err, sizeof(err)) && q.key_count == 3 && q.record_count == 2);
+  CHECK(bc_keyring_load(&q, path, err, sizeof(err)) && q.key_count == 3 && q.record_count == 3);
   CHECK(memcmp(q.keys, r.keys, 3 * BC_KEY_SIZE) == 0 && q.updates[2] == 5);
   const BC_KeyRecord *record = bc_keyring_record(&q, "levels/level 1.blend");
   CHECK(record != NULL && record->update == 3 && memcmp(record->hash, hash, sizeof(hash)) == 0);
+  CHECK(record != NULL && record->size == 7 && record->mtime == 1700000000123456789ull);
+  record = bc_keyring_record(&q, "game.blend");
+  CHECK(record != NULL && record->update == 2 && record->size == UINT64_MAX && record->mtime == 5);
+  CHECK(bc_keyring_record(&q, "b.py") == NULL && bc_keyring_record(&q, "") == NULL);
   uint8_t id[BC_KEY_ID_SIZE];
   bc_key_id(q.keys[1], id);
   CHECK(bc_keyring_find_id(&q, id) == 1 && bc_keyring_find(&q, 5) == 2 && bc_keyring_find(&q, 4) == -1);
@@ -1302,6 +1311,17 @@ static void test_keyring(void)
   CHECK(bc_keyring_load(&q, path, err, sizeof(err)) && q.key_count == 1 && q.updates[0] == 2);
   write_text("ring/garbage.key", "key 2 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f\n2 Winter\n");
   work_path(path, "ring/garbage.key");
+  CHECK(!bc_keyring_load(&q, path, err, sizeof(err)) && strstr(err, "line 2") != NULL);
+  /* A file line without its size and date, or with a size past 64 bits, is refused. */
+  write_text("ring/short.key",
+             "key 1 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f\n"
+             "file 1 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f game.blend\n");
+  work_path(path, "ring/short.key");
+  CHECK(!bc_keyring_load(&q, path, err, sizeof(err)) && strstr(err, "line 2") != NULL);
+  write_text("ring/wide.key",
+             "key 1 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f\n"
+             "file 1 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f 18446744073709551616 0 a.blend\n");
+  work_path(path, "ring/wide.key");
   CHECK(!bc_keyring_load(&q, path, err, sizeof(err)) && strstr(err, "line 2") != NULL);
   bc_keyring_free(&r);
   bc_keyring_free(&q);
@@ -1665,6 +1685,27 @@ static void test_job(void)
     CHECK(run_job(&p, &c) == 0 && c.errors == 0 && c.warnings == 0);
     CHECK(bc_test_decrypt(game_blend, content_key, &plain, &plain_size));
     free(plain);
+    /* A store's provider, told by its name: what it still needs is said, the export goes ahead. */
+    char store_rel[64], store_path[BC_PATH_MAX];
+    snprintf(store_rel, sizeof(store_rel), "job/dist/engine/BC_Provider_Steam%s", bc_exe_extension());
+    write_text(store_rel, "pretend this is the Steam provider");
+    snprintf(p.key_provider, sizeof(p.key_provider), "engine/BC_Provider_Steam%s", bc_exe_extension());
+    CHECK(bc_project_key_store(&p) == BC_STORE_STEAM);
+    CHECK(run_job(&p, &c) == 0 && c.errors == 0 && c.warnings == 1);
+    CHECK(strstr(c.last_warning, bc_key_store_library(BC_STORE_STEAM)) != NULL && strstr(c.last_warning, "(engine/)") != NULL);
+    snprintf(store_rel, sizeof(store_rel), "job/dist/engine/%s", bc_key_store_library(BC_STORE_STEAM));
+    write_text(store_rel, "pretend this is the Steamworks library");
+    write_text("job/dist/steam_appid.txt", "480");
+    CHECK(run_job(&p, &c) == 0 && c.errors == 0 && c.warnings == 1 && strstr(c.last_warning, "steam_appid.txt") != NULL);
+    work_path(store_path, "job/dist/steam_appid.txt");
+    CHECK(bc_remove(store_path));
+    CHECK(run_job(&p, &c) == 0 && c.errors == 0 && c.warnings == 0);
+    snprintf(p.key_provider, sizeof(p.key_provider), "engine/bc_provider_epic%s", bc_exe_extension());
+    CHECK(bc_project_key_store(&p) == BC_STORE_EPIC);
+    snprintf(p.key_provider, sizeof(p.key_provider), "engine/bc_provider_steam_old%s", bc_exe_extension());
+    CHECK(bc_project_key_store(&p) == BC_STORE_CUSTOM);
+    snprintf(p.key_provider, sizeof(p.key_provider), "engine/provider");
+    CHECK(bc_project_key_store(&p) == BC_STORE_CUSTOM);
     /* Refusals: a key file that would ship, a missing provider. */
     work_path(p.key_file, "job/dist/content.key");
     CHECK(run_job(&p, &c) == -2 && strstr(c.last_error, "inside the game folder") != NULL);
@@ -1684,6 +1725,8 @@ static void test_job(void)
     bc_keyring_init(&ring);
     work_path(p.key_file, "job/ring.key");
     work_path(one_out, "job/dist/levels/one.blend");
+    char one_src[BC_PATH_MAX];
+    work_path(one_src, "job/src/levels/one.blend");
     p.key_rotation = true;
     p.key_update = 1;
     CHECK(run_job(&p, &c) == 0 && c.errors == 0 && c.warnings == 1);
@@ -1719,6 +1762,14 @@ static void test_job(void)
     free(one_before);
     free(one_after);
     free(game_before);
+    /* Still update 2, one more change: said before sealing, from size and date alone. */
+    write_blend("job/src/levels/one.blend", 1200, 13);
+    CHECK(run_job(&p, &c) == 0 && c.errors == 0 && c.warnings == 1);
+    CHECK(strstr(c.last_warning, "1 file(s) changed since the last export get the key of update 2") != NULL);
+    record = bc_keyring_load(&ring, p.key_file, err, sizeof(err)) ? bc_keyring_record(&ring, "levels/one.blend") : NULL;
+    uint64_t one_size = 0, one_mtime = 0;
+    CHECK(bc_file_stat(one_src, &one_size, &one_mtime));
+    CHECK(record != NULL && record->update == 2 && record->size == one_size && record->mtime == one_mtime);
     /* The update number cannot go back. */
     p.key_update = 1;
     CHECK(run_job(&p, &c) == -2 && strstr(c.last_error, "cannot go back") != NULL);

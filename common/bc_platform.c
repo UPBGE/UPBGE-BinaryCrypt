@@ -107,7 +107,7 @@ FILE *bc_fopen(const char *path, const char *mode)
 #endif
 }
 
-bool bc_file_size(const char *path, uint64_t *r_size)
+bool bc_file_stat(const char *path, uint64_t *r_size, uint64_t *r_mtime)
 {
 #ifdef _WIN32
   wchar_t *wpath = bc_utf16(path);
@@ -117,6 +117,9 @@ bool bc_file_size(const char *path, uint64_t *r_size)
   free(wpath);
   if (ok) {
     *r_size = ((uint64_t)data.nFileSizeHigh << 32) | data.nFileSizeLow;
+    /* FILETIME counts 100 ns ticks from 1601: rebase on 1970, the POSIX epoch. */
+    const uint64_t ticks = ((uint64_t)data.ftLastWriteTime.dwHighDateTime << 32) | data.ftLastWriteTime.dwLowDateTime;
+    *r_mtime = ticks >= 116444736000000000ull ? (ticks - 116444736000000000ull) * 100u : 0;
   }
   return ok;
 #else
@@ -125,8 +128,20 @@ bool bc_file_size(const char *path, uint64_t *r_size)
     return false;
   }
   *r_size = (uint64_t)st.st_size;
+#  ifdef __APPLE__
+  const struct timespec t = st.st_mtimespec;
+#  else
+  const struct timespec t = st.st_mtim;
+#  endif
+  *r_mtime = t.tv_sec < 0 ? 0 : (uint64_t)t.tv_sec * 1000000000u + (uint64_t)t.tv_nsec;
   return true;
 #endif
+}
+
+bool bc_file_size(const char *path, uint64_t *r_size)
+{
+  uint64_t mtime;
+  return bc_file_stat(path, r_size, &mtime);
 }
 
 #ifdef _WIN32

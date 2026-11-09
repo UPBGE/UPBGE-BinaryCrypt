@@ -27,6 +27,47 @@ bool bc_project_key_file(const BC_Project *p, char *out, const size_t size)
   return written > 0 && (size_t)written < size;
 }
 
+BC_KeyStore bc_project_key_store(const BC_Project *p)
+{
+  /* The file name without bc_exe_extension(), any case: Windows names are case-insensitive. */
+  const char *name = bc_path_basename(p->key_provider);
+  size_t n = strlen(name);
+  const size_t ext = strlen(bc_exe_extension());
+  if (ext > 0 && n > ext && bc_path_has_extension(name, bc_exe_extension())) {
+    n -= ext;
+  }
+  for (int store = BC_STORE_STEAM; store <= BC_STORE_EPIC; store++) {
+    const char *provider = bc_key_store_provider((BC_KeyStore)store);
+    if (n == strlen(provider)) {
+      size_t i = 0;
+      while (i < n && tolower((unsigned char)name[i]) == provider[i]) {
+        i++;
+      }
+      if (i == n) {
+        return (BC_KeyStore)store;
+      }
+    }
+  }
+  return BC_STORE_CUSTOM;
+}
+
+const char *bc_key_store_provider(const BC_KeyStore store)
+{
+  return store == BC_STORE_STEAM ? "bc_provider_steam" : store == BC_STORE_EPIC ? "bc_provider_epic" : NULL;
+}
+
+const char *bc_key_store_library(const BC_KeyStore store)
+{
+  /* The redistributable each provider links (keyserver/providers/CMakeLists.txt). */
+#ifdef _WIN32
+  return store == BC_STORE_STEAM ? "steam_api64.dll" : store == BC_STORE_EPIC ? "EOSSDK-Win64-Shipping.dll" : NULL;
+#elif defined(__APPLE__)
+  return store == BC_STORE_STEAM ? "libsteam_api.dylib" : store == BC_STORE_EPIC ? "libEOSSDK-Mac-Shipping.dylib" : NULL;
+#else
+  return store == BC_STORE_STEAM ? "libsteam_api.so" : store == BC_STORE_EPIC ? "libEOSSDK-Linux-Shipping.so" : NULL;
+#endif
+}
+
 void bc_project_clear_inputs(BC_Project *p)
 {
   for (int i = 0; i < p->input_count; i++) {

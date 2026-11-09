@@ -12,7 +12,11 @@
  *   Key per update:
  *     # comment
  *     key <update> <64 hex>
- *     file <update> <64 hex: BLAKE2b-256 of the source .blend> <path inside the game folder>
+ *     file <update> <64 hex: BLAKE2b-256 of the source> <size> <mtime> <path inside the game folder>
+ *
+ * A file line records the last export of a file: the update whose key sealed it, the hash of its
+ * source, and the source's size and modification time (nanoseconds since 1970), which tell the
+ * editor what changed since that export without reading any file. Lines are sorted by path.
  *
  * The one key form reads as the key of update 1, so a game can switch to a key per update later
  * and keep its published files. Keys are kept sorted by update number.
@@ -40,12 +44,16 @@ typedef struct BC_KeyRecord {
   char *path;
   uint8_t hash[BC_FILE_HASH_SIZE];
   uint32_t update;
+  /** The source at that export (bc_file_stat). */
+  uint64_t size, mtime;
 } BC_KeyRecord;
 
 typedef struct BC_KeyRing {
   uint32_t updates[BC_KEYS_MAX];
   uint8_t keys[BC_KEYS_MAX][BC_KEY_SIZE];
   int key_count;
+  /** Sorted by path (strcmp): lookups are binary searches, and records added in path order (an
+   * export's files, a saved key file) append. */
   BC_KeyRecord *records;
   int record_count;
   int record_capacity;
@@ -54,6 +62,9 @@ typedef struct BC_KeyRing {
 void bc_keyring_init(BC_KeyRing *r);
 /** Wipes the keys. */
 void bc_keyring_free(BC_KeyRing *r);
+/** Wipes the keys only, keeping the update numbers and the records: for a reader that needs no
+ * key (the editor). */
+void bc_keyring_wipe_keys(BC_KeyRing *r);
 void bc_keyring_clear_records(BC_KeyRing *r);
 
 bool bc_keyring_load(BC_KeyRing *r, const char *path, char *err, size_t err_size);
@@ -70,7 +81,12 @@ uint32_t bc_keyring_newest(const BC_KeyRing *r);
 bool bc_keyring_add(BC_KeyRing *r, uint32_t update);
 
 const BC_KeyRecord *bc_keyring_record(const BC_KeyRing *r, const char *path);
-bool bc_keyring_set_record(BC_KeyRing *r, const char *path, const uint8_t hash[BC_FILE_HASH_SIZE], uint32_t update);
+bool bc_keyring_set_record(BC_KeyRing *r,
+                           const char *path,
+                           const uint8_t hash[BC_FILE_HASH_SIZE],
+                           uint32_t update,
+                           uint64_t size,
+                           uint64_t mtime);
 
 #ifdef __cplusplus
 }

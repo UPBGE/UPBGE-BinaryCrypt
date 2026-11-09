@@ -13,6 +13,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "bc_keyring.h"
 #include "bc_project.h"
 #include "binarycrypt_format.h"
 
@@ -33,7 +34,8 @@ typedef struct BC_Job BC_Job;
 /** One file a project gives. */
 typedef struct BC_ListedFile {
   char *path;
-  uint64_t size;
+  /** Size and modification time (bc_file_stat), from the one stat call of the listing. */
+  uint64_t size, mtime;
   /** BC_KIND_*: .blend, .py, anything else a data file. */
   uint8_t kind;
 } BC_ListedFile;
@@ -65,6 +67,19 @@ bool bc_project_list_files(const BC_Project *p,
                            BC_FileList *r_list);
 
 void bc_file_list_free(BC_FileList *list);
+
+/** Listed files of \a list whose size or modification time differ from their record in
+ * \a records (sorted by path, as BC_KeyRing keeps them), or that have none: what changed since the
+ * export that wrote the records, known without reading a file. A touched but unchanged file
+ * counts; the export itself tells them apart by hash. Empty files are copied, never recorded, and
+ * not counted. */
+int bc_file_list_changed(const BC_Project *p, const BC_FileList *list, const BC_KeyRecord *records, int record_count);
+
+/** Online key with a store's provider (bc_project_key_store): what its provider still needs in the
+ * game folder, as warnings to \a log. An export goes ahead without them (a provider of your own
+ * may differ): the store library missing next to the provider, and for Steam a steam_appid.txt
+ * that would ship. \return how many. */
+int bc_project_store_notes(const BC_Project *p, BC_LogFn log, void *user);
 
 /** Validate \a p and list every file to encrypt. Returns NULL when the project is not runnable;
  * every problem is reported through \a log. The project is copied, it may change afterwards.

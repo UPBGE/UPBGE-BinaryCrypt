@@ -27,6 +27,8 @@ double bc_time_seconds(void);
 
 FILE *bc_fopen(const char *path, const char *mode);
 bool bc_file_size(const char *path, uint64_t *r_size);
+/** Size and last modification time (nanoseconds since 1970) of a regular file, in one call. */
+bool bc_file_stat(const char *path, uint64_t *r_size, uint64_t *r_mtime);
 bool bc_is_file(const char *path);
 bool bc_is_dir(const char *path);
 /** Create \a dir and any missing parent. */

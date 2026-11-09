@@ -91,10 +91,14 @@ typedef struct BC_Field {
 /** Readiness of the project: per field, and what still blocks Encrypt. A subset of the checks of
  * bc_job_create, so a disabled Encrypt never blocks an export the job would accept. */
 typedef struct BC_Check {
-  BC_Field source, output, runtime, icon, provider;
+  BC_Field source, output, runtime, icon, provider, update;
   bool no_inputs;
   /** What to do before encrypting, empty when ready. */
   char todo[512];
+  /** What does not stop an export but needs doing: the store's steps first (store_notes, also
+   * shown on the Store row), then the key per update. Empty when nothing. */
+  char notes[512];
+  char store_notes[512];
 } BC_Check;
 
 typedef struct BC_FileType {
@@ -157,6 +161,13 @@ typedef struct BC_Gui {
   /** File types the inputs hold, every file met counted: .blend and .py first, then by name. */
   BC_FileType *types;
   int type_count, type_capacity, types_scroll;
+  /** Key per update: the key file's update numbers and records (its keys wiped once read), and
+   * the listed files changed since the export that wrote the records. Read again when the list
+   * or the key settings change (keys_revision), never per frame. */
+  BC_KeyRing ring;
+  bool ring_ok, ring_bad;
+  int ring_changed;
+  unsigned keys_revision, ring_revision, ring_scan;
   /** Files met by the listing running now (BC_Seen), NULL otherwise. */
   void *seen;
   bool focused;
@@ -392,6 +403,26 @@ static void bc_gui_set_dist_path(BC_Gui *g, const char *path, char *field, const
       return;
     }
     snprintf(field, field_size, "%s", rel);
+  }
+  bc_gui_set_modified(g);
+}
+
+/** Store template: the store's reference provider next to the UPBGE runtime (the folder already
+ * holding a runtime and its libraries), or no provider for one of your own. */
+static void bc_gui_set_store(BC_Gui *g, const BC_KeyStore store)
+{
+  BC_Project *p = &g->project;
+  const char *name = bc_key_store_provider(store);
+  if (name == NULL) {
+    p->key_provider[0] = '\0';
+  }
+  else {
+    char dir[BC_PATH_MAX];
+    bc_path_dirname(dir, sizeof(dir), p->player);
+    const int n = snprintf(p->key_provider, sizeof(p->key_provider), "%s%s%s%s", dir, dir[0] ? "/" : "", name, bc_exe_extension());
+    if (n < 0 || (size_t)n >= sizeof(p->key_provider)) {
+      p->key_provider[0] = '\0';
+    }
   }
   bc_gui_set_modified(g);
 }
@@ -664,6 +695,7 @@ static void bc_gui_tick_job(BC_Gui *g)
   }
   bc_gui_stop(g, NULL);
   g->revision++; /* Outputs exist now. */
+  g->keys_revision++; /* And the key file its records. */
 }
 
 /* -------------------------------------------------------------------------------------------- */
@@ -679,6 +711,19 @@ static void bc_todo(BC_Check *c, const char *action)
 {
   const size_t n = strlen(c->todo);
   snprintf(c->todo + n, sizeof(c->todo) - n, "%s%s", n ? "  \xc2\xb7  " : "", action);
+}
+
+static void bc_note(BC_Check *c, const char *text)
+{
+  const size_t n = strlen(c->notes);
+  snprintf(c->notes + n, sizeof(c->notes) - n, "%s%s", n ? "  \xc2\xb7  " : "", text);
+}
+
+/** BC_LogFn of bc_project_store_notes: its warnings become notes. */
+static void bc_note_log(void *user, BC_LogLevel level, const char *message)
+{
+  (void)level;
+  bc_note((BC_Check *)user, message);
 }
 
 static int bc_listed_compare(const void *key, const void *item)
@@ -924,6 +969,32 @@ static void bc_gui_refresh_scan(BC_Gui *g)
 
 /** Tick or untick a data file type: the project's extensions, written again without it or with it
  * added. */
+/** The key file as a key per update needs it, compared with the listed files: on a new list or new
+ * key settings only. Sizes and dates, no file read: cheap enough to run with every scan. */
+static void bc_gui_refresh_ring(BC_Gui *g)
+{
+  if (g->ring_revision == g->keys_revision && g->ring_scan == g->scan_revision) {
+    return;
+  }
+  g->ring_revision = g->keys_revision;
+  g->ring_scan = g->scan_revision;
+  g->revision++; /* The check reads it. */
+  bc_keyring_free(&g->ring);
+  g->ring_ok = g->ring_bad = false;
+  g->ring_changed = 0;
+  const BC_Project *p = &g->project;
+  char path[BC_PATH_MAX], err[BC_PATH_MAX + 64];
+  if (p->key_mode != BC_KEY_ONLINE || !p->key_rotation || !bc_project_key_file(p, path, sizeof(path)) || !bc_is_file(path)) {
+    return;
+  }
+  g->ring_ok = bc_keyring_load(&g->ring, path, err, sizeof(err));
+  g->ring_bad = !g->ring_ok;
+  bc_keyring_wipe_keys(&g->ring);
+  if (g->ring_ok && g->scan_ok) {
+    g->ring_changed = bc_file_list_changed(p, &g->scan, g->ring.records, g->ring.record_count);
+  }
+}
+
 static void bc_gui_toggle_type(BC_Gui *g, const char *type)
 {
   char ext[BC_DATA_EXT_MAX][BC_DATA_EXT_SIZE];
@@ -1059,6 +1130,30 @@ static void bc_gui_refresh_check(BC_Gui *g)
       else {
         bc_field_set(&c->provider, BC_FIELD_ERROR, "not found");
         bc_todo(c, "copy the key provider into the output folder");
+      }
+    }
+    bc_project_store_notes(p, bc_note_log, c);
+    snprintf(c->store_notes, sizeof(c->store_notes), "%s", c->notes);
+    /* Key per update, against the key file the export will read (bc_job_setup_key). */
+    if (p->key_rotation) {
+      const uint32_t update = p->key_update ? p->key_update : 1;
+      const uint32_t newest = g->ring_ok ? bc_keyring_newest(&g->ring) : 0;
+      char text[160];
+      if (g->ring_bad) {
+        bc_todo(c, "the key file cannot be read");
+      }
+      else if (update < newest) {
+        bc_field_set(&c->update, BC_FIELD_ERROR, NULL);
+        snprintf(text, sizeof(text), "the update number cannot go below %u, the newest in the key file", newest);
+        bc_todo(c, text);
+      }
+      else if (update == newest && g->ring_changed > 0) {
+        snprintf(text,
+                 sizeof(text),
+                 "%d file(s) changed since the last export get the key of update %u: if it is published, press Next",
+                 g->ring_changed,
+                 update);
+        bc_note(c, text);
       }
     }
   }
@@ -2051,7 +2146,7 @@ static void bc_gui_draw(BC_Gui *g)
   const float game_min_h = g->game_open ? game_fixed_h + list_min_h : BC_FOLDED_H;
   const float build_h = g->build_open ? (float)(2 * BC_GAP + 2 * (BC_ROW + BC_GAP)) : BC_FOLDED_H;
   const float windows_h = windows_open ? (float)(2 * BC_GAP + 2 * (BC_ROW + BC_GAP)) : BC_FOLDED_H;
-  const int protection_rows = 2 + (key_file_row ? 1 : 0) + (online ? 2 : 0);
+  const int protection_rows = 2 + (key_file_row ? 1 : 0) + (online ? 3 : 0);
   const float protection_h = g->protection_open ? 2 * BC_GAP + (float)protection_rows * (BC_ROW + BC_GAP) : BC_FOLDED_H;
   const float help_h = g->help ? (float)(BC_GAP + BC_HELP_H) : 0.0f;
   const float bottom_min_h = (BC_ROW + BC_GAP) + (BC_LOG_MIN * 24 + BC_GAP) + help_h; /* Run row, log, help. */
@@ -2075,6 +2170,7 @@ static void bc_gui_draw(BC_Gui *g)
     GuiLock();
   }
   bc_gui_refresh_scan(g);
+  bc_gui_refresh_ring(g);
   bc_gui_refresh_check(g);
   const BC_Check *check = &g->check;
   const float x0 = BC_MARGIN + BC_GAP;
@@ -2479,6 +2575,7 @@ static void bc_gui_draw(BC_Gui *g)
           if (r == BC_DIALOG_OK) {
             snprintf(g->project.key_file, sizeof(g->project.key_file), "%s", path);
             bc_gui_set_modified(g);
+            g->keys_revision++;
           }
           else if (r == BC_DIALOG_UNAVAILABLE) {
             bc_gui_dialog_unavailable(g);
@@ -2488,11 +2585,49 @@ static void bc_gui_draw(BC_Gui *g)
           bc_gui_resolve(g, g->key_file_text, resolved); /* Empty stays empty: the default key file. */
           snprintf(g->project.key_file, sizeof(g->project.key_file), "%s", resolved);
           bc_gui_set_modified(g);
+          g->keys_revision++;
         }
         py += BC_ROW + BC_GAP;
       }
       if (online) {
+        /* Store: a template for the provider, then what the store's provider still needs (or the
+         * step no file shows). Told by the provider's file name, so it never disagrees with it. */
         const float key_x = x0 + BC_LABEL_W;
+        const float padding = (float)GuiGetStyle(TOGGLE, GROUP_PADDING);
+        const float store_w = MeasureTextEx(font, "Custom", BC_TEXT_SIZE, text_spacing).x + 4 * BC_GAP;
+        const char *store_help = "Store the game is sold on\nSteam and Epic fill in their reference key provider (keyserver/providers), next to the UPBGE runtime: copy it there with the store's library. Custom: a provider of your own, for example from bc_provider_dev. The store is told by the provider's file name.";
+        GuiLabel(bc_rect(x0, py, BC_LABEL_W, BC_ROW), "Store");
+        bc_tip(bc_rect(x0, py, BC_LABEL_W + 3 * store_w + 2 * padding, BC_ROW), store_help);
+        const BC_KeyStore store = bc_project_key_store(&g->project);
+        int store_index = store == BC_STORE_STEAM ? 0 : store == BC_STORE_EPIC ? 1 : 2;
+        const int store_before = store_index;
+        GuiToggleGroup(bc_rect(key_x, py, store_w, BC_ROW), "Steam;Epic;Custom", &store_index);
+        if (store_index != store_before) {
+          bc_gui_set_store(g, store_index == 0 ? BC_STORE_STEAM : store_index == 1 ? BC_STORE_EPIC : BC_STORE_CUSTOM);
+        }
+        {
+          const float sx = key_x + 3 * store_w + 2 * padding + 2 * BC_GAP;
+          const float sw = right - sx;
+          /* Static: the help panel and the tooltip read it after this block. */
+          static char status[sizeof(check->store_notes) + 96];
+          const bool pending = check->store_notes[0] != '\0';
+          if (pending) {
+            snprintf(status, sizeof(status), "%s", check->store_notes);
+          }
+          else if (store == BC_STORE_CUSTOM) {
+            snprintf(status, sizeof(status), "A provider of your own: bc_provider_dev is a starting point");
+          }
+          else {
+            snprintf(status, sizeof(status), "Next: install the key file on your key server");
+          }
+          char shown[sizeof(status)];
+          bc_fit_right(status, sw, shown, sizeof(shown));
+          bc_tip(bc_rect(sx, py, sw, BC_ROW), status);
+          const Vector2 at = {sx, py + (BC_ROW - BC_TEXT_SIZE) / 2};
+          DrawTextEx(font, shown, at, BC_TEXT_SIZE, text_spacing, GetColor((unsigned int)BC_RGB(pending ? BC_RGB_WARNING : BC_RGB_HINT)));
+        }
+        py += BC_ROW + BC_GAP;
+
         const float url_label_w = MeasureTextEx(font, "URL", BC_TEXT_SIZE, text_spacing).x + 3 * BC_GAP;
         const float provider_w = (right - key_x - BC_BUTTON_W - url_label_w - 2 * BC_GAP) * 0.45f;
         const char *provider_help = "Key provider inside the game folder\nFor example engine/bc_provider_steam.exe: proves to the key server that the player owns the game.";
@@ -2500,7 +2635,7 @@ static void bc_gui_draw(BC_Gui *g)
         GuiLabel(bc_rect(x0, py, BC_LABEL_W, BC_ROW), "Provider");
         bc_tip(bc_rect(x0, py, BC_LABEL_W, BC_ROW), provider_help);
         const Rectangle provider_box = bc_rect(key_x, py, provider_w, BC_ROW);
-        if (bc_gui_text_field(provider_box, provider_help, "Required: engine/bc_provider_steam.exe, for example", g->provider_text, sizeof(g->provider_text), g->project.key_provider, sizeof(g->project.key_provider), &g->provider_edit)) {
+        if (bc_gui_text_field(provider_box, provider_help, "Required: your key provider, in the game folder", g->provider_text, sizeof(g->provider_text), g->project.key_provider, sizeof(g->project.key_provider), &g->provider_edit)) {
           char entered[BC_PATH_MAX];
           snprintf(entered, sizeof(entered), "%s", g->project.key_provider);
           bc_gui_set_dist_path(g, entered, g->project.key_provider, sizeof(g->project.key_provider), "key provider");
@@ -2538,6 +2673,7 @@ static void bc_gui_draw(BC_Gui *g)
         if (rotation_mode != (g->project.key_rotation ? 1 : 0)) {
           g->project.key_rotation = rotation_mode != 0;
           bc_gui_set_modified(g);
+          g->keys_revision++;
         }
         if (g->project.key_rotation) {
           const float update_label_w = MeasureTextEx(font, "Update number", BC_TEXT_SIZE, text_spacing).x + 3 * BC_GAP;
@@ -2547,7 +2683,8 @@ static void bc_gui_draw(BC_Gui *g)
           bc_tip(bc_rect(update_x, py, update_label_w, BC_ROW), update_help);
           char update_value[16];
           snprintf(update_value, sizeof(update_value), "%u", g->project.key_update ? g->project.key_update : 1u);
-          if (bc_gui_text_field(bc_rect(update_x + update_label_w, py, 90, BC_ROW), update_help, NULL, g->update_text, sizeof(g->update_text), update_value, sizeof(update_value), &g->update_edit)) {
+          const Rectangle update_box = bc_rect(update_x + update_label_w, py, 90, BC_ROW);
+          if (bc_gui_text_field(update_box, update_help, NULL, g->update_text, sizeof(g->update_text), update_value, sizeof(update_value), &g->update_edit)) {
             char *end;
             const unsigned long update = strtoul(update_value, &end, 10);
             if (update_value[0] >= '0' && update_value[0] <= '9' && *end == '\0' && update >= 1 && update <= 0xFFFFFFFFul) {
@@ -2557,6 +2694,79 @@ static void bc_gui_draw(BC_Gui *g)
             else {
               bc_gui_log(g, BC_LOG_ERROR, "The update number is a whole number from 1");
             }
+          }
+          if (!g->update_edit) {
+            bc_draw_field(update_box, &check->update);
+          }
+          /* Next: the number after the newest key of the key file, the one to start an update with. */
+          const uint32_t current = g->project.key_update ? g->project.key_update : 1;
+          const uint32_t newest = g->ring_ok ? bc_keyring_newest(&g->ring) : 0;
+          const float next_w = bc_button_w("Next");
+          const Rectangle next_box = bc_rect(update_box.x + update_box.width + BC_GAP, py, next_w, BC_ROW);
+          static char next_help[192];
+          snprintf(next_help,
+                   sizeof(next_help),
+                   "Start update %u\nThe next export creates its key: changed files get it, unchanged ones keep theirs. Install the key file on the key server before publishing.",
+                   newest + 1);
+          const bool can_next = newest > 0 && newest < 0xFFFFFFFFu && current <= newest;
+          const bool next_changed = bc_enable_begin(can_next);
+          bc_tip(next_box, next_help);
+          if (GuiButton(next_box, "Next") && can_next) {
+            g->project.key_update = newest + 1;
+            bc_gui_set_modified(g);
+          }
+          bc_enable_end(next_changed);
+          /* Where the number stands against the key file, and what changed since the last export:
+           * a word or two here, the sentence in the tooltip. */
+          const float sx = next_box.x + next_w + 2 * BC_GAP;
+          const float sw = right - sx;
+          static char state_help[224];
+          const char *state;
+          unsigned int color = BC_RGB_HINT;
+          if (g->ring_bad) {
+            state = "Key file unreadable";
+            snprintf(state_help, sizeof(state_help), "The key file cannot be read\nThe export would stop: fix or restore the key file.");
+            color = BC_RGB_ERROR;
+          }
+          else if (newest == 0) {
+            state = "New key file";
+            snprintf(state_help, sizeof(state_help), "No key file yet\nThe first export creates it, with the key of update %u.", current);
+          }
+          else if (current < newest) {
+            state = "Below key file";
+            snprintf(state_help, sizeof(state_help), "The key file is at update %u\nThe number cannot go back: use %u (no new key) or press Next.", newest, newest);
+            color = BC_RGB_ERROR;
+          }
+          else if (current == newest && g->ring_changed > 0) {
+            static char changed[32];
+            snprintf(changed, sizeof(changed), "%d changed", g->ring_changed);
+            state = changed;
+            snprintf(state_help,
+                     sizeof(state_help),
+                     "%d file(s) changed since the last export\nThey get the key of update %u, which that export already used. If update %u is published, press Next first.",
+                     g->ring_changed,
+                     current,
+                     current);
+            color = BC_RGB_WARNING;
+          }
+          else if (current == newest) {
+            state = "No changes";
+            snprintf(state_help, sizeof(state_help), "No file changed since the last export\nBy size and date: the export compares contents.");
+          }
+          else {
+            state = "New key";
+            snprintf(state_help,
+                     sizeof(state_help),
+                     "Update %u gets a new key at the next export\n%d file(s) changed since the last export get it, the others keep theirs.",
+                     current,
+                     g->ring_changed);
+          }
+          if (sw > 0) {
+            char shown[64];
+            bc_fit_right(state, sw, shown, sizeof(shown));
+            bc_tip(bc_rect(sx, py, sw, BC_ROW), state_help);
+            const Vector2 at = {sx, py + (BC_ROW - BC_TEXT_SIZE) / 2};
+            DrawTextEx(font, shown, at, BC_TEXT_SIZE, text_spacing, GetColor((unsigned int)BC_RGB(color)));
           }
         }
         py += BC_ROW + BC_GAP;
@@ -2619,6 +2829,16 @@ static void bc_gui_draw(BC_Gui *g)
       snprintf(todo, sizeof(todo), "To encrypt: %s", check->todo);
       bc_fit_right(todo, mid_w, shown, sizeof(shown));
       bc_tip(bc_rect(mid_x, y, mid_w, BC_ROW), todo);
+      const Vector2 position = {mid_x, y + (BC_ROW - BC_TEXT_SIZE) / 2};
+      DrawTextEx(font, shown, position, BC_TEXT_SIZE, text_spacing, GetColor((unsigned int)BC_RGB(BC_RGB_WARNING)));
+    }
+    else if (!running && !show_built && check->notes[0] != '\0') {
+      /* Ready, with something to see to first: in place of the idle progress bar. */
+      static char note[sizeof(check->notes) + 16];
+      char shown[sizeof(note)];
+      snprintf(note, sizeof(note), "Note: %s", check->notes);
+      bc_fit_right(note, mid_w, shown, sizeof(shown));
+      bc_tip(bc_rect(mid_x, y, mid_w, BC_ROW), note);
       const Vector2 position = {mid_x, y + (BC_ROW - BC_TEXT_SIZE) / 2};
       DrawTextEx(font, shown, position, BC_TEXT_SIZE, text_spacing, GetColor((unsigned int)BC_RGB(BC_RGB_WARNING)));
     }
@@ -2782,6 +3002,7 @@ static void bc_gui_draw(BC_Gui *g)
   if (key_mode != (int)g->project.key_mode) {
     g->project.key_mode = (BC_KeyMode)key_mode;
     bc_gui_set_modified(g);
+    g->keys_revision++;
   }
   if (running) {
     GuiEnable();
@@ -2942,6 +3163,7 @@ int bc_gui_run(const char *project_path)
   free(g.input_rows);
   free(g.input_folded);
   free(g.types);
+  bc_keyring_free(&g.ring);
   bc_project_free(&g.project);
   UnloadFont(font); /* No-op for raylib's own font. */
   CloseWindow();

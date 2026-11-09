@@ -28,6 +28,11 @@ void bc_keyring_clear_records(BC_KeyRing *r)
   r->record_count = 0;
 }
 
+void bc_keyring_wipe_keys(BC_KeyRing *r)
+{
+  crypto_wipe(r->keys, sizeof(r->keys));
+}
+
 void bc_keyring_free(BC_KeyRing *r)
 {
   bc_keyring_clear_records(r);
@@ -89,19 +94,41 @@ bool bc_keyring_add(BC_KeyRing *r, const uint32_t update)
   return ok;
 }
 
-const BC_KeyRecord *bc_keyring_record(const BC_KeyRing *r, const char *path)
+/** First record whose path is not below \a path: where it is, or where it goes. */
+static int bc_keyring_lower_bound(const BC_KeyRing *r, const char *path)
 {
-  for (int i = 0; i < r->record_count; i++) {
-    if (strcmp(r->records[i].path, path) == 0) {
-      return &r->records[i];
+  /* Records arrive in path order (an export, a saved file): try the end before searching. */
+  if (r->record_count == 0 || strcmp(r->records[r->record_count - 1].path, path) < 0) {
+    return r->record_count;
+  }
+  int lo = 0, hi = r->record_count;
+  while (lo < hi) {
+    const int mid = lo + (hi - lo) / 2;
+    if (strcmp(r->records[mid].path, path) < 0) {
+      lo = mid + 1;
+    }
+    else {
+      hi = mid;
     }
   }
-  return NULL;
+  return lo;
 }
 
-bool bc_keyring_set_record(BC_KeyRing *r, const char *path, const uint8_t hash[BC_FILE_HASH_SIZE], const uint32_t update)
+const BC_KeyRecord *bc_keyring_record(const BC_KeyRing *r, const char *path)
 {
-  BC_KeyRecord *record = (BC_KeyRecord *)bc_keyring_record(r, path);
+  const int i = bc_keyring_lower_bound(r, path);
+  return i < r->record_count && strcmp(r->records[i].path, path) == 0 ? &r->records[i] : NULL;
+}
+
+bool bc_keyring_set_record(BC_KeyRing *r,
+                           const char *path,
+                           const uint8_t hash[BC_FILE_HASH_SIZE],
+                           const uint32_t update,
+                           const uint64_t size,
+                           const uint64_t mtime)
+{
+  const int i = bc_keyring_lower_bound(r, path);
+  BC_KeyRecord *record = i < r->record_count && strcmp(r->records[i].path, path) == 0 ? &r->records[i] : NULL;
   if (record == NULL) {
     if (r->record_count == r->record_capacity) {
       const int capacity = r->record_capacity ? 2 * r->record_capacity : 64;
@@ -112,16 +139,21 @@ bool bc_keyring_set_record(BC_KeyRing *r, const char *path, const uint8_t hash[B
       r->records = records;
       r->record_capacity = capacity;
     }
-    record = &r->records[r->record_count];
-    record->path = (char *)malloc(strlen(path) + 1);
-    if (record->path == NULL) {
+    char *copy = (char *)malloc(strlen(path) + 1);
+    if (copy == NULL) {
       return false;
     }
-    strcpy(record->path, path);
+    strcpy(copy, path);
+    /* Appending in path order moves nothing. */
+    memmove(&r->records[i + 1], &r->records[i], sizeof(BC_KeyRecord) * (size_t)(r->record_count - i));
+    record = &r->records[i];
+    record->path = copy;
     r->record_count++;
   }
   memcpy(record->hash, hash, BC_FILE_HASH_SIZE);
   record->update = update;
+  record->size = size;
+  record->mtime = mtime;
   return true;
 }
 
@@ -156,6 +188,29 @@ static bool bc_parse_update(const char **p, uint32_t *r_update)
     return false;
   }
   *r_update = (uint32_t)value;
+  *p = c + 1;
+  return true;
+}
+
+/** Parse "<number> " at \a *p (any value, 0 included), advancing past the space. */
+static bool bc_parse_u64(const char **p, uint64_t *r_value)
+{
+  uint64_t value = 0;
+  const char *c = *p;
+  if (*c < '0' || *c > '9') {
+    return false;
+  }
+  while (*c >= '0' && *c <= '9') {
+    const uint64_t digit = (uint64_t)(*c++ - '0');
+    if (value > (UINT64_MAX - digit) / 10) {
+      return false;
+    }
+    value = value * 10 + digit;
+  }
+  if (*c != ' ') {
+    return false;
+  }
+  *r_value = value;
   *p = c + 1;
   return true;
 }
@@ -212,8 +267,13 @@ bool bc_keyring_load(BC_KeyRing *r, const char *path, char *err, const size_t er
     }
     else if (strncmp(p, "file ", 5) == 0) {
       p += 5;
-      ok = bc_parse_update(&p, &update) && bc_hex32(p, value) && p[BC_KEY_HEX_SIZE] == ' ' &&
-           p[BC_KEY_HEX_SIZE + 1] != '\0' && bc_keyring_set_record(r, p + BC_KEY_HEX_SIZE + 1, value, update);
+      uint64_t size = 0, mtime = 0;
+      ok = bc_parse_update(&p, &update) && bc_hex32(p, value) && p[BC_KEY_HEX_SIZE] == ' ';
+      if (ok) {
+        p += BC_KEY_HEX_SIZE + 1;
+        ok = bc_parse_u64(&p, &size) && bc_parse_u64(&p, &mtime) && *p != '\0' &&
+             bc_keyring_set_record(r, p, value, update, size, mtime);
+      }
     }
     else if (bc_is_hex_line(line)) {
       /* The one key form: 64 hex digits, possibly with spaces (bc_key_from_hex rules). */
@@ -266,7 +326,13 @@ bool bc_keyring_save(const BC_KeyRing *r, const char *path, const bool single, c
     }
     for (int i = 0; ok && i < r->record_count; i++) {
       bc_key_to_hex(r->records[i].hash, hex); /* Same hex form, 32 bytes. */
-      ok = fprintf(f, "file %u %s %s\n", r->records[i].update, hex, r->records[i].path) > 0;
+      ok = fprintf(f,
+                   "file %u %s %llu %llu %s\n",
+                   r->records[i].update,
+                   hex,
+                   (unsigned long long)r->records[i].size,
+                   (unsigned long long)r->records[i].mtime,
+                   r->records[i].path) > 0;
     }
   }
   crypto_wipe(hex, sizeof(hex));

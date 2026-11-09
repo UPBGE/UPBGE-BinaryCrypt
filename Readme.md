@@ -339,6 +339,13 @@ player is the same in both modes.
 - *Key file*: the content key, created on the first export (by default next to the project file).
   It must not be inside the game folder (`bc_tool` refuses), goes on the key server, and must be
   **backed up**: every update of the game needs it.
+- *Store*: *Steam* or *Epic* fills in the store's reference provider next to the UPBGE runtime
+  (`engine/bc_provider_steam(.exe)`, `engine/bc_provider_epic(.exe)`); *Custom* is a provider of
+  your own. The store is told by the provider's file name. With a store's provider, the row shows
+  what is still missing: the store's library next to the provider (`steam_api64.dll`,
+  `EOSSDK-Win64-Shipping.dll`, or the `.so`/`.dylib` of Linux and macOS), and for Steam a
+  `steam_appid.txt` left in the game folder (for testing only: never ship it). They are notes, not
+  errors: the export goes ahead and repeats them in the log.
 - *Provider*: path inside the game folder, like the player. *URL*: the key server, given to the
   provider.
 - *Always online*, or *Offline after 1st launch*: after one successful launch the key stays on the
@@ -353,8 +360,15 @@ files that changed are encrypted with it, the unchanged files keep their earlier
 exact bytes, so patches stay small. A key leaked from one version does not open the files of later
 updates: pirated copies stay behind at every update.
 
-- Set the *Update number* (`key_update`) and raise it for each update you publish. Exports with the
-  same number (while you work on it) reuse its key; the number cannot go back.
+- Set the *Update number* (`key_update`) and raise it for each update you publish: *Next* sets it
+  to the number after the newest key of the key file. Exports with the same number (while you work
+  on it) reuse its key; the number cannot go back.
+- Next to it, the editor compares the listed files with the key file, by size and modification
+  date (no file is read): *3 changed* in orange means files changed since the last export and,
+  with the same number, they would get the key of an update that may already be published. Press
+  *Next* first if it is. The export says the same in the log before encrypting anything, so a
+  `--batch` export can still be cancelled. A file only touched counts as changed here; the export
+  compares contents and leaves it as it is.
 - The key file then holds one key per update plus a record of which key each file uses. After
   exporting a new update, **install the updated key file on the key server before publishing the
   update**, or its players get no key.
