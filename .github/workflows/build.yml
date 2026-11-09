@@ -1,0 +1,211 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# Builds bc_tool, bc_launcher and the key providers that need no store SDK (bc_provider_dev,
+# bc_provider_itch) for Windows x64, Linux x64 and macOS arm64, optionally runs the tests, and
+# uploads one archive per platform. The providers that need a store's SDK, which may not be
+# redistributed, get a note on how to build them instead. Started by hand only (Actions tab,
+# Build, Run workflow), by anyone with write access to the repository.
+#
+# Build key: each platform generates its own random key, never printed (bc_keygen writes it into a
+# header of the build folder, which is not uploaded). With "pinned_key", every platform reads the
+# BINARYCRYPT_KEY secret instead (64 hex digits, see bc_tool --export-key), so all the tools of a
+# release share one key. Each archive carries the fingerprint of its key, never the key.
+
+name: Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      pinned_key:
+        description: "Build key from the BINARYCRYPT_KEY secret (else a random key per platform)"
+        type: boolean
+        default: false
+      run_tests:
+        description: "Run the tests before packaging"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    # Linux builds in Debian 12 (glibc 2.36): the binaries also run on distributions older than the
+    # runner's. Empty elsewhere: the job runs on the runner itself.
+    container: ${{ matrix.container }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-x64
+            os: windows-2025
+            # Static C runtime: the launcher ships in every game, and a player's computer may lack
+            # the Visual C++ redistributable. CMP0091 NEW applies it to raylib and zstd too, whose
+            # CMake files predate the setting.
+            cmake_args: -A x64 -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DCMAKE_POLICY_DEFAULT_CMP0091=NEW
+          - platform: linux-x64
+            os: ubuntu-24.04
+            container: debian:12
+            cmake_args: -DPython3_EXECUTABLE=/opt/bc-venv/bin/python
+          - platform: macos-arm64
+            os: macos-15
+            cmake_args: -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Install build dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends build-essential cmake git ca-certificates \
+            libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libgl-dev \
+            libcurl4-openssl-dev python3 python3-venv
+
+      - uses: actions/checkout@v5
+
+      # The key server tests need Python with cryptography 40 or newer (Debian 12 packages 38).
+      - name: Set up Python for the tests (Linux)
+        if: inputs.run_tests && runner.os == 'Linux'
+        run: |
+          python3 -m venv /opt/bc-venv
+          /opt/bc-venv/bin/pip install --quiet cryptography
+
+      - name: Set up Python for the tests (Windows, macOS)
+        if: inputs.run_tests && runner.os != 'Linux'
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install cryptography for the tests (Windows, macOS)
+        if: inputs.run_tests && runner.os != 'Linux'
+        run: python -m pip install --quiet cryptography
+
+      - name: Pinned build key
+        if: inputs.pinned_key
+        env:
+          BINARYCRYPT_KEY: ${{ secrets.BINARYCRYPT_KEY }}
+        run: |
+          if [ -z "$BINARYCRYPT_KEY" ]; then
+            echo "::error::pinned_key needs the BINARYCRYPT_KEY secret (64 hex digits)"
+            exit 1
+          fi
+          temp="$RUNNER_TEMP"
+          if [ "$RUNNER_OS" = Windows ]; then temp=$(cygpath -m "$RUNNER_TEMP"); fi
+          umask 077
+          printf '%s\n' "$BINARYCRYPT_KEY" > "$temp/binarycrypt.key"
+          echo "BC_KEY_FILE=$temp/binarycrypt.key" >> "$GITHUB_ENV"
+          echo "BC_KEY_ARGS=-DBINARYCRYPT_KEY_FILE=$temp/binarycrypt.key" >> "$GITHUB_ENV"
+
+      # CMAKE_POLICY_VERSION_MINIMUM: a CMake 4 runner still configures raylib and zstd, whose
+      # cmake_minimum_required is old (an older CMake only warns that it is unused).
+      - name: Configure
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            ${{ matrix.cmake_args }} $BC_KEY_ARGS
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Remove the pinned key file
+        if: always() && inputs.pinned_key
+        run: rm -f "$BC_KEY_FILE"
+
+      - name: Test
+        if: inputs.run_tests
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Package
+        run: |
+          version=$(sed -n 's/^set(PROJECT_VERSION \(.*\))$/\1/p' CMakeLists.txt)
+          name="UPBGE-BinaryCrypt-$version-${{ matrix.platform }}"
+          exe=""
+          if [ "$RUNNER_OS" = Windows ]; then exe=".exe"; fi
+          out="package/$name"
+          mkdir -p "$out/providers" "$out/keyserver"
+          # Picked by name: the build folder also holds the generated key header, never shipped.
+          binary() { find build -type f -name "$1$exe" -not -path "*/CMakeFiles/*" -print -quit; }
+          for target in bc_tool bc_launcher; do
+            cp "$(binary $target)" "$out/"
+          done
+          for target in bc_provider_dev bc_provider_itch; do
+            found=$(binary $target)
+            if [ -n "$found" ]; then cp "$found" "$out/providers/"; fi
+          done
+          # Providers that need a store's SDK: how to build each one from the sources of this package.
+          repo="${{ github.server_url }}/${{ github.repository }}"
+          case "$RUNNER_OS" in
+            Windows) steam_lib=steam_api64.dll; epic_lib=EOSSDK-Win64-Shipping.dll ;;
+            macOS) steam_lib=libsteam_api.dylib; epic_lib=libEOSSDK-Mac-Shipping.dylib ;;
+            *) steam_lib=libsteam_api.so; epic_lib=libEOSSDK-Linux-Shipping.so ;;
+          esac
+          # sdk_note <provider> <store> <SDK> <values> <CMake options> <game folder files> <section>
+          # Commands on one line each: they paste into any shell (bash, cmd, PowerShell).
+          sdk_note() {
+            cat > "$out/providers/$1.txt" <<EOF
+          $1$exe: key provider for games sold on $2.
+
+          It is not in this package: it links $3, which may not be
+          redistributed. Build it yourself from the providers folder of the UPBGE-BinaryCrypt sources
+          this package was built from:
+
+            $repo/tree/${{ github.sha }}/keyserver/providers
+
+          You need CMake 3.16 or newer, a C and C++ compiler and, on Linux and macOS, the libcurl
+          development files.$4
+
+            git clone $repo.git UPBGE-BinaryCrypt
+            cd UPBGE-BinaryCrypt
+            git checkout ${{ github.sha }}
+            cmake -S keyserver/providers -B build-providers $5
+            cmake --build build-providers --config Release
+
+          Add -DBCP_KEY_URL=https://your.key.server/key to the first cmake command to build the key
+          server address into the provider; otherwise the game's project gives it.
+
+          Copy into the game folder, next to the UPBGE runtime (engine/), before exporting with
+          bc_tool (the Runtime Check hashes the game's native code):
+
+            $6
+
+          Then set Store to $2 in bc_tool (Protection section). The key server side is described
+          in keyserver/README.md, section "$7", in the keyserver folder of this package.
+          EOF
+          }
+          sdk_note bc_provider_steam Steam "the Steamworks SDK (partner.steamgames.com)" "" \
+            "-DBCP_STEAMWORKS_SDK=/path/to/steamworks/sdk" \
+            "bc_provider_steam$exe
+            $steam_lib (Steamworks SDK, redistributable_bin)" Steam
+          sdk_note bc_provider_epic Epic "the EOS SDK (dev.epicgames.com)" \
+            " Replace each ... with your product's value from the Epic
+          Developer Portal (client credentials of a GameClient policy, meant to ship inside games)." \
+            "-DBCP_EOS_SDK=/path/to/EOS-SDK/SDK -DBCP_EPIC_PRODUCT_ID=... -DBCP_EPIC_SANDBOX_ID=... -DBCP_EPIC_DEPLOYMENT_ID=... -DBCP_EPIC_CLIENT_ID=... -DBCP_EPIC_CLIENT_SECRET=... -DBCP_EPIC_CATALOG_ITEM_ID=..." \
+            "bc_provider_epic$exe
+            $epic_lib (EOS SDK)" "Epic Games Store"
+          if [ "$RUNNER_OS" = Windows ]; then
+            # Windows only: the Meta Horizon Store sells PC VR games for Windows.
+            sdk_note bc_provider_meta Meta "the Meta Platform SDK for PC (developers.meta.com)" \
+              " Use your app id from the Meta Horizon developer dashboard." \
+              "-DBCP_META_PLATFORM_SDK=C:/path/to/OVRPlatformSDK -DBCP_META_APP_ID=your_app_id" \
+              "bc_provider_meta.exe (nothing else: the Meta app on the player's computer brings its library)" \
+              "Meta (Meta Horizon Store, PC VR)"
+          fi
+          cp Readme.md LICENSE.txt "$out/"
+          cp keyserver/bc_keyserver.py keyserver/keyserver.example.json keyserver/README.md keyserver/LICENSE "$out/keyserver/"
+          "$out/bc_tool$exe" --fingerprint > "$out/FINGERPRINT.txt"
+          # Zip archives drop the execute permission: a tarball keeps it.
+          if [ "$RUNNER_OS" != Windows ]; then
+            tar -czf "package/$name.tar.gz" -C package "$name"
+            rm -rf "$out"
+          fi
+          echo "PACKAGE_NAME=$name" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: ${{ env.PACKAGE_NAME }}
+          path: package/
+          if-no-files-found: error

@@ -134,6 +134,17 @@ Platform notes:
 | `BINARYCRYPT_KEY_FILE` | empty | Build with a fixed key instead of a random one (see below). |
 | `BINARYCRYPT_HOST_KEYGEN` | empty | Host `bc_keygen` executable, required when cross compiling. |
 
+**GitHub Actions.** The *Build* workflow (`.github/workflows/build.yml`) builds Windows x64,
+Linux x64 (in Debian 12, for older glibc versions) and macOS arm64, and uploads one archive per
+platform: `bc_tool`, `bc_launcher`, the key server, the fingerprint of the build key, and a
+`providers` folder with the providers that need no store SDK. For each provider that needs one,
+the folder holds `bc_provider_<store>.txt` instead, on how to build it from `keyserver/providers`
+of the same sources. It starts by hand only (*Actions*, *Build*, *Run workflow*), by anyone with
+write access to the repository; *run_tests* runs the tests first (off by default). Each platform
+gets a random build key unless *pinned_key* is set: the `BINARYCRYPT_KEY` secret (64 hex digits)
+then gives every platform the same key. The Windows build links the C runtime statically, so the
+launcher needs no Visual C++ redistributable on the player's computer.
+
 ## Key management
 
 - **Project key file** (default *Key* mode): created on the first export, next to the project file
@@ -515,6 +526,7 @@ tool/        bc_tool: command line, editor (raylib + raygui, Montserrat font), n
 tests/       unit tests and an end-to-end test (tool -> launcher -> stand-in player)
 keyserver/   online keys: reference key server and providers (MIT)
 res/         BinaryCrypt icon (bc_tool, and game executables without an icon of their own)
+.github/     GitHub Actions workflow: builds for Windows, Linux and macOS, started by hand
 ```
 
 ## License
