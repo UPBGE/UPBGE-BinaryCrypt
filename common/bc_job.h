@@ -75,10 +75,12 @@ void bc_file_list_free(BC_FileList *list);
  * not counted. */
 int bc_file_list_changed(const BC_Project *p, const BC_FileList *list, const BC_KeyRecord *records, int record_count);
 
-/** Online key with a store's provider (bc_project_key_store): what its provider still needs in the
- * game folder, as warnings to \a log. An export goes ahead without them (a provider of your own
- * may differ): the store library missing next to the provider, and for Steam a steam_appid.txt
- * that would ship. \return how many. */
+/** Online key with a store's provider (bc_project_key_store): what it still needs, as warnings to
+ * \a log. An export goes ahead without them (a provider of your own may differ): the store
+ * library missing next to the provider, for Steam a steam_appid.txt that would ship, for itch.io
+ * no .itch.toml asking the itch app for the player's login, for Meta a key kept after the first
+ * launch (no entitlement check at later launches) or a tool that cannot make Windows games.
+ * \return how many. */
 int bc_project_store_notes(const BC_Project *p, BC_LogFn log, void *user);
 
 /** Validate \a p and list every file to encrypt. Returns NULL when the project is not runnable;

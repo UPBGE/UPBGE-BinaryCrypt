@@ -36,7 +36,7 @@ BC_KeyStore bc_project_key_store(const BC_Project *p)
   if (ext > 0 && n > ext && bc_path_has_extension(name, bc_exe_extension())) {
     n -= ext;
   }
-  for (int store = BC_STORE_STEAM; store <= BC_STORE_EPIC; store++) {
+  for (int store = BC_STORE_STEAM; store <= BC_STORE_META; store++) {
     const char *provider = bc_key_store_provider((BC_KeyStore)store);
     if (n == strlen(provider)) {
       size_t i = 0;
@@ -53,7 +53,18 @@ BC_KeyStore bc_project_key_store(const BC_Project *p)
 
 const char *bc_key_store_provider(const BC_KeyStore store)
 {
-  return store == BC_STORE_STEAM ? "bc_provider_steam" : store == BC_STORE_EPIC ? "bc_provider_epic" : NULL;
+  switch (store) {
+    case BC_STORE_STEAM:
+      return "bc_provider_steam";
+    case BC_STORE_EPIC:
+      return "bc_provider_epic";
+    case BC_STORE_ITCH:
+      return "bc_provider_itch";
+    case BC_STORE_META:
+      return "bc_provider_meta";
+    default:
+      return NULL;
+  }
 }
 
 const char *bc_key_store_library(const BC_KeyStore store)

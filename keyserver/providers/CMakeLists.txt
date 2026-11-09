@@ -1,14 +1,15 @@
 # SPDX-License-Identifier: MIT
 #
 # Reference key providers. Standalone (cmake -S keyserver/providers) or included by the
-# UPBGE-BinaryCrypt build for its tests. bc_provider_dev always builds; the store providers build
-# when their SDK folder is given.
+# UPBGE-BinaryCrypt build for its tests. bc_provider_dev and bc_provider_itch (no SDK) always build;
+# the other store providers build when their SDK folder is given.
 
 cmake_minimum_required(VERSION 3.16)
 project(UPBGE_BinaryCrypt_Providers C)
 
 set(BCP_STEAMWORKS_SDK "" CACHE PATH "Steamworks SDK 'sdk' folder: builds bc_provider_steam")
 set(BCP_EOS_SDK "" CACHE PATH "EOS SDK 'SDK' folder: builds bc_provider_epic")
+set(BCP_META_PLATFORM_SDK "" CACHE PATH "Meta Platform SDK folder (Include, Windows): builds bc_provider_meta")
 set(BCP_KEY_URL "" CACHE STRING "Key server URL baked into the store providers (else the game project's key_url)")
 
 add_library(bcp_common STATIC bc_provider.c)
@@ -22,6 +23,12 @@ endif()
 
 add_executable(bc_provider_dev bc_provider_dev.c)
 target_link_libraries(bc_provider_dev PRIVATE bcp_common)
+
+add_executable(bc_provider_itch bc_provider_itch.c)
+target_link_libraries(bc_provider_itch PRIVATE bcp_common)
+if(BCP_KEY_URL)
+  target_compile_definitions(bc_provider_itch PRIVATE "BCP_ITCH_KEY_URL=\"${BCP_KEY_URL}\"")
+endif()
 
 if(BCP_STEAMWORKS_SDK)
   enable_language(CXX)
@@ -63,4 +70,23 @@ if(BCP_EOS_SDK)
     target_link_libraries(bc_provider_epic PRIVATE bcp_common ${BCP_EOS_SDK}/Bin/libEOSSDK-Linux-Shipping.so)
     set_target_properties(bc_provider_epic PROPERTIES BUILD_RPATH "$ORIGIN" INSTALL_RPATH "$ORIGIN")
   endif()
+endif()
+
+if(BCP_META_PLATFORM_SDK)
+  if(NOT WIN32)
+    message(FATAL_ERROR "bc_provider_meta: the Meta Platform SDK for PC is for Windows only")
+  endif()
+  set(BCP_META_APP_ID "" CACHE STRING "App id from the Meta Horizon developer dashboard, for bc_provider_meta")
+  if(NOT BCP_META_APP_ID)
+    message(FATAL_ERROR "bc_provider_meta: set BCP_META_APP_ID")
+  endif()
+  # The SDK's loader (C++) finds the platform library of the Meta app installed on the computer.
+  enable_language(CXX)
+  add_executable(bc_provider_meta bc_provider_meta.c ${BCP_META_PLATFORM_SDK}/Windows/OVR_PlatformLoader.cpp)
+  target_include_directories(bc_provider_meta PRIVATE ${BCP_META_PLATFORM_SDK}/Include)
+  target_compile_definitions(bc_provider_meta PRIVATE "BCP_META_APP_ID=\"${BCP_META_APP_ID}\"")
+  if(BCP_KEY_URL)
+    target_compile_definitions(bc_provider_meta PRIVATE "BCP_META_KEY_URL=\"${BCP_KEY_URL}\"")
+  endif()
+  target_link_libraries(bc_provider_meta PRIVATE bcp_common ${BCP_META_PLATFORM_SDK}/Windows/LibOVRPlatform64_1.lib)
 endif()

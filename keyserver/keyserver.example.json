@@ -14,6 +14,14 @@
         "catalog_item_ids": ["4a8b..."],
         "max_age": 600
       },
+      "itch": {
+        "game_id": 123456,
+        "api_key": "your itch.io API key (Settings, API keys): never ship it"
+      },
+      "meta": {
+        "app_id": "1234567890123456",
+        "app_secret": "your app secret (Meta Horizon developer dashboard, API): never ship it"
+      },
       "dev_tokens": []
     }
   ]

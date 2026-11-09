@@ -5,7 +5,7 @@
 Gives a game's content key to players who prove they own it, sealed for one launch of the game
 (see common/bc_envelope.h). Protocol:
 
-    POST /key  {"platform": "steam" | "epic" | "dev", "ticket": "...",
+    POST /key  {"platform": "steam" | "epic" | "itch" | "meta" | "dev", "ticket": "...",
                 "key_ids": ["<16 hex>", ...], "client_public": "<64 hex>"}
     200 {"envelopes": ["<160 hex>", ...]}       one per key id, same order
     4xx {"error": "<message shown to the player>"}
@@ -33,6 +33,8 @@ import ssl
 import sys
 import threading
 import time
+import urllib.error
+import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -190,6 +192,96 @@ class EpicTokens:
 
 
 # ------------------------------------------------------------------------------------------------
+# Store APIs over HTTPS: itch.io and Meta.
+
+
+def http_json(url, headers=None, form=None):
+    """GET, or POST of form fields; returns (status, JSON object). An error status with a JSON body
+    is an answer too (the stores explain refusals that way); anything else raises RuntimeError,
+    which the player sees as "try again later"."""
+    data = urllib.parse.urlencode(form).encode() if form is not None else None
+    request = urllib.request.Request(url, data=data, headers=headers or {})
+    try:
+        with urllib.request.urlopen(request, timeout=10) as answer:
+            status, raw = answer.status, answer.read()
+    except urllib.error.HTTPError as error:
+        status, raw = error.code, error.read()
+    try:
+        body = json.loads(raw)
+    except ValueError:
+        body = None
+    if not isinstance(body, dict):
+        raise RuntimeError(f"{url.split('?')[0]}: status {status}, no JSON object")
+    return status, body
+
+
+# itch.io: the key the itch app gives a game whose .itch.toml asks for scope "profile:me". It names
+# the player's account; the developer's own API key then asks whether that account bought or
+# claimed the game (download keys cover both).
+
+ITCH_API = "https://api.itch.io"
+
+
+class ItchKeys:
+    def __init__(self, api=ITCH_API, fetch=http_json):
+        self.api = api
+        self.fetch = fetch
+
+    def check(self, ticket, config):
+        if not re.fullmatch(r"[A-Za-z0-9._\-]{8,8192}", ticket):
+            raise Denied("invalid itch.io login: start the game from the itch app")
+        status, answer = self.fetch(f"{self.api}/profile", {"Authorization": f"Bearer {ticket}"})
+        user = answer.get("user") if status == 200 else None
+        if not isinstance(user, dict) or not isinstance(user.get("id"), int):
+            if status >= 500:
+                raise RuntimeError(f"itch.io profile: {status}")
+            raise Denied("the itch.io login expired: start the game from the itch app again")
+        game_id = config["game_id"]
+        query = urllib.parse.urlencode({"user_id": user["id"]})
+        status, answer = self.fetch(f"{self.api}/games/{game_id}/download_keys?{query}",
+                                    {"Authorization": f"Bearer {config['api_key']}"})
+        key = answer.get("download_key") if status == 200 else None
+        if isinstance(key, dict) and key.get("game_id") == game_id:
+            return
+        if "no download key found" in (answer.get("errors") or []):
+            raise Denied("this itch.io account does not own the game")
+        raise RuntimeError(f"itch.io download keys: {status} {answer.get('errors')}")
+
+
+# Meta (Meta Horizon Store): the user id and a one-use nonce (user proof). Meta checks the nonce,
+# which proves who the player is, then whether that account owns the app; the app secret signs both
+# calls and never leaves the server. Both need the app's Data Use Checkup to grant "User ID" and
+# "In-app purchases and/or downloadable content".
+
+META_GRAPH = "https://graph.oculus.com"
+
+
+class MetaUsers:
+    def __init__(self, graph=META_GRAPH, fetch=http_json):
+        self.graph = graph
+        self.fetch = fetch
+
+    def check(self, ticket, config):
+        user_id, _, nonce = ticket.partition(":")
+        if not re.fullmatch(r"[0-9]{1,20}", user_id) or not re.fullmatch(r"[\x21-\x7e]{1,1024}", nonce):
+            raise Denied("invalid Meta user proof")
+        app_id = config["app_id"]
+        token = f"OC|{app_id}|{config['app_secret']}"
+        status, answer = self.fetch(f"{self.graph}/user_nonce_validate",
+                                    form={"access_token": token, "nonce": nonce, "user_id": user_id})
+        if status != 200:
+            raise RuntimeError(f"Meta user_nonce_validate: {status} {answer.get('error')}")
+        if answer.get("is_valid") is not True:
+            raise Denied("the Meta user proof was refused: start the game again")
+        status, answer = self.fetch(f"{self.graph}/{app_id}/verify_entitlement",
+                                    form={"access_token": token, "user_id": user_id})
+        if status != 200:
+            raise RuntimeError(f"Meta verify_entitlement: {status} {answer.get('error')}")
+        if answer.get("success") is not True:
+            raise Denied("this Meta account does not own the game")
+
+
+# ------------------------------------------------------------------------------------------------
 # Server
 
 
@@ -199,7 +291,16 @@ class Game:
         self.keys = {key_id(key): key for key in read_key_file(os.path.join(base_dir, config["key_file"]))}
         self.steam = config.get("steam")
         self.epic = config.get("epic")
+        self.itch = config.get("itch")
+        self.meta = config.get("meta")
         self.dev_tokens = config.get("dev_tokens", [])
+        # Checked once here: a wrong setting stops the server, not a player.
+        if self.itch and not (isinstance(self.itch.get("game_id"), int) and self.itch.get("api_key")):
+            raise ValueError(f"{self.name}: itch needs an integer game_id and an api_key")
+        if self.meta and not (re.fullmatch(r"[0-9]{1,20}", str(self.meta.get("app_id", ""))) and self.meta.get("app_secret")):
+            raise ValueError(f"{self.name}: meta needs app_id (digits) and app_secret")
+        if self.meta:
+            self.meta = dict(self.meta, app_id=str(self.meta["app_id"]))
 
 
 class KeyServer(ThreadingHTTPServer):
@@ -212,6 +313,8 @@ class KeyServer(ThreadingHTTPServer):
         libraries = {entry["steam"]["library"] for entry in config["games"] if entry.get("steam")}
         self.steam = {library: SteamTickets(library) for library in libraries}
         self.epic = EpicTokens(config.get("epic_key_url", EPIC_KEY_URL))
+        self.itch = ItchKeys()
+        self.meta = MetaUsers()
         self.quiet = quiet
         super().__init__(address, Handler)
 
@@ -224,6 +327,10 @@ class KeyServer(ThreadingHTTPServer):
             self.steam[game.steam["library"]].check(ticket, game.steam)
         elif platform == "epic" and game.epic:
             self.epic.check(ticket, game.epic)
+        elif platform == "itch" and game.itch:
+            self.itch.check(ticket, game.itch)
+        elif platform == "meta" and game.meta:
+            self.meta.check(ticket, game.meta)
         elif platform == "dev" and game.dev_tokens:
             if not any(hmac.compare_digest(ticket.encode(), token.encode()) for token in game.dev_tokens):
                 raise Denied("access denied")
@@ -298,7 +405,8 @@ def main():
         context.load_cert_chain(args.tls_cert, args.tls_key)
         server.socket = context.wrap_socket(server.socket, server_side=True)
     for game in {id(game): game for game in server.games.values()}.values():
-        platforms = [name for name, on in (("steam", game.steam), ("epic", game.epic), ("dev", game.dev_tokens)) if on]
+        platforms = [name for name, on in (("steam", game.steam), ("epic", game.epic), ("itch", game.itch),
+                                           ("meta", game.meta), ("dev", game.dev_tokens)) if on]
         print(f"{game.name}: {len(game.keys)} key(s), {', '.join(platforms) or 'no platform'}")
     print(f"listening on {'https' if args.tls_cert else 'http'}://{args.listen}/key")
     server.serve_forever()

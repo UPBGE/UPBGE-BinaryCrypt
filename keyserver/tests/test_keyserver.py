@@ -9,6 +9,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -89,6 +90,96 @@ class EpicTest(unittest.TestCase):
         for token in cases:
             with self.assertRaises(ks.Denied):
                 self.epic.check(token, self.config)
+
+
+class FakeStore:
+    """Answers http_json calls from a table, and records them."""
+
+    def __init__(self, answers):
+        self.answers = answers
+        self.calls = []
+
+    def __call__(self, url, headers=None, form=None):
+        self.calls.append((url, headers, form))
+        for prefix, answer in self.answers:
+            if url.startswith(prefix):
+                if isinstance(answer, Exception):
+                    raise answer
+                return answer
+        raise AssertionError(f"unexpected call {url}")
+
+
+class ItchTest(unittest.TestCase):
+    config = {"game_id": 42, "api_key": "developer-key"}
+
+    def store(self, profile, keys):
+        return FakeStore([("https://api.itch.io/profile", profile), ("https://api.itch.io/games/42/download_keys", keys)])
+
+    def test_owner(self):
+        fake = self.store((200, {"user": {"id": 7, "username": "player"}}), (200, {"download_key": {"id": 1, "game_id": 42}}))
+        ks.ItchKeys(fetch=fake).check("player-session-key", self.config)
+        # The player's key names the account, the developer's key asks about the game.
+        self.assertEqual(fake.calls[0][1], {"Authorization": "Bearer player-session-key"})
+        self.assertEqual(fake.calls[1][0], "https://api.itch.io/games/42/download_keys?user_id=7")
+        self.assertEqual(fake.calls[1][1], {"Authorization": "Bearer developer-key"})
+
+    def test_refusals(self):
+        cases = [
+            ("short", (200, {}), (200, {})),
+            ("player-session-key", (401, {"errors": ["invalid key"]}), (200, {})),
+            ("player-session-key", (200, {"user": {"id": 7}}), (200, {"errors": ["no download key found"]})),
+        ]
+        for ticket, profile, keys in cases:
+            with self.assertRaises(ks.Denied):
+                ks.ItchKeys(fetch=self.store(profile, keys)).check(ticket, self.config)
+
+    def test_store_trouble_is_not_a_refusal(self):
+        # The player owns the game as far as anyone knows: "try again later", never "you do not own it".
+        cases = [((503, {"errors": ["down"]}), (200, {})),
+                 ((200, {"user": {"id": 7}}), (500, {"errors": ["oops"]})),
+                 ((200, {"user": {"id": 7}}), (200, {"download_key": {"id": 1, "game_id": 43}}))]
+        for profile, keys in cases:
+            with self.assertRaises(RuntimeError):
+                ks.ItchKeys(fetch=self.store(profile, keys)).check("player-session-key", self.config)
+
+
+class MetaTest(unittest.TestCase):
+    config = {"app_id": "123", "app_secret": "secret"}
+
+    def store(self, nonce, entitlement):
+        return FakeStore([("https://graph.oculus.com/user_nonce_validate", nonce),
+                          ("https://graph.oculus.com/123/verify_entitlement", entitlement)])
+
+    def test_owner(self):
+        fake = self.store((200, {"is_valid": True}), (200, {"success": True, "grant_time": 1744148687}))
+        ks.MetaUsers(fetch=fake).check("98765:nonce-ABC.123", self.config)
+        self.assertEqual(fake.calls[0][2], {"access_token": "OC|123|secret", "nonce": "nonce-ABC.123", "user_id": "98765"})
+        self.assertEqual(fake.calls[1][2], {"access_token": "OC|123|secret", "user_id": "98765"})
+
+    def test_refusals(self):
+        cases = [
+            ("not-a-user:nonce", (200, {"is_valid": True}), (200, {"success": True})),
+            ("98765:", (200, {"is_valid": True}), (200, {"success": True})),
+            ("98765:bad nonce", (200, {"is_valid": True}), (200, {"success": True})),
+            ("98765:nonce", (200, {"is_valid": False}), (200, {"success": True})),
+            ("98765:nonce", (200, {"is_valid": True}), (200, {"success": False})),
+        ]
+        for ticket, nonce, entitlement in cases:
+            with self.assertRaises(ks.Denied):
+                ks.MetaUsers(fetch=self.store(nonce, entitlement)).check(ticket, self.config)
+        with self.assertRaises(RuntimeError):
+            ks.MetaUsers(fetch=self.store((400, {"error": {"message": "bad secret"}}), (200, {}))).check("98765:nonce", self.config)
+
+    def test_config_checked_at_start(self):
+        with tempfile.TemporaryDirectory() as folder:
+            with open(os.path.join(folder, "game.key"), "w") as f:
+                f.write(KEY.hex() + "\n")
+            ks.Game({"name": "G", "key_file": "game.key", "meta": {"app_id": 123, "app_secret": "s"}}, folder)
+            for meta in ({"app_id": "12a", "app_secret": "s"}, {"app_id": "123"}):
+                with self.assertRaises(ValueError):
+                    ks.Game({"name": "G", "key_file": "game.key", "meta": meta}, folder)
+            with self.assertRaises(ValueError):
+                ks.Game({"name": "G", "key_file": "game.key", "itch": {"game_id": "42", "api_key": "k"}}, folder)
 
 
 class ServerTest(unittest.TestCase):

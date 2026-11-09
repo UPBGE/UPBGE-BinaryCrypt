@@ -137,7 +137,10 @@ typedef struct BC_Gui {
   bool icon_edit, version_edit, company_edit, copyright_edit;
   bool key_file_edit, provider_edit, url_edit, update_edit;
   /** Open dropdowns: drawn last, over the rows below them. */
-  bool check_edit, manifest_edit, key_edit;
+  bool check_edit, manifest_edit, key_edit, store_edit;
+  /** GOG picked in the Store list: it has no provider (GOG requires games to start without its
+   * client), so nothing in the project tells it. Until a provider is set. */
+  bool store_gog;
 
   /** Labels of the inputs, relative to the source folder. */
   char **items;
@@ -406,6 +409,14 @@ static void bc_gui_set_dist_path(BC_Gui *g, const char *path, char *field, const
   }
   bc_gui_set_modified(g);
 }
+
+/* The Store list: names, and the store each one sets (GOG sets none: see BC_Gui::store_gog). */
+#define BC_STORE_LIST "Steam;Epic;GOG;itch.io;Meta;Custom"
+#define BC_STORE_ITEMS 6
+#define BC_STORE_ITEM_GOG 2
+static const char *const bc_store_names[BC_STORE_ITEMS] = {"Steam", "Epic", "GOG", "itch.io", "Meta", "Custom"};
+static const BC_KeyStore bc_store_items[BC_STORE_ITEMS] = {
+    BC_STORE_STEAM, BC_STORE_EPIC, BC_STORE_CUSTOM, BC_STORE_ITCH, BC_STORE_META, BC_STORE_CUSTOM};
 
 /** Store template: the store's reference provider next to the UPBGE runtime (the folder already
  * holding a runtime and its libraries), or no provider for one of your own. */
@@ -1119,7 +1130,12 @@ static void bc_gui_refresh_check(BC_Gui *g)
   }
 
   if (p->key_mode == BC_KEY_ONLINE) {
-    if (p->key_provider[0] == '\0') {
+    if (p->key_provider[0] == '\0' && g->store_gog) {
+      bc_field_set(&c->provider, BC_FIELD_NONE, NULL);
+      bc_todo(c, "set Key to Per project for the GOG build");
+      bc_note(c, "GOG requires games to start without GOG Galaxy and its login: a GOG build uses a per project key");
+    }
+    else if (p->key_provider[0] == '\0') {
       bc_field_set(&c->provider, BC_FIELD_NONE, NULL);
       bc_todo(c, "set the key provider");
     }
@@ -1171,7 +1187,7 @@ static bool bc_gui_editing(const BC_Gui *g)
   return g->source_edit || g->output_edit || g->player_edit || g->game_edit ||
          g->icon_edit || g->version_edit || g->company_edit || g->copyright_edit ||
          g->key_file_edit || g->provider_edit || g->url_edit || g->update_edit ||
-         g->check_edit || g->manifest_edit || g->key_edit;
+         g->check_edit || g->manifest_edit || g->key_edit || g->store_edit;
 }
 
 /* -------------------------------------------------------------------------------------------- */
@@ -2125,10 +2141,10 @@ static void bc_gui_draw(BC_Gui *g)
   BC_DialogResult r;
 
   if (modal) {
-    g->check_edit = g->manifest_edit = g->key_edit = false;
+    g->check_edit = g->manifest_edit = g->key_edit = g->store_edit = false;
   }
   /* An open dropdown takes every click until it closes: the rows under its list must not react. */
-  const bool dropdown_open = g->check_edit || g->manifest_edit || g->key_edit;
+  const bool dropdown_open = g->check_edit || g->manifest_edit || g->key_edit || g->store_edit;
 
   /* Heights, known before anything is drawn: with the shortest file list and log (BC_LOG_MIN
    * lines) they give the height of the page. A taller window gives the list rows first, up to
@@ -2498,7 +2514,7 @@ static void bc_gui_draw(BC_Gui *g)
   }
 
   /* 4 · Protection: where the key comes from, what the game checks, where its manifest goes. */
-  Rectangle key_box = {0}, check_box = {0}, manifest_box = {0};
+  Rectangle key_box = {0}, check_box = {0}, manifest_box = {0}, store_box = {0};
   {
     static const char *const check_names[] = {"Player only", "Player + Libraries", "Player + Libraries + Python"};
     const char *key_text = g->project.key_mode == BC_KEY_BUILD ? "Build key" :
@@ -2519,7 +2535,7 @@ static void bc_gui_draw(BC_Gui *g)
     const bool error = check->provider.state == BC_FIELD_ERROR || (online && g->project.key_provider[0] == '\0');
     if (bc_section(y, protection_h, inner, "4 \xc2\xb7 Protection", g->protection_open ? NULL : summary, error, g->protection_open ? 1 : 0, "Show or hide the protection settings\nWhere the content key comes from, what the game executable checks before every launch and where its manifest goes.")) {
       g->protection_open = !g->protection_open;
-      g->check_edit = g->manifest_edit = g->key_edit = false;
+      g->check_edit = g->manifest_edit = g->key_edit = g->store_edit = false;
     }
     else if (g->protection_open) {
       float py = y + 2 * BC_GAP;
@@ -2590,23 +2606,21 @@ static void bc_gui_draw(BC_Gui *g)
         py += BC_ROW + BC_GAP;
       }
       if (online) {
-        /* Store: a template for the provider, then what the store's provider still needs (or the
-         * step no file shows). Told by the provider's file name, so it never disagrees with it. */
+        /* Store: a template for the provider (a dropdown, drawn last), then what the store's
+         * provider still needs, or the step no file shows. Told by the provider's file name, so it
+         * never disagrees with it. */
         const float key_x = x0 + BC_LABEL_W;
-        const float padding = (float)GuiGetStyle(TOGGLE, GROUP_PADDING);
-        const float store_w = MeasureTextEx(font, "Custom", BC_TEXT_SIZE, text_spacing).x + 4 * BC_GAP;
-        const char *store_help = "Store the game is sold on\nSteam and Epic fill in their reference key provider (keyserver/providers), next to the UPBGE runtime: copy it there with the store's library. Custom: a provider of your own, for example from bc_provider_dev. The store is told by the provider's file name.";
-        GuiLabel(bc_rect(x0, py, BC_LABEL_W, BC_ROW), "Store");
-        bc_tip(bc_rect(x0, py, BC_LABEL_W + 3 * store_w + 2 * padding, BC_ROW), store_help);
-        const BC_KeyStore store = bc_project_key_store(&g->project);
-        int store_index = store == BC_STORE_STEAM ? 0 : store == BC_STORE_EPIC ? 1 : 2;
-        const int store_before = store_index;
-        GuiToggleGroup(bc_rect(key_x, py, store_w, BC_ROW), "Steam;Epic;Custom", &store_index);
-        if (store_index != store_before) {
-          bc_gui_set_store(g, store_index == 0 ? BC_STORE_STEAM : store_index == 1 ? BC_STORE_EPIC : BC_STORE_CUSTOM);
+        float store_w = 0;
+        for (int i = 0; i < BC_STORE_ITEMS; i++) {
+          const float w = MeasureTextEx(font, bc_store_names[i], BC_TEXT_SIZE, text_spacing).x;
+          store_w = w > store_w ? w : store_w;
         }
+        store_w += dropdown_extra;
+        GuiLabel(bc_rect(x0, py, BC_LABEL_W, BC_ROW), "Store");
+        store_box = bc_rect(key_x, py, store_w, BC_ROW);
         {
-          const float sx = key_x + 3 * store_w + 2 * padding + 2 * BC_GAP;
+          const BC_KeyStore store = bc_project_key_store(&g->project);
+          const float sx = key_x + store_w + 2 * BC_GAP;
           const float sw = right - sx;
           /* Static: the help panel and the tooltip read it after this block. */
           static char status[sizeof(check->store_notes) + 96];
@@ -2958,10 +2972,25 @@ static void bc_gui_draw(BC_Gui *g)
            "Where the manifest of the game goes\nEmbedded: one self-contained game executable. Separate file: the game executable is an untouched copy of bc_launcher, with " BC_MANIFEST_FILENAME " next to it (sign bc_launcher once).");
     bc_tip(key_box,
            "Where the game gets its content key\nPer project: the key of this project, masked in the game executable. Online: a key server gives it to players who own the game, through the key provider. Build key: the key built into this tool.");
+    bc_tip(store_box,
+           "Store the game is sold on\nSteam, Epic, itch.io and Meta fill in their reference key provider (keyserver/providers), next to the UPBGE runtime: copy it there. GOG has none: it requires games to start without its client, so a GOG build uses a per project key. Custom: a provider of your own. The store is told by the provider's file name.");
   }
   int integrity = (int)g->project.integrity;
   int manifest_mode = (int)g->project.manifest_mode;
   int key_mode = (int)g->project.key_mode;
+  /* The list's order (bc_store_names), not BC_KeyStore's: GOG has no BC_KeyStore. */
+  int store_index = BC_STORE_ITEMS - 1;
+  g->store_gog = g->store_gog && g->project.key_provider[0] == '\0';
+  if (g->store_gog) {
+    store_index = BC_STORE_ITEM_GOG;
+  }
+  else {
+    const BC_KeyStore store = bc_project_key_store(&g->project);
+    for (int i = 0; i < BC_STORE_ITEMS - 1; i++) {
+      store_index = bc_store_items[i] == store && i != BC_STORE_ITEM_GOG ? i : store_index;
+    }
+  }
+  const int store_before = store_index;
   struct {
     Rectangle box;
     const char *items;
@@ -2971,6 +3000,7 @@ static void bc_gui_draw(BC_Gui *g)
       {check_box, "Player only;Player + Libraries;Player + Libraries + Python", &integrity, &g->check_edit},
       {manifest_box, "Embedded;Separate file", &manifest_mode, &g->manifest_edit},
       {key_box, "Per project;Online;Build key", &key_mode, &g->key_edit},
+      {store_box, BC_STORE_LIST, &store_index, &g->store_edit},
   };
   const int dropdown_count = (int)(sizeof(dropdowns) / sizeof(dropdowns[0]));
   /* Fixed before drawing: a click flips the flag, and the same click must not reach a dropdown
@@ -3003,6 +3033,10 @@ static void bc_gui_draw(BC_Gui *g)
     g->project.key_mode = (BC_KeyMode)key_mode;
     bc_gui_set_modified(g);
     g->keys_revision++;
+  }
+  if (store_index != store_before) {
+    g->store_gog = store_index == BC_STORE_ITEM_GOG;
+    bc_gui_set_store(g, bc_store_items[store_index]);
   }
   if (running) {
     GuiEnable();

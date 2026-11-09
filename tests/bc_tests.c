@@ -1702,6 +1702,31 @@ static void test_job(void)
     CHECK(run_job(&p, &c) == 0 && c.errors == 0 && c.warnings == 0);
     snprintf(p.key_provider, sizeof(p.key_provider), "engine/bc_provider_epic%s", bc_exe_extension());
     CHECK(bc_project_key_store(&p) == BC_STORE_EPIC);
+    /* itch.io: no library, but the app gives the login only to a game whose .itch.toml asks. */
+    snprintf(store_rel, sizeof(store_rel), "job/dist/engine/bc_provider_itch%s", bc_exe_extension());
+    write_text(store_rel, "pretend this is the itch.io provider");
+    snprintf(p.key_provider, sizeof(p.key_provider), "engine/bc_provider_itch%s", bc_exe_extension());
+    CHECK(bc_project_key_store(&p) == BC_STORE_ITCH && bc_key_store_library(BC_STORE_ITCH) == NULL);
+    CHECK(run_job(&p, &c) == 0 && c.errors == 0 && c.warnings == 1 && strstr(c.last_warning, ".itch.toml") != NULL);
+    write_text("job/dist/.itch.toml", "[[actions]]\nname = \"play\"\npath = \"game\"\nscope = \"profile:me\"\n");
+    CHECK(run_job(&p, &c) == 0 && c.errors == 0 && c.warnings == 0);
+    work_path(store_path, "job/dist/.itch.toml");
+    CHECK(bc_remove(store_path));
+    /* Meta: the runtime brings its library; a key kept after the first launch skips later
+     * entitlement checks. */
+    snprintf(store_rel, sizeof(store_rel), "job/dist/engine/bc_provider_meta%s", bc_exe_extension());
+    write_text(store_rel, "pretend this is the Meta provider");
+    snprintf(p.key_provider, sizeof(p.key_provider), "engine/bc_provider_meta%s", bc_exe_extension());
+    CHECK(bc_project_key_store(&p) == BC_STORE_META && bc_key_store_library(BC_STORE_META) == NULL);
+    p.key_cache = true;
+#ifdef _WIN32
+    const int meta_notes = 1;
+#else
+    const int meta_notes = 2; /* And: the Meta provider is for Windows games. */
+#endif
+    CHECK(run_job(&p, &c) == 0 && c.errors == 0 && c.warnings == meta_notes);
+    p.key_cache = false;
+    CHECK(run_job(&p, &c) == 0 && c.errors == 0 && c.warnings == meta_notes - 1);
     snprintf(p.key_provider, sizeof(p.key_provider), "engine/bc_provider_steam_old%s", bc_exe_extension());
     CHECK(bc_project_key_store(&p) == BC_STORE_CUSTOM);
     snprintf(p.key_provider, sizeof(p.key_provider), "engine/provider");

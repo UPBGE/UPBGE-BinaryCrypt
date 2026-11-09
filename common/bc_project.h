@@ -166,18 +166,22 @@ const char *bc_project_dist_root(const BC_Project *p);
 bool bc_project_key_file(const BC_Project *p, char *out, size_t size);
 
 /** Store of an online key, told by its provider's file name: the reference providers of
- * keyserver/providers (bc_provider_steam, bc_provider_epic). Anything else is a provider of your
- * own. Not stored in the project: renaming the provider is changing the store. */
+ * keyserver/providers (bc_provider_steam, _epic, _itch, _meta). Anything else is a provider of
+ * your own. Not stored in the project: renaming the provider is changing the store. (GOG has no
+ * provider: it requires games to start without its client, so a GOG build uses a project key.) */
 typedef enum BC_KeyStore {
   BC_STORE_CUSTOM = 0,
   BC_STORE_STEAM,
   BC_STORE_EPIC,
+  BC_STORE_ITCH,
+  BC_STORE_META,
 } BC_KeyStore;
 
 BC_KeyStore bc_project_key_store(const BC_Project *p);
 /** File name of the store's provider without bc_exe_extension(), NULL for your own. */
 const char *bc_key_store_provider(BC_KeyStore store);
-/** Library of the store's SDK its provider loads, next to it, on this platform; NULL for your own. */
+/** Library of the store's SDK its provider loads, next to it, on this platform; NULL when it ships
+ * none (your own, itch.io without SDK, Meta whose runtime brings its own). */
 const char *bc_key_store_library(BC_KeyStore store);
 
 bool bc_project_load(BC_Project *p, const char *file_path, char *err, size_t err_size);

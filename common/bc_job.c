@@ -598,7 +598,7 @@ int bc_project_store_notes(const BC_Project *p, BC_LogFn log, void *user)
   if (bc_path_join(provider, sizeof(provider), dist, p->key_provider) && bc_is_file(provider)) {
     bc_path_dirname(dir, sizeof(dir), provider);
     const char *library = bc_key_store_library(store);
-    if (bc_path_join(path, sizeof(path), dir, library) && !bc_is_file(path)) {
+    if (library != NULL && bc_path_join(path, sizeof(path), dir, library) && !bc_is_file(path)) {
       char shown[BC_PATH_MAX];
       bc_path_dirname(shown, sizeof(shown), p->key_provider);
       snprintf(message,
@@ -616,6 +616,27 @@ int bc_project_store_notes(const BC_Project *p, BC_LogFn log, void *user)
     log(user, BC_LOG_WARNING, "steam_appid.txt is in the game folder: it is for testing outside Steam, remove it before publishing");
     notes++;
   }
+  /* The itch app gives a game the player's itch.io login only when the game's manifest asks for it. */
+  if (store == BC_STORE_ITCH && bc_path_join(path, sizeof(path), dist, ".itch.toml") && !bc_is_file(path)) {
+    log(user,
+        BC_LOG_WARNING,
+        ".itch.toml is missing in the game folder: the itch app gives the provider the player's login "
+        "only for an action with scope = \"profile:me\"");
+    notes++;
+  }
+  if (store == BC_STORE_META && p->key_cache) {
+    log(user,
+        BC_LOG_WARNING,
+        "Meta expects an entitlement check at every launch: with Offline after 1st launch the provider "
+        "runs only at the first one");
+    notes++;
+  }
+#ifndef _WIN32
+  if (store == BC_STORE_META) {
+    log(user, BC_LOG_WARNING, "The Meta provider is for Windows games: export the Meta build with the Windows bc_tool");
+    notes++;
+  }
+#endif
   return notes;
 }
 

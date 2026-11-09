@@ -327,7 +327,7 @@ release: a key recovered from one game (from memory, or the pipe to the player) 
 game, and updating BinaryCrypt keeps store patches small. For a key that ships with no copy of the
 game, use an online key; for a build key nobody else has, build BinaryCrypt yourself.
 
-### Online key (Steam, Epic, your own server)
+### Online key (Steam, Epic, itch.io, Meta, your own server)
 
 With *Key* set to *Online*, the `.blend` files are encrypted with a **content key** of the game,
 as with a per project key, but no shipped file contains it, not even masked. At every launch the game
@@ -339,13 +339,16 @@ player is the same in both modes.
 - *Key file*: the content key, created on the first export (by default next to the project file).
   It must not be inside the game folder (`bc_tool` refuses), goes on the key server, and must be
   **backed up**: every update of the game needs it.
-- *Store*: *Steam* or *Epic* fills in the store's reference provider next to the UPBGE runtime
-  (`engine/bc_provider_steam(.exe)`, `engine/bc_provider_epic(.exe)`); *Custom* is a provider of
-  your own. The store is told by the provider's file name. With a store's provider, the row shows
+- *Store*: *Steam*, *Epic*, *itch.io* or *Meta* fills in the store's reference provider next to
+  the UPBGE runtime (`engine/bc_provider_steam(.exe)`, and `_epic`, `_itch`, `_meta`); *Custom* is
+  a provider of your own. The store is told by the provider's file name. *GOG* has no provider:
+  GOG requires games to start without its client and without a login, so a GOG build uses a per
+  project key (see [`keyserver/`](keyserver/README.md#gog)). With a store's provider, the row shows
   what is still missing: the store's library next to the provider (`steam_api64.dll`,
-  `EOSSDK-Win64-Shipping.dll`, or the `.so`/`.dylib` of Linux and macOS), and for Steam a
-  `steam_appid.txt` left in the game folder (for testing only: never ship it). They are notes, not
-  errors: the export goes ahead and repeats them in the log.
+  `EOSSDK-Win64-Shipping.dll`, or the `.so`/`.dylib` of Linux and macOS), for Steam a
+  `steam_appid.txt` left in the game folder (for testing only: never ship it), for itch.io a
+  missing `.itch.toml`, for Meta a key kept after the first launch. They are notes, not errors:
+  the export goes ahead and repeats them in the log.
 - *Provider*: path inside the game folder, like the player. *URL*: the key server, given to the
   provider.
 - *Always online*, or *Offline after 1st launch*: after one successful launch the key stays on the
@@ -377,8 +380,8 @@ updates: pirated copies stay behind at every update.
 - Switching back to *One key* encrypts every file with the newest key (a full patch once).
 
 The provider runs as a separate process so it can link a store's proprietary SDK, which a GPL
-program cannot. Reference providers for Steam and Epic, a development provider, the key server and
-the protocol are in [`keyserver/`](keyserver/README.md), under the MIT license.
+program cannot. Reference providers for Steam, Epic, itch.io and Meta, a development provider, the
+key server and the protocol are in [`keyserver/`](keyserver/README.md), under the MIT license.
 
 ### Output folder
 

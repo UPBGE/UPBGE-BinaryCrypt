@@ -10,7 +10,8 @@
  * it prints (store SDK logs) is ignored by the launcher.
  *
  * Request sent to the key server (HTTP POST, JSON):
- *   {"platform": "steam" | "epic" | "dev", "ticket": "...", "key_ids": ["..."], "client_public": "..."}
+ *   {"platform": "steam" | "epic" | "itch" | "meta" | "dev", "ticket": "...", "key_ids": ["..."],
+ *    "client_public": "..."}
  * Answer: 200 {"envelopes": ["<160 hex>", ...]}, otherwise {"error": "<message for the player>"}. */
 
 #ifndef BC_PROVIDER_H

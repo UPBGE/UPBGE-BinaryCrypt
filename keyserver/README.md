@@ -20,10 +20,12 @@ game executable ──runs──> key provider ──HTTPS──> key server
 
 | File | What it is |
 |---|---|
-| `bc_keyserver.py` | Key server: Steam, Epic and development tokens. Python 3.8+ with `cryptography` (40 or newer). |
+| `bc_keyserver.py` | Key server: Steam, Epic, itch.io, Meta and development tokens. Python 3.8+ with `cryptography` (40 or newer). |
 | `keyserver.example.json` | Its configuration. |
 | `providers/bc_provider_steam.cpp` | Steam provider (Encrypted App Tickets). |
 | `providers/bc_provider_epic.c` | Epic Games Store provider (EOS ownership tokens). |
+| `providers/bc_provider_itch.c` | itch.io provider (the player's login from the itch app). No SDK. |
+| `providers/bc_provider_meta.c` | Meta Horizon Store provider, PC VR on Windows (user proof and entitlement). |
 | `providers/bc_provider_dev.c` | Development provider: a shared token, no store. |
 | `providers/bc_provider.c` | Shared provider code: protocol, HTTPS (WinHTTP on Windows, libcurl elsewhere). |
 | `tests/test_keyserver.py` | Tests, including the whole chain with the real launcher. |
@@ -36,7 +38,9 @@ game executable ──runs──> key provider ──HTTPS──> key server
 | Key server: protocol, development tokens | Yes: Python tests, and the whole chain launcher → `bc_provider_dev` → server on Linux (libcurl) and Windows (WinHTTP under Wine). |
 | Key server: Epic token checks | Signature, expiry, client id and entitlement logic tested with tokens signed by the tests. **Not tested with a real Epic token**: the exact shape of the `ent` entries is not publicly documented, `EpicTokens.owns()` accepts both plain ids and objects holding the id. Check it with a real token. |
 | Key server: Steam ticket checks | Calls Valve's documented functions; **not tested** (needs the Steamworks SDK library). |
-| `bc_provider_steam`, `bc_provider_epic` | Written against the SDKs' documented APIs and syntax checked; **not built against the real SDKs** (not redistributable). Build and test them with your SDK before shipping. |
+| Key server: itch.io and Meta checks | Request and answer handling tested against recorded answers in the shapes Meta and itch.io document; **not tested against the real services**. |
+| `bc_provider_itch` | Built and tested with the key server; **not tested with the real itch app**. |
+| `bc_provider_steam`, `bc_provider_epic`, `bc_provider_meta` | Written against the SDKs' documented APIs and syntax checked; **not built against the real SDKs** (not redistributable). Build and test them with your SDK before shipping. |
 
 ## Setting up a game
 
@@ -91,6 +95,49 @@ game executable ──runs──> key provider ──HTTPS──> key server
   its arguments to the provider (never to the player).
 - Server: `epic.client_id` and `epic.catalog_item_ids`. Tokens are verified with Epic's public keys
   (RS512), fetched once per key id.
+
+### itch.io
+
+- The itch app gives the game the player's login (`ITCHIO_API_KEY`) only for an action of the
+  game's `.itch.toml` that asks for it. Put this file at the root of the game folder you upload
+  (`bc_tool` notes when it is missing):
+
+  ```toml
+  [[actions]]
+  name = "play"
+  path = "MyGame.exe"
+  scope = "profile:me"
+  ```
+
+- Server: `itch.game_id` (the number in your game's edit page address) and `itch.api_key`, an API
+  key of your account (itch.io settings, *API keys*). Never ship it. The server finds the player's
+  account with the login, then asks itch.io whether that account bought or claimed the game
+  (download keys).
+- Players must start the game from the itch app. A copy downloaded from the web page and started
+  directly has no login and does not start: say so on the game's page.
+- `bc_provider_itch` needs no SDK: it builds with the others. Copy it into the game folder.
+
+### Meta (Meta Horizon Store, PC VR)
+
+- Build the provider on Windows with the Meta Platform SDK for PC and your app id:
+  `-DBCP_META_PLATFORM_SDK=<sdk> -DBCP_META_APP_ID=<app id>`. Nothing ships next to it: the Meta
+  app installed on the player's computer brings the platform library, which the SDK's loader
+  finds.
+- The provider checks the entitlement, then sends the user id and a one-use nonce. The server
+  validates the nonce with Meta (`user_nonce_validate`), then asks whether the account owns the app
+  (`verify_entitlement`), both signed with `meta.app_secret` (never ship it) and `meta.app_id`.
+  Both need your app's Data Use Checkup to grant *User ID* and *In-app purchases and/or
+  downloadable content*.
+- Meta expects an entitlement check at every launch: use *Always online*. With *Offline after 1st
+  launch* the provider, and its check, runs only at the first launch (`bc_tool` notes it).
+
+### GOG
+
+There is no GOG provider. GOG requires games to start without GOG GALAXY and without a login
+("the GOG GALAXY client should not be required to launch the game"; "player authentication in our
+servers should be entirely optional"), and sells offline installers. An online key contradicts
+both: export the GOG build with *Key: Per project*. Choosing *GOG* in `bc_tool`'s *Store* list says
+so.
 
 ### Your own store or license system
 
