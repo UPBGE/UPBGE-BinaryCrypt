@@ -2444,7 +2444,7 @@ static void bc_gui_draw(BC_Gui *g)
    * elsewhere. Any value set brands both the game executable and the player. */
   {
     if (brand) {
-      const char *icon_name = g->project.icon[0] ? bc_path_basename(g->project.icon) : "UPBGE icon";
+      const char *icon_name = g->project.icon[0] ? bc_path_basename(g->project.icon) : "no game icon";
       snprintf(summary,
                sizeof(summary),
                "%s  \xc2\xb7  version %s%s%s",
@@ -2465,7 +2465,7 @@ static void bc_gui_draw(BC_Gui *g)
     }
     else if (windows_open) {
       const float row_y = y + 2 * BC_GAP;
-      if (bc_gui_path_row(x0, row_y, right, BC_LABEL_W, "Icon", "Windows: icon of the game\nOf the game executable and of the game window (taskbar, Alt-Tab), any sizes in one .ico. Empty: the UPBGE icon.", "Optional: the UPBGE icon", &check->icon, g->project.icon, g->icon_text, &g->icon_edit, &committed)) {
+      if (bc_gui_path_row(x0, row_y, right, BC_LABEL_W, "Icon", "Windows: icon of the game\nOf the game executable and of the game window (taskbar, Alt-Tab), any sizes in one .ico. Empty: the game executable shows the BinaryCrypt icon, the game window UPBGE's.", "Optional: the game icon", &check->icon, g->project.icon, g->icon_text, &g->icon_edit, &committed)) {
         r = bc_dialog_open_files("Game icon", "ico", false, path, sizeof(path));
         if (r == BC_DIALOG_OK) {
           snprintf(g->project.icon, sizeof(g->project.icon), "%s", path);
@@ -2517,7 +2517,7 @@ static void bc_gui_draw(BC_Gui *g)
   Rectangle key_box = {0}, check_box = {0}, manifest_box = {0}, store_box = {0};
   {
     static const char *const check_names[] = {"Player only", "Player + Libraries", "Player + Libraries + Python"};
-    const char *key_text = g->project.key_mode == BC_KEY_BUILD ? "Build key" :
+    const char *key_text = g->project.key_mode == BC_KEY_BUILD ? "Build key (only for tests)" :
                            !online                             ? "Per project key" :
                            g->project.key_cache                ? "Online key, offline after 1st launch" :
                                                                  "Online key, always online";
@@ -2544,7 +2544,7 @@ static void bc_gui_draw(BC_Gui *g)
       {
         const float key_x = x0 + BC_LABEL_W;
         const float padding = (float)GuiGetStyle(TOGGLE, GROUP_PADDING);
-        float key_w = MeasureTextEx(font, "Per project", BC_TEXT_SIZE, text_spacing).x + dropdown_extra;
+        float key_w = MeasureTextEx(font, "Build key (only for tests)", BC_TEXT_SIZE, text_spacing).x + dropdown_extra;
         float cache_w = MeasureTextEx(font, "Offline after 1st launch", BC_TEXT_SIZE, text_spacing).x + 2 * BC_GAP;
         const float types_label_w = MeasureTextEx(font, "Online types", BC_TEXT_SIZE, text_spacing).x + 3 * BC_GAP;
         /* Narrow windows: dropdown and toggles shrink together rather than overlap, the label keeps
@@ -2971,7 +2971,7 @@ static void bc_gui_draw(BC_Gui *g)
     bc_tip(manifest_box,
            "Where the manifest of the game goes\nEmbedded: one self-contained game executable. Separate file: the game executable is an untouched copy of bc_launcher, with " BC_MANIFEST_FILENAME " next to it (sign bc_launcher once).");
     bc_tip(key_box,
-           "Where the game gets its content key\nPer project: the key of this project, masked in the game executable. Online: a key server gives it to players who own the game, through the key provider. Build key: the key built into this tool.");
+           "Where the game gets its content key\nPer project: the key of this project, masked in the game executable. Online: a key server gives it to players who own the game, through the key provider. Build key, only for tests: the key built into this tool, the same for every game it exports.");
     bc_tip(store_box,
            "Store the game is sold on\nSteam, Epic, itch.io and Meta fill in their reference key provider (keyserver/providers), next to the UPBGE runtime: copy it there. GOG has none: it requires games to start without its client, so a GOG build uses a per project key. Custom: a provider of your own. The store is told by the provider's file name.");
   }
@@ -2999,7 +2999,7 @@ static void bc_gui_draw(BC_Gui *g)
   } dropdowns[] = {
       {check_box, "Player only;Player + Libraries;Player + Libraries + Python", &integrity, &g->check_edit},
       {manifest_box, "Embedded;Separate file", &manifest_mode, &g->manifest_edit},
-      {key_box, "Per project;Online;Build key", &key_mode, &g->key_edit},
+      {key_box, "Per project;Online;Build key (only for tests)", &key_mode, &g->key_edit},
       {store_box, BC_STORE_LIST, &store_index, &g->store_edit},
   };
   const int dropdown_count = (int)(sizeof(dropdowns) / sizeof(dropdowns[0]));

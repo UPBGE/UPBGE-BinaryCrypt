@@ -195,7 +195,8 @@ Platform notes:
       Disabled in Linux and macOS builds of `bc_tool`, which make no Windows games.
    4. *Protection*:
       - *Key*: per project (default), online from a key server (*Online types*: *Always online* or
-        *Offline after 1st launch*), or the build key; *Key file*: see *Keys*, below.
+        *Offline after 1st launch*), or the build key (*only for tests*: every game of the same
+        `bc_tool` build shares it); *Key file*: see *Keys*, below.
       - *Runtime Check* (default *Player + Libraries + Python*): see *Integrity check*, below.
       - *Manifest*: inside the game executable (default) or in a separate `binarycrypt.manifest`
         file next to it (see below).
@@ -309,7 +310,7 @@ branded player untouched, byte for byte.
 
 ### Keys
 
-| | Per project (default) | Online | Build key |
+| | Per project (default) | Online | Build key (only for tests) |
 |---|---|---|---|
 | The files are encrypted with | the project key, from its key file | the project's keys, from its key file | the build key |
 | The game executable gets it from | its manifest, unmasked with the build key | the key server, at each launch | itself (two shares) |
