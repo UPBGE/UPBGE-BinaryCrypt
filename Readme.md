@@ -10,7 +10,8 @@ model: an **encryption tool** for the developer and a **launcher** shipped with 
 | `bc_launcher` | As the game executable | Template: `bc_tool` copies it under the game's name, with the manifest inside or next to it. Verifies the player, starts it and hands it the key. |
 | UPBGE player (`blenderplayer`) | Yes, in `engine/` | Decrypts while loading. Built with `WITH_GAMEENGINE_BINARYCRYPT`. |
 
-A shipped game looks like this: one executable, the encrypted data and the runtime folder.
+A shipped game looks like this: one executable, the encrypted data, the runtime folder and, with an
+online key, the key provider's folder.
 
 ```
 MyGame.exe          game executable (launcher + manifest)
@@ -18,6 +19,7 @@ MyGame.exe          game executable (launcher + manifest)
 game.blend          encrypted
 levels/...          encrypted (.blend files, Python modules, data files)
 engine/             UPBGE runtime: blenderplayer.exe, DLLs, <version>/python, <version>/datafiles
+provider/           online key only: the store's key provider and its library (steam_api64.dll...)
 ```
 
 ## What it protects, and what it does not
@@ -173,12 +175,25 @@ launcher needs no Visual C++ redistributable on the player's computer.
 
 ## Encrypting a game
 
-1. **Prepare the runtime.** Copy the UPBGE runtime (the player executable with everything next to
-   it: DLLs, `blender.crt`, `blender.shared`, the `<version>` folder with `python` and `datafiles`)
-   into `engine/` inside the folder you will ship. The player finds its files relative to its own
-   location, so the whole runtime moves together. The player and the libraries of the game folder
-   are hashed: export *after* placing the final runtime and any store library
-   (`steam_api64.dll`, a key provider...), and export again whenever you change one.
+1. **Prepare the runtime.** The game folder needs the UPBGE runtime in `engine/`: the player
+   executable with everything it loads. Either way:
+   - Set *UPBGE folder* (*Build* section) to your UPBGE: a release, or the `bin` folder of a build
+     (`bin/Release` with Visual Studio). Every export then copies into `engine/` what the player
+     needs, and only what changed since the last export: on Windows `blenderplayer.exe`, the
+     `.dll` files, the version folder (`5.x`), `blender.crt`, `blender.shared`, `license` and
+     `copyright.txt`; on Linux `blenderplayer`, the version folder, `lib`, `license` and
+     `copyright.txt`; on macOS `Blenderplayer.app`. Never the editor, the build tools, the `.cmd`
+     files, `oculus.json` (only `blender_oculus.cmd`, which starts the editor, uses it), debug
+     symbols (`.pdb`) or Python bytecode. `engine/.bc_runtime` records what was copied: a file a
+     newer UPBGE no longer has (an old version folder) is removed by the next export, files of
+     your own in `engine/` are never touched, and a copy you changed on purpose (signed, for
+     example) stays until its source in the UPBGE folder changes. Delete a copy to get the
+     original back at the next export.
+   - Or copy the runtime into `engine/` yourself and leave *UPBGE folder* empty.
+
+   The player finds its files relative to its own location, so the whole runtime moves together.
+   The player and the libraries of the game folder are hashed: export *after* placing any store
+   library (`steam_api64.dll`, a key provider...), and export again whenever you change one.
 2. **Describe the batch** in `bc_tool` (or write a `.bcproj` file, below). The editor has four
    sections in the order of the task. Each one folds to a summary line, by default the last two:
    1. *Game*, what gets encrypted:
@@ -199,9 +214,11 @@ launcher needs no Visual C++ redistributable on the player's computer.
    2. *Build*, where the game goes:
       - *Output folder*: the game folder, always another folder than the sources (see *Output
         folder*, below).
+      - *UPBGE folder*: optional, the UPBGE every export copies into `engine/` (step 1).
       - *Game name*: name of the game executable (`.exe` is added on Windows). Empty: the main file
         name.
-      - *UPBGE runtime*: the player inside the game folder; `engine/blenderplayer(.exe)` by default.
+      - *UPBGE player*: the player inside the game folder; `engine/blenderplayer(.exe)` by default,
+        and the copy of the UPBGE folder's player when that is set.
    3. *Windows appearance*: *Icon*, *Version*, *Company*, *Copyright*, all optional; see below.
       Disabled in Linux and macOS builds of `bc_tool`, which make no Windows games.
    4. *Protection*:
@@ -316,7 +333,8 @@ branded player untouched, byte for byte.
   builds ignore these settings with a warning.
 - Without an *Icon*, the game executable shows the BinaryCrypt icon, which `bc_launcher` carries
   as its own `APPICON`; the player keeps UPBGE's.
-- Emptying the settings does not restore the UPBGE icon: copy the runtime into `engine/` again.
+- Emptying the settings does not restore the UPBGE icon: copy the runtime into `engine/` again
+  (with a *UPBGE folder*, delete `engine/blenderplayer.exe`: the next export copies it again).
 - Explorer caches icons: a changed icon may take a while to show for the same file name.
 
 ### Keys
@@ -351,9 +369,10 @@ player is the same in both modes.
 - *Key file*: the content key, created on the first export (by default next to the project file).
   It must not be inside the game folder (`bc_tool` refuses), goes on the key server, and must be
   **backed up**: every update of the game needs it.
-- *Store*: *Steam*, *Epic*, *itch.io* or *Meta* fills in the store's reference provider next to
-  the UPBGE runtime (`engine/bc_provider_steam(.exe)`, and `_epic`, `_itch`, `_meta`); *Custom* is
-  a provider of your own. The store is told by the provider's file name. *GOG* has no provider:
+- *Store*: *Steam*, *Epic*, *itch.io* or *Meta* fills in the store's reference provider in a
+  folder of its own beside the runtime (`provider/bc_provider_steam(.exe)`, and `_epic`, `_itch`,
+  `_meta`): another program than the player, with the store's library next to it; *Custom* is a
+  provider of your own. The store is told by the provider's file name. *GOG* has no provider:
   GOG requires games to start without its client and without a login, so a GOG build uses a per
   project key (see [`keyserver/`](keyserver/README.md#gog)). With a store's provider, the row shows
   what is still missing: the store's library next to the provider (`steam_api64.dll`,
@@ -485,13 +504,14 @@ copyright = "(c) 2026 My Studio"  # Windows, optional
 key = online                    # project (default) | online | build
 key_file = keys/mygame.key      # project, online: created on the first export; default
                                 #   <project name>.key next to the project file
-key_provider = engine/bc_provider_steam.exe  # online: relative to the game folder
+key_provider = provider/bc_provider_steam.exe  # online: relative to the game folder
 key_url = https://keys.example.com/key       # online: given to the provider
 key_cache = none                # online: none | permanent (offline after the first launch)
 key_rotation = off              # online: off (one key) | per_update (a new key per update)
 key_update = 1                  # online, per_update: number of the update being exported
 integrity = python              # player | native (+ libraries) | python (default, + Python files)
-player = engine/blenderplayer.exe   # relative to the game folder
+upbge_dir = C:/UPBGE/bin/Release   # optional: copied into engine/ by every export
+player = engine/blenderplayer.exe   # relative to the game folder; ignored with upbge_dir
 main = src/game.blend
 data_extensions = json csv      # optional: folders also give these data files
 input = src                     # a folder (scanned for *.blend, *.py and the data extensions)

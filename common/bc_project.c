@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 
 #include "bc_project.h"
+#include "bc_runtime.h"
 
 #include <ctype.h>
 #include <stdlib.h>
@@ -215,6 +216,11 @@ const char *bc_project_dist_root(const BC_Project *p)
   return p->output_dir;
 }
 
+const char *bc_project_player(const BC_Project *p)
+{
+  return p->upbge_dir[0] != '\0' ? BC_RUNTIME_DIR "/" BC_RUNTIME_PLAYER : p->player;
+}
+
 /* -------------------------------------------------------------------------------------------- */
 /* Text format */
 
@@ -403,6 +409,9 @@ bool bc_project_load(BC_Project *p, const char *file_path, char *err, size_t err
     else if (strcmp(key, "game_name") == 0) {
       ok = (size_t)snprintf(p->game_name, sizeof(p->game_name), "%s", value) < sizeof(p->game_name);
     }
+    else if (strcmp(key, "upbge_dir") == 0) {
+      ok = value[0] == '\0' || bc_resolve(p->upbge_dir, project_dir, value);
+    }
     else if (strcmp(key, "player") == 0) {
       ok = (size_t)snprintf(p->player, sizeof(p->player), "%s", value) < sizeof(p->player);
       bc_path_normalize(p->player);
@@ -521,6 +530,9 @@ bool bc_project_save(const BC_Project *p, const char *file_path, char *err, size
   fprintf(f,
           "integrity = %s\n",
           p->integrity == BC_INTEGRITY_PLAYER ? "player" : p->integrity == BC_INTEGRITY_PYTHON ? "python" : "native");
+  if (p->upbge_dir[0] != '\0') {
+    bc_write_path(f, "upbge_dir", project_dir, p->upbge_dir);
+  }
   bc_write_value(f, "player", p->player);
   if (p->main[0] != '\0') {
     bc_write_path(f, "main", project_dir, p->main);

@@ -236,6 +236,30 @@ bool bc_remove(const char *path)
 #endif
 }
 
+bool bc_remove_dir(const char *dir)
+{
+#ifdef _WIN32
+  wchar_t *wdir = bc_utf16(dir);
+  const bool ok = wdir && RemoveDirectoryW(wdir);
+  free(wdir);
+  return ok;
+#else
+  return rmdir(dir) == 0;
+#endif
+}
+
+bool bc_copy_permissions(const char *from, const char *to)
+{
+#ifdef _WIN32
+  (void)from;
+  (void)to;
+  return true;
+#else
+  struct stat st;
+  return stat(from, &st) == 0 && chmod(to, st.st_mode & 0777) == 0;
+#endif
+}
+
 bool bc_exe_path(char *out, size_t size)
 {
   char path[BC_PATH_MAX];

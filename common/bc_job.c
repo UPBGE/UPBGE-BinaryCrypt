@@ -12,12 +12,14 @@
 #include "bc_key.h"
 #include "bc_keyring.h"
 #include "bc_native.h"
+#include "bc_runtime.h"
 #include "bc_seal.h"
 #include "blake3.h"
 
 #define BC_HASH_READ_SIZE (1 << 20)
 
 typedef enum BC_JobPhase {
+  BC_PHASE_COPY_RUNTIME,
   BC_PHASE_BRAND_PLAYER,
   BC_PHASE_HASH_PLAYER,
   BC_PHASE_SEAL,
@@ -85,6 +87,9 @@ struct BC_Job {
   char player_rel[BC_PATH_MAX];
   char player_abs[BC_PATH_MAX];
   char main_out_rel[BC_PATH_MAX];
+  /** A UPBGE folder: the runtime is copied into engine/ first, the player with it. */
+  bool runtime_on;
+  BC_RuntimeCopy runtime;
   /** Folders also give Python modules and the data files of these extensions. */
   char data_ext[BC_DATA_EXT_MAX][BC_DATA_EXT_SIZE];
   int data_ext_count;
@@ -537,7 +542,7 @@ static bool bc_job_setup_key(BC_Job *job, const BC_Project *p)
     bc_log(job,
            BC_LOG_ERROR,
            "The key provider must be a relative path inside the game folder (for example "
-           "'engine/bc_provider_steam.exe')");
+           "'" BC_DEFAULT_PROVIDER_DIR "/bc_provider_steam.exe')");
     return false;
   }
   if (!bc_path_join(provider_abs, sizeof(provider_abs), job->dist_root, job->provider_rel) ||
@@ -677,8 +682,9 @@ BC_Job *bc_job_create(const BC_Project *p,
   }
   snprintf(job->dist_root, sizeof(job->dist_root), "%s", bc_project_dist_root(p));
 
-  /* Player: named relative to the distribution root, exactly as it will ship. */
-  snprintf(job->player_rel, sizeof(job->player_rel), "%s", p->player);
+  /* Player: named relative to the distribution root, exactly as it will ship. With a UPBGE folder
+   * it is the copy the export makes first (the folder is listed once the cheap checks passed). */
+  snprintf(job->player_rel, sizeof(job->player_rel), "%s", bc_project_player(p));
   if (!bc_manifest_path_is_safe(job->player_rel)) {
     bc_log(job,
            BC_LOG_ERROR,
@@ -686,15 +692,24 @@ BC_Job *bc_job_create(const BC_Project *p,
            "(for example 'engine/blenderplayer.exe')");
     return bc_job_fail_create(job);
   }
-  if (!bc_path_join(job->player_abs, sizeof(job->player_abs), job->dist_root, job->player_rel) ||
-      !bc_is_file(job->player_abs))
-  {
+  if (!bc_path_join(job->player_abs, sizeof(job->player_abs), job->dist_root, job->player_rel)) {
+    bc_log(job, BC_LOG_ERROR, "The player path is too long");
+    return bc_job_fail_create(job);
+  }
+  if (p->upbge_dir[0] != '\0') {
+    if (bc_path_is_inside(p->upbge_dir, job->dist_root) || bc_path_is_inside(job->dist_root, p->upbge_dir)) {
+      bc_log(job, BC_LOG_ERROR, "The UPBGE folder and the output folder must not contain each other");
+      return bc_job_fail_create(job);
+    }
+  }
+  else if (!bc_is_file(job->player_abs)) {
     bc_log(job,
            BC_LOG_ERROR,
-           "Player not found at '%s'. Copy the UPBGE runtime (the player with its DLLs, python and "
-           "datafiles folders) there before encrypting: the game only starts the exact player it "
-           "was encrypted for",
-           job->player_abs);
+           "Player not found at '%s'. Set the UPBGE folder (the export then copies the runtime into "
+           "%s/), or copy the UPBGE runtime there yourself before encrypting: the game only starts "
+           "the exact player it was encrypted for",
+           job->player_abs,
+           BC_RUNTIME_DIR);
     return bc_job_fail_create(job);
   }
 
@@ -797,11 +812,26 @@ BC_Job *bc_job_create(const BC_Project *p,
   job->file_count = list.count;
   free(list.files);
 
+  /* What the UPBGE folder gives, against what an earlier export copied: reads only. */
+  if (p->upbge_dir[0] != '\0') {
+    char engine[BC_PATH_MAX];
+    char why[BC_PATH_MAX + 256];
+    if (!bc_path_join(engine, sizeof(engine), job->dist_root, BC_RUNTIME_DIR)) {
+      bc_log(job, BC_LOG_ERROR, "The output folder path is too long");
+      return bc_job_fail_create(job);
+    }
+    if (!bc_runtime_begin(&job->runtime, p->upbge_dir, engine, why, sizeof(why))) {
+      bc_log(job, BC_LOG_ERROR, "%s", why);
+      return bc_job_fail_create(job);
+    }
+    job->runtime_on = true;
+  }
+
   /* Outputs, sizes and the main file. */
   bool main_found = false;
   for (int i = 0; i < job->file_count; i++) {
     BC_JobFile *file = &job->files[i];
-    char out[BC_PATH_MAX];
+    char out[BC_PATH_MAX], rel[BC_PATH_MAX];
     if (!bc_output_path(p, file->in, out, sizeof(out)) ||
         (file->out = (char *)malloc(strlen(out) + 1)) == NULL)
     {
@@ -814,6 +844,10 @@ BC_Job *bc_job_create(const BC_Project *p,
     file->copy = file->size == 0 && file->kind != BC_KIND_BLEND;
     if (bc_path_equal(out, job->game_exe)) {
       bc_log(job, BC_LOG_ERROR, "The game executable would overwrite '%s'", out);
+      return bc_job_fail_create(job);
+    }
+    if (job->runtime_on && bc_path_relative(rel, sizeof(rel), job->runtime.to, out) && bc_runtime_has(&job->runtime, rel)) {
+      bc_log(job, BC_LOG_ERROR, "'%s' would overwrite the UPBGE runtime file '%s/%s'", file->in, BC_RUNTIME_DIR, rel);
       return bc_job_fail_create(job);
     }
     if (strcmp(file->in, p->main) == 0) {
@@ -840,9 +874,17 @@ BC_Job *bc_job_create(const BC_Project *p,
     return bc_job_fail_create(job);
   }
 
+  /* With a UPBGE folder the player to hash is the copy of its player, of the same size. */
   uint64_t player_size = 0;
-  bc_file_size(job->player_abs, &player_size);
-  job->total_bytes += player_size;
+  char source_player[BC_PATH_MAX];
+  if (job->runtime_on && bc_path_join(source_player, sizeof(source_player), p->upbge_dir, BC_RUNTIME_PLAYER)) {
+    bc_file_size(source_player, &player_size);
+  }
+  else {
+    bc_file_size(job->player_abs, &player_size);
+  }
+  const uint64_t encrypt_bytes = job->total_bytes;
+  job->total_bytes += player_size + job->runtime.copy_bytes;
 
   /* The player is opened by the hash phase: branding may replace the file before. */
   job->hash_buffer = (uint8_t *)malloc(BC_HASH_READ_SIZE);
@@ -851,15 +893,45 @@ BC_Job *bc_job_create(const BC_Project *p,
     return bc_job_fail_create(job);
   }
   blake3_hasher_init(&job->hash_ctx);
-  job->phase = job->branding ? BC_PHASE_BRAND_PLAYER : BC_PHASE_HASH_PLAYER;
+  job->phase = job->runtime_on ? BC_PHASE_COPY_RUNTIME : job->branding ? BC_PHASE_BRAND_PLAYER : BC_PHASE_HASH_PLAYER;
 
   bc_log(job,
          BC_LOG_INFO,
          "%d file(s), %.1f MiB to encrypt into '%s'",
          job->file_count,
-         (double)(job->total_bytes - player_size) / (1024.0 * 1024.0),
+         (double)encrypt_bytes / (1024.0 * 1024.0),
          job->dist_root);
-  snprintf(job->status, sizeof(job->status), job->branding ? "Branding the player" : "Hashing the player");
+  if (job->runtime_on) {
+    const BC_RuntimeCopy *c = &job->runtime;
+    if (c->record_bad) {
+      bc_log(job,
+             BC_LOG_WARNING,
+             "%s/%s cannot be read: the whole runtime is copied again, and files an older UPBGE left "
+             "in %s/ stay",
+             BC_RUNTIME_DIR,
+             BC_RUNTIME_RECORD,
+             BC_RUNTIME_DIR);
+    }
+    if (c->skipped > 0) {
+      bc_log(job, BC_LOG_WARNING, "%d link(s) to folders in the UPBGE folder skipped", c->skipped);
+    }
+    if (c->copy_count > 0 || c->stale_count > 0) {
+      bc_log(job,
+             BC_LOG_INFO,
+             "UPBGE runtime from '%s': %d of %d file(s) to copy into %s/ (%.1f MiB), %d old one(s) to remove",
+             p->upbge_dir,
+             c->copy_count,
+             c->file_count,
+             BC_RUNTIME_DIR,
+             (double)c->copy_bytes / (1024.0 * 1024.0),
+             c->stale_count);
+    }
+  }
+  snprintf(job->status,
+           sizeof(job->status),
+           job->runtime_on ? "Copying the UPBGE runtime" :
+           job->branding   ? "Branding the player" :
+                             "Hashing the player");
   return job;
 }
 
@@ -912,6 +984,46 @@ static BC_BrandResult bc_job_brand(BC_Job *job, const char *path, const char *si
                                    "the exported game executable");
   }
   return result;
+}
+
+/* One file removed or one buffer copied (bc_runtime.h). */
+static void bc_job_copy_runtime(BC_Job *job)
+{
+  BC_RuntimeCopy *c = &job->runtime;
+  char err[BC_PATH_MAX + 128];
+  const uint64_t before = c->done_bytes;
+  const int result = bc_runtime_step(c, job->hash_buffer, BC_HASH_READ_SIZE, err, sizeof(err));
+  job->done_bytes += c->done_bytes - before;
+  if (result < 0) {
+    bc_log(job, BC_LOG_ERROR, "%s", err);
+    bc_job_set_failed(job);
+    return;
+  }
+  const char *current = bc_runtime_current(c);
+  if (current != NULL) {
+    snprintf(job->status, sizeof(job->status), BC_RUNTIME_DIR "/%s", current);
+  }
+  if (result > 0) {
+    return;
+  }
+  if (c->copied + c->removed > 0) {
+    bc_log(job,
+           BC_LOG_INFO,
+           "UPBGE runtime: %d file(s) copied (%.1f MiB), %d old one(s) removed, %d up to date",
+           c->copied,
+           (double)c->done_bytes / (1024.0 * 1024.0),
+           c->removed,
+           c->file_count - c->copied);
+  }
+  else {
+    bc_log(job, BC_LOG_INFO, "UPBGE runtime up to date (%d files in %s/)", c->file_count, BC_RUNTIME_DIR);
+  }
+  /* Failing to record costs the next export a full copy, never a broken game. */
+  if (!bc_runtime_save(c, err, sizeof(err))) {
+    bc_log(job, BC_LOG_WARNING, "%s: the next export copies the whole runtime again", err);
+  }
+  job->phase = job->branding ? BC_PHASE_BRAND_PLAYER : BC_PHASE_HASH_PLAYER;
+  snprintf(job->status, sizeof(job->status), job->branding ? "Branding the player" : "Hashing the player");
 }
 
 /* Before hashing: the manifest must authenticate the player as shipped. Blocking, but it only
@@ -1300,6 +1412,9 @@ int bc_job_step(BC_Job *job, const double budget_seconds)
   const double deadline = bc_time_seconds() + budget_seconds;
   while (job->phase != BC_PHASE_DONE && job->phase != BC_PHASE_FAILED) {
     switch (job->phase) {
+      case BC_PHASE_COPY_RUNTIME:
+        bc_job_copy_runtime(job);
+        break;
       case BC_PHASE_BRAND_PLAYER:
         bc_job_brand_player(job);
         break;
@@ -1355,6 +1470,7 @@ void bc_job_destroy(BC_Job *job)
     free(job->old_records[i].path);
   }
   free(job->old_records);
+  bc_runtime_end(&job->runtime);
   bc_keyring_free(&job->ring);
   for (int i = 0; i < job->file_count; i++) {
     free(job->files[i].in);

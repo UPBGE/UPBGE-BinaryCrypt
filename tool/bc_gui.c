@@ -24,6 +24,7 @@
 #include "bc_job.h"
 #include "bc_key.h"
 #include "bc_project.h"
+#include "bc_runtime.h"
 
 /* Window icon from the embedded .ico. Windows takes it from the GLFW_ICON resource (bc_tool.rc)
  * instead; macOS windows have none. */
@@ -91,7 +92,7 @@ typedef struct BC_Field {
 /** Readiness of the project: per field, and what still blocks Encrypt. A subset of the checks of
  * bc_job_create, so a disabled Encrypt never blocks an export the job would accept. */
 typedef struct BC_Check {
-  BC_Field source, output, runtime, icon, provider, update;
+  BC_Field source, output, upbge, runtime, icon, provider, update;
   bool no_inputs;
   /** What to do before encrypting, empty when ready. */
   char todo[512];
@@ -123,6 +124,7 @@ typedef struct BC_Gui {
   /* Text boxes mirror project fields while not being edited. */
   char source_text[BC_PATH_MAX];
   char output_text[BC_PATH_MAX];
+  char upbge_text[BC_PATH_MAX];
   char player_text[BC_PATH_MAX];
   char game_text[BC_GAME_NAME_MAX + 16]; /* Room for the "  (main file)" note. */
   char icon_text[BC_PATH_MAX];
@@ -133,7 +135,7 @@ typedef struct BC_Gui {
   char provider_text[BC_PATH_MAX];
   char url_text[BC_PROJECT_URL_MAX];
   char update_text[16];
-  bool source_edit, output_edit, player_edit, game_edit;
+  bool source_edit, output_edit, upbge_edit, player_edit, game_edit;
   bool icon_edit, version_edit, company_edit, copyright_edit;
   bool key_file_edit, provider_edit, url_edit, update_edit;
   /** Open dropdowns: drawn last, over the rows below them. */
@@ -418,8 +420,8 @@ static const char *const bc_store_names[BC_STORE_ITEMS] = {"Steam", "Epic", "GOG
 static const BC_KeyStore bc_store_items[BC_STORE_ITEMS] = {
     BC_STORE_STEAM, BC_STORE_EPIC, BC_STORE_CUSTOM, BC_STORE_ITCH, BC_STORE_META, BC_STORE_CUSTOM};
 
-/** Store template: the store's reference provider next to the UPBGE runtime (the folder already
- * holding a runtime and its libraries), or no provider for one of your own. */
+/** Store template: the store's reference provider in the game folder's provider/, beside engine/
+ * (another program than the player, with its store library), or no provider for one of your own. */
 static void bc_gui_set_store(BC_Gui *g, const BC_KeyStore store)
 {
   BC_Project *p = &g->project;
@@ -428,9 +430,7 @@ static void bc_gui_set_store(BC_Gui *g, const BC_KeyStore store)
     p->key_provider[0] = '\0';
   }
   else {
-    char dir[BC_PATH_MAX];
-    bc_path_dirname(dir, sizeof(dir), p->player);
-    const int n = snprintf(p->key_provider, sizeof(p->key_provider), "%s%s%s%s", dir, dir[0] ? "/" : "", name, bc_exe_extension());
+    const int n = snprintf(p->key_provider, sizeof(p->key_provider), BC_DEFAULT_PROVIDER_DIR "/%s%s", name, bc_exe_extension());
     if (n < 0 || (size_t)n >= sizeof(p->key_provider)) {
       p->key_provider[0] = '\0';
     }
@@ -441,6 +441,19 @@ static void bc_gui_set_store(BC_Gui *g, const BC_KeyStore store)
 static void bc_gui_set_player(BC_Gui *g, const char *path)
 {
   bc_gui_set_dist_path(g, path, g->project.player, sizeof(g->project.player), "player (with the UPBGE runtime)");
+}
+
+/** UPBGE folder, absolute (empty: the runtime is copied by hand). The player is then its copy:
+ * stored too, so emptying the folder again keeps a player path that matches engine/. */
+static void bc_gui_set_upbge(BC_Gui *g, const char *path)
+{
+  BC_Project *p = &g->project;
+  snprintf(p->upbge_dir, sizeof(p->upbge_dir), "%s", path);
+  bc_path_normalize(p->upbge_dir);
+  if (p->upbge_dir[0] != '\0') {
+    snprintf(p->player, sizeof(p->player), "%s", bc_project_player(p));
+  }
+  bc_gui_set_modified(g);
 }
 
 /** Add a dropped or picked path: a folder, or a file of any kind (.blend, module, data file). The
@@ -1079,9 +1092,27 @@ static void bc_gui_refresh_check(BC_Gui *g)
     bc_field_set(&c->output, BC_FIELD_OK, NULL);
   }
 
-  /* The runtime lives in the game folder: nothing to check before there is one. */
+  /* The runtime: copied from the UPBGE folder by the export (checked there), or by hand into the
+   * game folder (nothing to check before there is one). */
   char path[BC_PATH_MAX];
-  if (p->player[0] == '\0') {
+  if (p->upbge_dir[0] != '\0') {
+    if (!bc_is_dir(p->upbge_dir)) {
+      bc_field_set(&c->upbge, BC_FIELD_ERROR, "not found");
+      bc_todo(c, "the UPBGE folder does not exist");
+    }
+    else if (!bc_path_join(path, sizeof(path), p->upbge_dir, BC_RUNTIME_PLAYER) || !bc_is_file(path)) {
+      bc_field_set(&c->upbge, BC_FIELD_ERROR, "no player");
+      bc_todo(c, "the UPBGE folder has no " BC_RUNTIME_PLAYER ": choose a release or a build's bin folder");
+    }
+    else if (p->output_dir[0] != '\0' && (bc_path_is_inside(p->upbge_dir, p->output_dir) || bc_path_is_inside(p->output_dir, p->upbge_dir))) {
+      bc_field_set(&c->upbge, BC_FIELD_ERROR, "overlaps the output");
+      bc_todo(c, "keep the UPBGE folder and the output folder apart");
+    }
+    else {
+      bc_field_set(&c->upbge, BC_FIELD_OK, NULL);
+    }
+  }
+  else if (p->player[0] == '\0') {
     bc_field_set(&c->runtime, BC_FIELD_NONE, NULL);
     bc_todo(c, "set the UPBGE runtime");
   }
@@ -1091,7 +1122,7 @@ static void bc_gui_refresh_check(BC_Gui *g)
     }
     else {
       bc_field_set(&c->runtime, BC_FIELD_ERROR, "not found");
-      bc_todo(c, "copy the UPBGE runtime into the output folder");
+      bc_todo(c, "set the UPBGE folder, or copy the UPBGE runtime into the output folder");
     }
   }
 
@@ -1184,7 +1215,7 @@ static bool bc_gui_ready(BC_Gui *g)
 /** A text field or a dropdown has the keyboard: shortcuts stay off. */
 static bool bc_gui_editing(const BC_Gui *g)
 {
-  return g->source_edit || g->output_edit || g->player_edit || g->game_edit ||
+  return g->source_edit || g->output_edit || g->upbge_edit || g->player_edit || g->game_edit ||
          g->icon_edit || g->version_edit || g->company_edit || g->copyright_edit ||
          g->key_file_edit || g->provider_edit || g->url_edit || g->update_edit ||
          g->check_edit || g->manifest_edit || g->key_edit || g->store_edit;
@@ -2160,7 +2191,7 @@ static void bc_gui_draw(BC_Gui *g)
   const float list_min_h = 3 * BC_LIST_ROW + 4;
   const float game_fixed_h = 2 * BC_GAP + (BC_ROW + BC_GAP) + BC_GAP + (BC_ROW + BC_GAP); /* Without the list. */
   const float game_min_h = g->game_open ? game_fixed_h + list_min_h : BC_FOLDED_H;
-  const float build_h = g->build_open ? (float)(2 * BC_GAP + 2 * (BC_ROW + BC_GAP)) : BC_FOLDED_H;
+  const float build_h = g->build_open ? (float)(2 * BC_GAP + 3 * (BC_ROW + BC_GAP)) : BC_FOLDED_H;
   const float windows_h = windows_open ? (float)(2 * BC_GAP + 2 * (BC_ROW + BC_GAP)) : BC_FOLDED_H;
   const int protection_rows = 2 + (key_file_row ? 1 : 0) + (online ? 3 : 0);
   const float protection_h = g->protection_open ? 2 * BC_GAP + (float)protection_rows * (BC_ROW + BC_GAP) : BC_FOLDED_H;
@@ -2348,18 +2379,21 @@ static void bc_gui_draw(BC_Gui *g)
   char game_name[BC_GAME_NAME_MAX];
   bool game_is_default;
   bc_gui_effective_game_name(g, game_name, sizeof(game_name), &game_is_default);
+  const bool runtime_copied = g->project.upbge_dir[0] != '\0';
   {
     char player_dir[BC_PATH_MAX];
-    bc_path_dirname(player_dir, sizeof(player_dir), g->project.player[0] ? g->project.player : ".");
-    snprintf(summary,
-             sizeof(summary),
-             "%s%s%s here, runtime in %s/",
-             game_name,
-             bc_exe_extension(),
-             g->project.manifest_mode == BC_MANIFEST_EXTERNAL ? " + " BC_MANIFEST_FILENAME : "",
-             player_dir);
-    const bool error = check->output.state == BC_FIELD_ERROR || check->runtime.state == BC_FIELD_ERROR;
-    if (bc_section(y, build_h, inner, "2 \xc2\xb7 Build", summary, error, g->build_open ? 1 : 0, "Show or hide where the game goes\nThe output folder (the game folder you ship), the name of the game executable and the UPBGE runtime.")) {
+    const char *player = bc_project_player(&g->project);
+    bc_path_dirname(player_dir, sizeof(player_dir), player[0] ? player : ".");
+    const char *manifest = g->project.manifest_mode == BC_MANIFEST_EXTERNAL ? " + " BC_MANIFEST_FILENAME : "";
+    if (runtime_copied) {
+      snprintf(summary, sizeof(summary), "%s%s%s here, UPBGE copied from %s into " BC_RUNTIME_DIR "/", game_name, bc_exe_extension(), manifest, bc_path_basename(g->project.upbge_dir));
+    }
+    else {
+      snprintf(summary, sizeof(summary), "%s%s%s here, runtime in %s/", game_name, bc_exe_extension(), manifest, player_dir);
+    }
+    const bool error = check->output.state == BC_FIELD_ERROR || check->upbge.state == BC_FIELD_ERROR ||
+                       check->runtime.state == BC_FIELD_ERROR;
+    if (bc_section(y, build_h, inner, "2 \xc2\xb7 Build", summary, error, g->build_open ? 1 : 0, "Show or hide where the game goes\nThe output folder (the game folder you ship), the UPBGE folder copied into it, the name of the game executable and the UPBGE player.")) {
       g->build_open = !g->build_open;
     }
   }
@@ -2391,7 +2425,23 @@ static void bc_gui_draw(BC_Gui *g)
     }
     y += BC_ROW + BC_GAP;
 
-    /* Game name, then the runtime: one row. Empty name means "the main file name". */
+    /* The UPBGE folder: every export copies the runtime from it. Empty: copied by hand. */
+    if (bc_gui_path_row(x0, y, right, BC_LABEL_W, "UPBGE folder", "Your UPBGE folder: a release, or a build's bin folder\nEvery export copies into the game folder's " BC_RUNTIME_DIR "/ what changed of: " BC_RUNTIME_CONTENTS ". Empty: copy the runtime there yourself.", "Optional: copied into " BC_RUNTIME_DIR "/ by every export; empty: copy UPBGE there yourself", &check->upbge, g->project.upbge_dir, g->upbge_text, &g->upbge_edit, &committed)) {
+      r = bc_dialog_pick_folder("UPBGE folder (a release, or a build's bin folder)", path, sizeof(path));
+      if (r == BC_DIALOG_OK) {
+        bc_gui_set_upbge(g, path);
+      }
+      else if (r == BC_DIALOG_UNAVAILABLE) {
+        bc_gui_dialog_unavailable(g);
+      }
+    }
+    if (committed) {
+      bc_gui_resolve(g, g->upbge_text, resolved);
+      bc_gui_set_upbge(g, resolved);
+    }
+    y += BC_ROW + BC_GAP;
+
+    /* Game name, then the player: one row. Empty name means "the main file name". */
     const char *game_help = "Name of the game executable\nThe only executable in the game folder (\".exe\" is added on Windows). Empty: the name of the main file.";
     const float game_x = x0 + BC_LABEL_W;
     float game_w = (right - game_x) * 0.3f;
@@ -2420,9 +2470,13 @@ static void bc_gui_draw(BC_Gui *g)
       }
       g->game_edit = !g->game_edit;
     }
+    /* Copied from the UPBGE folder, the player is its copy: shown, not edited. */
     const float runtime_x = game_x + game_w + 2 * BC_GAP;
-    const float runtime_label_w = MeasureTextEx(font, "UPBGE runtime", BC_TEXT_SIZE, text_spacing).x + 2 * BC_GAP;
-    if (bc_gui_path_row(runtime_x, y, right, runtime_label_w, "UPBGE runtime", "The UPBGE player inside the game folder\nWith its runtime (DLLs, python, datafiles) next to it: copy it into the output folder before encrypting. It is hashed: the game refuses any other player.", "Required: the player in the game folder", &check->runtime, g->project.player, g->player_text, &g->player_edit, &committed)) {
+    const float runtime_label_w = MeasureTextEx(font, "UPBGE player", BC_TEXT_SIZE, text_spacing).x + 2 * BC_GAP;
+    const bool greyed_player = bc_enable_begin(!runtime_copied);
+    const char *player_help = runtime_copied ? "The UPBGE player inside the game folder\nCopied from the UPBGE folder with its runtime. It is hashed: the game refuses any other player." :
+                                               "The UPBGE player inside the game folder\nWith its runtime (DLLs, python, datafiles) next to it: copy it into the output folder before encrypting, or set the UPBGE folder. It is hashed: the game refuses any other player.";
+    if (bc_gui_path_row(runtime_x, y, right, runtime_label_w, "UPBGE player", player_help, "Required: the player in the game folder", &check->runtime, bc_project_player(&g->project), g->player_text, &g->player_edit, &committed) && !runtime_copied) {
       r = bc_dialog_open_files("UPBGE player executable", NULL, false, path, sizeof(path));
       if (r == BC_DIALOG_OK) {
         bc_gui_set_player(g, path);
@@ -2431,9 +2485,10 @@ static void bc_gui_draw(BC_Gui *g)
         bc_gui_dialog_unavailable(g);
       }
     }
-    if (committed) {
+    if (committed && !runtime_copied) {
       bc_gui_set_player(g, g->player_text);
     }
+    bc_enable_end(greyed_player);
     y += BC_ROW + BC_GAP + 2 * BC_GAP;
   }
   else {
@@ -2644,7 +2699,7 @@ static void bc_gui_draw(BC_Gui *g)
 
         const float url_label_w = MeasureTextEx(font, "URL", BC_TEXT_SIZE, text_spacing).x + 3 * BC_GAP;
         const float provider_w = (right - key_x - BC_BUTTON_W - url_label_w - 2 * BC_GAP) * 0.45f;
-        const char *provider_help = "Key provider inside the game folder\nFor example engine/bc_provider_steam.exe: proves to the key server that the player owns the game.";
+        const char *provider_help = "Key provider inside the game folder\nFor example " BC_DEFAULT_PROVIDER_DIR "/bc_provider_steam.exe, with the store's library beside it: proves to the key server that the player owns the game.";
         const char *url_help = "Key server address\nGiven to the provider (https://...). Optional: a provider may know its server.";
         GuiLabel(bc_rect(x0, py, BC_LABEL_W, BC_ROW), "Provider");
         bc_tip(bc_rect(x0, py, BC_LABEL_W, BC_ROW), provider_help);
@@ -2973,7 +3028,7 @@ static void bc_gui_draw(BC_Gui *g)
     bc_tip(key_box,
            "Where the game gets its content key\nPer project: the key of this project, masked in the game executable. Online: a key server gives it to players who own the game, through the key provider. Build key, only for tests: the key built into this tool, the same for every game it exports.");
     bc_tip(store_box,
-           "Store the game is sold on\nSteam, Epic, itch.io and Meta fill in their reference key provider (keyserver/providers), next to the UPBGE runtime: copy it there. GOG has none: it requires games to start without its client, so a GOG build uses a per project key. Custom: a provider of your own. The store is told by the provider's file name.");
+           "Store the game is sold on\nSteam, Epic, itch.io and Meta fill in their reference key provider (keyserver/providers) in the game folder's " BC_DEFAULT_PROVIDER_DIR "/: copy it there. GOG has none: it requires games to start without its client, so a GOG build uses a per project key. Custom: a provider of your own. The store is told by the provider's file name.");
   }
   int integrity = (int)g->project.integrity;
   int manifest_mode = (int)g->project.manifest_mode;
@@ -3135,7 +3190,7 @@ int bc_gui_run(const char *project_path)
   bc_gui_rebuild_items(&g);
   bc_gui_update_title(&g);
   bc_gui_logf(&g, BC_LOG_INFO, "Key %s built into this tool: bc_launcher must come from the same build", g.fingerprint);
-  bc_gui_log(&g, BC_LOG_INFO, "Drop the game's files or folders on the window, copy the UPBGE runtime into the game folder's engine/, then Encrypt");
+  bc_gui_log(&g, BC_LOG_INFO, "Drop the game's files or folders on the window, set the UPBGE folder (or copy the UPBGE runtime into the game folder's " BC_RUNTIME_DIR "/), then Encrypt");
 
   /* Frames still to draw without waiting for input. The first ones: some systems send no expose
    * event. And one after each click or Enter: immediate mode handles them while drawing, so what

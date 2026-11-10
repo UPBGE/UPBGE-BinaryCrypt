@@ -111,6 +111,7 @@ add_library(bc_core STATIC
   common/bc_native.c
   common/bc_platform.c
   common/bc_project.c
+  common/bc_runtime.c
   common/bc_seal.c
 )
 target_include_directories(bc_core PUBLIC common)

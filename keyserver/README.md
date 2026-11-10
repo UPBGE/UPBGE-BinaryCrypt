@@ -46,11 +46,11 @@ game executable ──runs──> key provider ──HTTPS──> key server
 
 1. **Project.** In `bc_tool`, set *Key* to *Online*; the *Key file* is created on the first
    export, next to the project file unless you choose another place outside the game folder. Set
-   the *Provider* (for example `engine/bc_provider_steam.exe`, copied into the game folder
-   beforehand) and the server *URL*.
+   the *Provider* (for example `provider/bc_provider_steam.exe`, copied into the game folder
+   beforehand: *Store* fills it in) and the server *URL*.
    *Offline after 1st launch* keeps the keys on the player's computer after one successful launch.
    Copy the provider and the store's libraries (`steam_api64.dll`, `EOSSDK-Win64-Shipping.dll`...)
-   into the game folder **before exporting**: with the integrity check (libraries by default) the
+   into the game folder's `provider/` **before exporting**: with the integrity check (libraries by default) the
    game refuses libraries added or changed after the export. Shipping these libraries next to a
    GPL game is mere aggregation, which the GPL permits: only the provider, a separate MIT program,
    loads them, never the launcher or the player, and they are needed only with an online key.

@@ -27,6 +27,7 @@
 #include "bc_manifest.h"
 #include "bc_native.h"
 #include "bc_project.h"
+#include "bc_runtime.h"
 #include "bc_seal.h"
 #include "bc_test_decrypt.h"
 #include "blake3.h"
@@ -1514,6 +1515,8 @@ typedef struct LogCapture {
   int encrypted;
   int up_to_date;
   int copied;
+  /* The UPBGE runtime copy: files copied and removed, or -1 when it said it was up to date. */
+  int runtime_copied, runtime_removed;
   char last_encrypted[1024];
   char last_error[1024];
   char last_warning[1024];
@@ -1531,6 +1534,11 @@ static void capture_log(void *user, BC_LogLevel level, const char *message)
   }
   c->up_to_date += strncmp(message, "Up to date ", 11) == 0;
   c->copied += strncmp(message, "Copied ", 7) == 0;
+  if (sscanf(message, "UPBGE runtime: %d file(s) copied (%*[^)]), %d old", &c->runtime_copied, &c->runtime_removed) != 2 &&
+      strncmp(message, "UPBGE runtime up to date", 24) == 0)
+  {
+    c->runtime_copied = -1;
+  }
   if (level == BC_LOG_WARNING) {
     c->warnings++;
     snprintf(c->last_warning, sizeof(c->last_warning), "%s", message);
@@ -2100,6 +2108,245 @@ static void test_job(void)
   bc_project_free(&p);
 }
 
+/** The text file \a rel of the work folder holds exactly \a text. */
+static bool work_text_is(const char *rel, const char *text)
+{
+  char path[BC_PATH_MAX];
+  uint8_t *data;
+  uint64_t size;
+  work_path(path, rel);
+  if (!bc_test_read_file(path, &data, &size)) {
+    return false;
+  }
+  const bool equal = size == strlen(text) && memcmp(data, text, (size_t)size) == 0;
+  free(data);
+  return equal;
+}
+
+static bool work_exists(const char *rel)
+{
+  char path[BC_PATH_MAX];
+  work_path(path, rel);
+  return bc_is_file(path) || bc_is_dir(path);
+}
+
+static void remove_tree(const char *dir);
+
+static void remove_tree_entry(void *user, const char *name, bool is_dir)
+{
+  char path[BC_PATH_MAX];
+  bc_path_join(path, sizeof(path), (const char *)user, name);
+  if (is_dir) {
+    remove_tree(path);
+  }
+  else {
+    bc_remove(path);
+  }
+}
+
+static void remove_tree(const char *dir)
+{
+  bc_list_dir(dir, remove_tree_entry, (void *)dir);
+  bc_remove_dir(dir);
+}
+
+/* Where the version folder lives, in a UPBGE folder and in engine/ alike. */
+#if defined(__APPLE__)
+#  define RT_RES_REL "Blenderplayer.app/Contents/Resources/"
+#else
+#  define RT_RES_REL ""
+#endif
+
+/** The version folder of a UPBGE folder, with bytecode an editor run left there. */
+static void write_upbge_version(const char *version)
+{
+  char rel[256];
+  snprintf(rel, sizeof(rel), "rt/upbge/" RT_RES_REL "%s/scripts/startup/menu.py", version);
+  write_text(rel, "print('menu')");
+  snprintf(rel, sizeof(rel), "rt/upbge/" RT_RES_REL "%s/scripts/startup/__pycache__/menu.cpython-313.pyc", version);
+  write_text(rel, "bytecode");
+  snprintf(rel, sizeof(rel), "rt/upbge/" RT_RES_REL "%s/python/lib/os.py", version);
+  write_text(rel, "import sys");
+}
+
+/** A UPBGE folder: what the player needs, and what a build folder also holds and must stay out of
+ * the game. */
+static void write_upbge(void)
+{
+  write_upbge_version("5.4");
+  write_text("rt/upbge/" BC_RUNTIME_PLAYER, "upbge player");
+#if defined(__APPLE__)
+  write_text("rt/upbge/Blender.app/Contents/MacOS/Blender", "editor");
+#endif
+#if defined(_WIN32)
+  write_text("rt/upbge/python313.dll", "python");
+  write_text("rt/upbge/blender.shared/usd_ms.dll", "usd");
+  write_text("rt/upbge/blender.crt/blender.crt.manifest", "crt");
+  write_text("rt/upbge/license/GPL-3.0.txt", "gpl");
+  write_text("rt/upbge/copyright.txt", "copyright");
+  write_text("rt/upbge/blender.exe", "editor");
+  write_text("rt/upbge/blenderplayer.pdb", "symbols");
+  write_text("rt/upbge/blender_oculus.cmd", "cmd");
+  write_text("rt/upbge/oculus.json", "{}");
+  write_text("rt/upbge/makesdna.exe", "build tool");
+#elif !defined(__APPLE__)
+  write_text("rt/upbge/lib/libtbb.so.12", "tbb");
+  write_text("rt/upbge/license/GPL-3.0.txt", "gpl");
+  write_text("rt/upbge/copyright.txt", "copyright");
+  write_text("rt/upbge/blender", "editor");
+  write_text("rt/upbge/readme.html", "readme");
+#endif
+}
+
+/** Through the job: the UPBGE folder is copied into engine/ before the player is hashed, only what
+ * changed, and what a newer UPBGE no longer has is removed while files of your own stay. */
+static void test_runtime_job(void)
+{
+  write_upbge();
+  write_blend("rt/src/game.blend", 3000, 31);
+  char saved_launcher[BC_PATH_MAX];
+  snprintf(saved_launcher, sizeof(saved_launcher), "%s", g_launcher);
+  work_path(g_launcher, "rt/tool/bc_launcher");
+  write_text("rt/tool/bc_launcher", "pretend this is the launcher");
+  write_text("rt/src/engine/" RT_RES_REL "5.5/scripts/startup/menu.py", "a source file where the runtime goes");
+#ifndef _WIN32
+  char player_src[BC_PATH_MAX];
+  work_path(player_src, "rt/upbge/" BC_RUNTIME_PLAYER);
+  CHECK(chmod(player_src, 0755) == 0);
+#endif
+
+  BC_Project p;
+  bc_project_init(&p);
+  p.key_mode = BC_KEY_BUILD;
+  work_path(p.source_root, "rt/src");
+  work_path(p.output_dir, "rt/dist");
+  work_path(p.upbge_dir, "rt/upbge");
+  snprintf(p.player, sizeof(p.player), "ignored/with/a/upbge/folder");
+  snprintf(p.game_name, sizeof(p.game_name), "Game");
+  work_path(p.main, "rt/src/game.blend");
+  bc_project_add_input(&p, p.main);
+
+  LogCapture c;
+  CHECK(run_job(&p, &c) == 0 && c.errors == 0 && c.warnings == 0 && c.runtime_copied > 0 && c.runtime_removed == 0);
+  const int runtime_files = c.runtime_copied;
+  CHECK(work_text_is("rt/dist/engine/" BC_RUNTIME_PLAYER, "upbge player"));
+#if defined(__APPLE__)
+  CHECK(work_text_is("rt/dist/engine/Blenderplayer.app/Contents/Resources/5.4/scripts/startup/menu.py", "print('menu')"));
+  CHECK(!work_exists("rt/dist/engine/Blender.app"));
+#else
+  CHECK(work_text_is("rt/dist/engine/5.4/scripts/startup/menu.py", "print('menu')"));
+  CHECK(work_text_is("rt/dist/engine/license/GPL-3.0.txt", "gpl"));
+  CHECK(work_text_is("rt/dist/engine/copyright.txt", "copyright"));
+  CHECK(!work_exists("rt/dist/engine/readme.html") && !work_exists("rt/dist/engine/blender"));
+#endif
+#if defined(_WIN32)
+  CHECK(runtime_files == 8);
+  CHECK(work_text_is("rt/dist/engine/python313.dll", "python"));
+  CHECK(work_text_is("rt/dist/engine/blender.shared/usd_ms.dll", "usd"));
+  CHECK(!work_exists("rt/dist/engine/blender.exe") && !work_exists("rt/dist/engine/blenderplayer.pdb") &&
+        !work_exists("rt/dist/engine/blender_oculus.cmd") && !work_exists("rt/dist/engine/oculus.json") &&
+        !work_exists("rt/dist/engine/makesdna.exe"));
+#elif defined(__APPLE__)
+  CHECK(runtime_files == 3);
+#else
+  CHECK(runtime_files == 6);
+  CHECK(work_text_is("rt/dist/engine/lib/libtbb.so.12", "tbb"));
+#endif
+  CHECK(!work_exists("rt/dist/engine/" RT_RES_REL "5.4/scripts/startup/__pycache__"));
+  CHECK(work_exists("rt/dist/engine/" BC_RUNTIME_RECORD));
+#ifndef _WIN32
+  {
+    struct stat st;
+    char player[BC_PATH_MAX];
+    work_path(player, "rt/dist/engine/" BC_RUNTIME_PLAYER);
+    CHECK(stat(player, &st) == 0 && (st.st_mode & 0111) == 0111);
+  }
+#endif
+  /* The manifest names the copy, not the project's player field. */
+  {
+    char game[BC_PATH_MAX];
+    BC_Manifest m;
+    work_path(game, "rt/dist/Game");
+    strcat(game, bc_exe_extension());
+    CHECK(bc_embed_read(game, bc_build_key(), &m) == BC_MANIFEST_OK);
+    CHECK_STR(m.player_path, BC_RUNTIME_DIR "/" BC_RUNTIME_PLAYER);
+  }
+
+  /* Unchanged: nothing copied, nothing written (the copy keeps its time), no file left behind. */
+  char copied_file[BC_PATH_MAX];
+  uint64_t size, mtime, size2, mtime2;
+  work_path(copied_file, "rt/dist/engine/" BC_RUNTIME_PLAYER);
+  CHECK(bc_file_stat(copied_file, &size, &mtime));
+  CHECK(run_job(&p, &c) == 0 && c.errors == 0 && c.runtime_copied == -1);
+  CHECK(bc_file_stat(copied_file, &size2, &mtime2) && size2 == size && mtime2 == mtime);
+  CHECK(!work_exists("rt/dist/engine/" BC_RUNTIME_PLAYER ".bc_tmp"));
+
+  /* A changed source file is copied again. A copy changed on purpose (signed, say) stays until its
+   * source changes; a deleted copy comes back. */
+  write_text("rt/upbge/" RT_RES_REL "5.4/python/lib/os.py", "import sys, os");
+  write_text("rt/dist/engine/" BC_RUNTIME_PLAYER, "signed");
+  CHECK(run_job(&p, &c) == 0 && c.errors == 0 && c.runtime_copied == 1 && c.runtime_removed == 0);
+  CHECK(work_text_is("rt/dist/engine/" RT_RES_REL "5.4/python/lib/os.py", "import sys, os"));
+  CHECK(work_text_is("rt/dist/engine/" BC_RUNTIME_PLAYER, "signed"));
+  CHECK(bc_remove(copied_file));
+  CHECK(run_job(&p, &c) == 0 && c.errors == 0 && c.runtime_copied == 1);
+  CHECK(work_text_is("rt/dist/engine/" BC_RUNTIME_PLAYER, "upbge player"));
+
+  /* A newer UPBGE: the old version folder goes, file by file then the folders it leaves empty;
+   * files of your own in engine/ stay. */
+  write_text("rt/dist/engine/" RT_RES_REL "5.4/scripts/mine.py", "my module");
+  write_text("rt/dist/engine/mine/notes.txt", "mine");
+  char old_version[BC_PATH_MAX];
+  work_path(old_version, "rt/upbge/" RT_RES_REL "5.4");
+  remove_tree(old_version);
+  write_upbge_version("5.5");
+  CHECK(run_job(&p, &c) == 0 && c.errors == 0 && c.runtime_copied == 2 && c.runtime_removed == 2);
+  CHECK(work_text_is("rt/dist/engine/" RT_RES_REL "5.5/scripts/startup/menu.py", "print('menu')"));
+  CHECK(!work_exists("rt/dist/engine/" RT_RES_REL "5.4/python") &&
+        !work_exists("rt/dist/engine/" RT_RES_REL "5.4/scripts/startup"));
+  CHECK(work_text_is("rt/dist/engine/" RT_RES_REL "5.4/scripts/mine.py", "my module"));
+  CHECK(work_text_is("rt/dist/engine/mine/notes.txt", "mine"));
+
+  /* A source file where the runtime goes is refused before anything is written. */
+  char clash[BC_PATH_MAX];
+  work_path(clash, "rt/src/engine");
+  bc_project_add_input(&p, clash);
+  CHECK(run_job(&p, &c) == -2 && strstr(c.last_error, "would overwrite the UPBGE runtime") != NULL);
+  bc_project_remove_input(&p, 1);
+
+  /* An unreadable record: everything is copied again, nothing removed, and the record is good
+   * again afterwards. */
+  write_text("rt/dist/engine/" BC_RUNTIME_RECORD, "12 garbage\n");
+  CHECK(run_job(&p, &c) == 0 && c.errors == 0 && c.warnings == 1 && c.runtime_copied == runtime_files);
+  CHECK(run_job(&p, &c) == 0 && c.errors == 0 && c.warnings == 0 && c.runtime_copied == -1);
+  /* A record line naming a path outside engine/ makes the whole record unreadable: never followed. */
+  write_text("rt/outside.txt", "keep me");
+  write_text("rt/dist/engine/" BC_RUNTIME_RECORD, "1 1 ../../outside.txt\n");
+  CHECK(run_job(&p, &c) == 0 && c.errors == 0 && c.warnings == 1 && c.runtime_removed == 0);
+  CHECK(work_text_is("rt/outside.txt", "keep me"));
+
+  /* The project keeps the UPBGE folder. */
+  char project_file[BC_PATH_MAX], err[BC_PATH_MAX + 128];
+  BC_Project loaded;
+  bc_project_init(&loaded);
+  work_path(project_file, "rt/game.bcproj");
+  CHECK(bc_project_save(&p, project_file, err, sizeof(err)));
+  CHECK(bc_project_load(&loaded, project_file, err, sizeof(err)));
+  CHECK_STR(loaded.upbge_dir, p.upbge_dir);
+  CHECK_STR(bc_project_player(&loaded), BC_RUNTIME_DIR "/" BC_RUNTIME_PLAYER);
+  bc_project_free(&loaded);
+
+  /* Refused: a folder without the player, a missing folder, overlapping folders. */
+  work_path(p.upbge_dir, "rt/src");
+  CHECK(run_job(&p, &c) == -2 && strstr(c.last_error, "has no") != NULL);
+  work_path(p.upbge_dir, "rt/nothing_here");
+  CHECK(run_job(&p, &c) == -2 && strstr(c.last_error, "does not exist") != NULL);
+  work_path(p.upbge_dir, "rt/dist/engine");
+  CHECK(run_job(&p, &c) == -2 && strstr(c.last_error, "contain each other") != NULL);
+  snprintf(g_launcher, sizeof(g_launcher), "%s", saved_launcher);
+  bc_project_free(&p);
+}
+
 #ifdef _WIN32
 /** Through the job: the player is branded before hashing, the game executable before the manifest
  * is appended, and an already branded player is never rewritten. */
@@ -2185,6 +2432,24 @@ static void test_brand_job(void)
   char tmp[BC_PATH_MAX + 16];
   snprintf(tmp, sizeof(tmp), "%s.brand.tmp", game);
   CHECK(!bc_is_file(tmp));
+
+  /* With a UPBGE folder the copy is branded once: its source unchanged, the next export neither
+   * copies nor brands it again. */
+  char upbge_player[BC_PATH_MAX], copied[BC_PATH_MAX];
+  work_path(upbge_player, "bjob/upbge/" BC_RUNTIME_PLAYER);
+  work_path(copied, "bjob/dist/" BC_RUNTIME_DIR "/" BC_RUNTIME_PLAYER);
+  copy_file(self, upbge_player);
+  snprintf(p.icon, sizeof(p.icon), "%s", icon);
+  work_path(p.upbge_dir, "bjob/upbge");
+  CHECK(run_job(&p, &c) == 0 && c.errors == 0 && c.player_branded && c.runtime_copied == 1);
+  CHECK(exe_group_equals_ico(copied, L"APPICON", ico) && !same_file(copied, upbge_player));
+  copy_file(copied, before);
+  CHECK(run_job(&p, &c) == 0 && c.errors == 0 && !c.player_branded && c.runtime_copied == -1);
+  CHECK(same_file(copied, before));
+  /* A new player in the UPBGE folder: copied and branded again. */
+  copy_file(launcher, upbge_player);
+  CHECK(run_job(&p, &c) == 0 && c.errors == 0 && c.player_branded && c.runtime_copied == 1);
+  CHECK(exe_group_equals_ico(copied, L"APPICON", ico));
 
   snprintf(g_launcher, sizeof(g_launcher), "%s", saved_launcher);
   free(ico);
@@ -2296,6 +2561,7 @@ int main(int argc, char **argv)
   test_brand();
   test_keyring();
   test_job();
+  test_runtime_job();
 #ifdef _WIN32
   test_brand_job();
 #endif

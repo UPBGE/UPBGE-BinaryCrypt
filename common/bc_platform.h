@@ -36,6 +36,11 @@ bool bc_mkdir_p(const char *dir);
 /** Atomically replace \a to with \a from (same volume). */
 bool bc_rename_replace(const char *from, const char *to);
 bool bc_remove(const char *path);
+/** Remove \a dir when it is empty. */
+bool bc_remove_dir(const char *dir);
+/** Give \a to the permission bits of \a from (POSIX: an executable or a library stays one);
+ * nothing to do on Windows. */
+bool bc_copy_permissions(const char *from, const char *to);
 /** Full path of the running executable, and the directory containing it. */
 bool bc_exe_path(char *out, size_t size);
 bool bc_exe_dir(char *out, size_t size);

@@ -19,7 +19,7 @@
  *                                 # build: the key compiled into this tool and its launcher
  *   key_file = keys/mygame.key    # project and online: the key, created on the first export;
  *                                 # private; default: next to the project file, named after it
- *   key_provider = engine/bc_provider_steam.exe  # online: relative to the distribution root
+ *   key_provider = provider/bc_provider_steam.exe  # online: relative to the distribution root
  *   key_url = https://keys.example.com/key       # online: given to the provider, optional
  *   key_cache = none              # online: none | permanent (kept after the first launch)
  *   key_rotation = off            # online: off (one key) | per_update (a new key per update,
@@ -28,7 +28,10 @@
  *                                 # player | native (+ every .dll, .so, .dylib, .pyd, .exe of the
  *                                 # game folder) | python (default: + .py, .pyw, .pth, .zip;
  *                                 # Python bytecode removed) (bc_native.h)
- *   player = engine/blenderplayer.exe  # relative to the distribution root, hashed by the tool
+ *   upbge_dir = C:/UPBGE/bin/Release  # optional: copied into engine/ at every export, only what
+ *                                 # changed (bc_runtime.h); the player is then engine/blenderplayer
+ *   player = engine/blenderplayer.exe  # relative to the distribution root, hashed by the tool;
+ *                                 # ignored with upbge_dir
  *   main = game.blend             # the blend the game executable starts
  *   data_extensions = .json .txt  # folders also give these files, read in the game with
  *                                 # bge.logic.decryptFile(); optional
@@ -38,9 +41,9 @@
  * A '#' preceded by a space or a tab starts a comment; double quotes keep it, and leading or
  * trailing spaces, in a value.
  *
- * Distribution root (where the game executable lives, with the runtime in engine/ by
- * convention): output_dir, always another folder than the sources, so a module or a data file
- * keeps its name and the sources are never shipped. */
+ * Distribution root (where the game executable lives, with the runtime in engine/ and a store's
+ * key provider with its library in provider/ by convention): output_dir, always another folder
+ * than the sources, so a module or a data file keeps its name and the sources are never shipped. */
 
 #ifndef BC_PROJECT_H
 #define BC_PROJECT_H
@@ -69,6 +72,9 @@ extern "C" {
 #define BC_DATA_EXT_SIZE 32
 /** Conventional player location inside the distribution root (bc_exe_extension() appended). */
 #define BC_DEFAULT_PLAYER "engine/blenderplayer"
+/** Conventional folder of the key provider and its store library, beside engine/: another program
+ * than the player, in a folder of its own. */
+#define BC_DEFAULT_PROVIDER_DIR "provider"
 
 /** Integrity check levels. The order is the GUI's. */
 typedef enum BC_Integrity {
@@ -121,6 +127,8 @@ typedef struct BC_Project {
   uint32_t key_update;
   /** What the game executable checks before every launch (bc_native.h). */
   BC_Integrity integrity;
+  /** UPBGE folder copied into engine/ by every export; empty: the runtime is copied by hand. */
+  char upbge_dir[BC_PATH_MAX];
   char player[BC_PATH_MAX];
   char main[BC_PATH_MAX];
   /** Extensions of the data files folder inputs give, as typed ("json, .txt"); empty: none. */
@@ -160,6 +168,10 @@ BC_ExtensionRule bc_project_extension_rule(const char *ext);
 
 /** Where the launcher, manifest and player live (see file comment). */
 const char *bc_project_dist_root(const BC_Project *p);
+
+/** The player relative to the distribution root: engine/ + BC_RUNTIME_PLAYER with upbge_dir, else
+ * #BC_Project.player. */
+const char *bc_project_player(const BC_Project *p);
 
 /** The key file: key_file, else "<project file name>.key" next to the project file. False when
  * neither exists (an unsaved project without a key file). */

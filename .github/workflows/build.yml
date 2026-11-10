@@ -167,7 +167,7 @@ jobs:
           Add -DBCP_KEY_URL=https://your.key.server/key to the first cmake command to build the key
           server address into the provider; otherwise the game's project gives it.
 
-          Copy into the game folder, next to the UPBGE runtime (engine/), before exporting with
+          Copy into the provider/ folder of the game folder (beside engine/) before exporting with
           bc_tool (the Runtime Check hashes the game's native code):
 
             $6
