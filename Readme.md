@@ -22,36 +22,28 @@ engine/             UPBGE runtime: blenderplayer.exe, DLLs, <version>/python, <v
 provider/           online key only: the store's key provider and its library (steam_api64.dll...)
 ```
 
-## What it protects, and what it does not
+## What it protects
 
-BinaryCrypt stops casual extraction: an encrypted file cannot be opened in Blender or UPBGE, the
-decrypted data never touches the disk, the player refuses to save it back, and the launcher only
-runs the exact player the game was encrypted for, by default with the exact libraries (`.dll`,
-`.so`, `.dylib`, `.pyd`) and Python files of the game folder. Any modification of an encrypted
-file or of the manifest is detected.
-
-The key necessarily exists on the player's machine while the game runs. A determined attacker with
-a debugger can therefore recover it; no client-side scheme prevents that, and the source code being
-public does not change it. Anti-debugging and code obfuscation are out of scope. Every game has its
-own key by default, so a key recovered from one game opens no other; with an online key (below)
-the key is in no shipped file at all: recovering it requires owning the game.
+An encrypted file cannot be opened in Blender or UPBGE, the decrypted data never touches the disk,
+the player refuses to save it back, and the launcher only runs the exact player the game was
+encrypted for, by default with the exact libraries (`.dll`, `.so`, `.dylib`, `.pyd`) and Python
+files of the game folder. Any modification of an encrypted file or of the manifest is detected.
+Every game has its own key by default; with an online key (below) the key is in no shipped file at
+all.
 
 Encrypted are the `.blend` files, the game's Python modules and the data files it reads with
 `bge.logic.decryptFile()` (see *Python modules and data files*). Textures, sounds and videos the
 `.blend` loads from disk are not: pack them into it (Blender: *File > External Data > Pack
-Resources*). Code injected into the running player (a debugger, an injector tool, `LD_PRELOAD`) is
-out of reach of any file check.
+Resources*).
 
 ## How it works
 
-1. **Keys.** Every build of this repository generates a random 256-bit **build key** at build
-   time and compiles it into `bc_tool` and `bc_launcher` only, stored as two shares so that
-   neither executable holds it in one piece: each share sits at a random offset in 4 KiB of random
-   bytes, one in read-only data and one in writable data. It never appears in the sources, the
-   build flags or the build logs. The UPBGE player never contains it. The game files are encrypted with a
-   **project key**, created for each game in a key file next to its project; the game executable
-   carries it masked with the build key. A game can instead get its key from a key server at
-   launch (*online key*), or use the build key itself (see *Keys*, below).
+1. **Keys.** Every build of this repository generates a random 256-bit **build key** at build time
+   and compiles it into `bc_tool` and `bc_launcher` only, never in one piece. It never appears in
+   the sources, the build flags or the build logs. The UPBGE player never contains it. The game
+   files are encrypted with a **project key**, created for each game in a key file next to its
+   project; the game executable carries it masked with the build key. A game can instead get its
+   key from a key server at launch (*online key*), or use the build key itself (see *Keys*, below).
 2. **Encryption.** `bc_tool` compresses each `.blend` Blender saved uncompressed (zstd, exactly as
    Blender's *Compress* option does: encrypted data no longer compresses, so a store would ship
    it at full size), then seals it into a container of independent 64 KiB chunks, each
@@ -277,11 +269,10 @@ The game executable keeps working when renamed.
 ### Integrity check
 
 The player loads more code than its executable: the DLLs and shared libraries next to it
-(searched there first), Python extension modules, Python modules. Replacing one, or adding one
-where the loader looks (a proxy `version.dll`, a `.pth` or `sitecustomize.py` in site-packages),
-would run code inside the player with the keys in memory. *Runtime Check* (`integrity`) chooses what the
-game executable verifies before every launch, against a digest the export stores in the manifest;
-a file changed, added or removed since the export stops the game.
+(searched there first), Python extension modules, Python modules: all of it must be the game's.
+*Runtime Check* (`integrity`) chooses what the game executable verifies before every launch,
+against a digest the export stores in the manifest; a file changed, added or removed since the
+export stops the game.
 
 | Level | Checked | Cost at every launch (warm file cache, 2.3 GHz Xeon) |
 |---|---|---|
@@ -289,10 +280,8 @@ a file changed, added or removed since the export stops the game.
 | *Player + Libraries* (`native`) | And every `.exe`, `.dll`, `.so`, `.so.N`, `.dylib`, `.pyd` of the game folder, recursively | 300 MB of libraries in a folder of 10,000 files: 0.13 s with AVX-512, 0.19 s with AVX2, 0.31 s with SSE4.1 (MinGW builds) |
 | *Player + Libraries + Python* (`python`, default) | And every `.py`, `.pyw`, `.pth`, `.zip` (the default `sys.path` names a `python3XX.zip` before the standard library) | 4,850 `.py` files (9.7 MB): +0.03 s. **And** the game recompiles every script it imports at every launch: about 0.15 s per MB of imported Python |
 
-*Player + Libraries + Python* is the default because the player runs Python with every decrypted datablock at
-reach: one edited line in a module of the runtime's standard library (imported before the game
-starts) can save its textures, meshes and scripts to disk. The lower levels suit a game that
-accepts that risk for a faster start.
+*Player + Libraries + Python* is the default: the player runs Python next to the decrypted game,
+so the runtime's Python modules are checked too. The lower levels start faster.
 
 **Which file.** A refused launch names what differs in a log next to the game executable,
 `<game>-integrity.log` (one line per file: `changed`, `added` or `removed`, then its path), and
@@ -306,23 +295,19 @@ logged the same way.
 The game executable and the player have their own checks and are not part of the digest. On
 Windows the game executable keeps every file it checked open until the player exits, shared for
 reading only: none can be replaced between the check and the moment the player loads it, even a
-module imported long after the start. Linux and macOS have no such lock (a file can be renamed
-over while open): there, a file swapped right after the check goes unnoticed.
+module imported long after the start.
 
-**Python bytecode at the *Player + Libraries + Python* level.** The player writes `.pyc` files next to the modules
-it imports, so they cannot be part of a digest, and checking `.py` alone would be pointless: a
-`.pyc` that claims its source's time and size is loaded without reading the source. So bytecode
-is removed instead, everywhere in the game folder: by the export, before every launch and after
-the player exits (a test run followed by an upload ships none). In a folder the player cannot
-write (Program Files, `/opt`) none can appear, since the game shipped without any; one that
-cannot be removed was put there by someone else, and the game refuses to start. The cost is the
-loss of Python's bytecode cache: in a writable folder (a Steam library) the game compiles its
-scripts at every launch, as it already does in a read-only one.
+**Python bytecode at the *Player + Libraries + Python* level.** The player writes `.pyc` files next
+to the modules it imports, so they cannot be part of a digest: bytecode is removed instead,
+everywhere in the game folder: by the export, before every launch and after the player exits (a
+test run followed by an upload ships none). In a folder the player cannot write (Program Files,
+`/opt`) none can appear, since the game shipped without any; one that cannot be removed was put
+there by someone else, and the game refuses to start. The cost is the loss of Python's bytecode
+cache: in a writable folder (a Steam library) the game compiles its scripts at every launch, as it
+already does in a read-only one.
 
 - Export again after adding a store library, updating the runtime or, at *Player + Libraries + Python*, changing a
   script.
-- **Not covered at any level:** code injected into the running process, which needs no file, and
-  a patched game executable.
 
 ### Manifest inside or next to the executable
 
@@ -375,17 +360,12 @@ branded player untouched, byte for byte.
 | The game executable gets it from | its manifest, unmasked with the build key | the key server, at each launch | itself (two shares) |
 | Another game made with the same `bc_tool` | has another key | has another key | has the same key |
 | Re-exported with a newer BinaryCrypt | unchanged files keep their bytes | unchanged files keep their bytes | every file changes (unless the build key is pinned) |
-| Who can recover the key | anyone with a copy of the game who knows the scheme (public): the launcher holds the build key, in two hidden shares (a search over both blocks found it in 9 s on one core) | a player who owns the game, from the memory of a running copy | anyone with a copy of the game, and the key then opens every game of that build |
 
-**What the per project key gives, and what it does not.** The key is masked with a value derived
-from the build key, the key's id and the player's hash; no executable holds a key in one piece, so
-scanning the game executable for one finds nothing (the tests check this). But the launcher has to
-unmask it, and this repository says how: whoever extracts the build key from the launcher, or runs
-the same `bc_tool` build (a prebuilt BinaryCrypt release is the same build for everyone who
-downloads it), can unmask the key of any game of that build. What it does give, even with a shared
-release: a key recovered from one game (from memory, or the pipe to the player) opens no other
-game, and updating BinaryCrypt keeps store patches small. For a key that ships with no copy of the
-game, use an online key; for a build key nobody else has, build BinaryCrypt yourself.
+**Per project key.** The key is masked with a value derived from the build key, the key's id and
+the player's hash: no executable holds a key in one piece (the tests check this), every game has
+its own key, and updating BinaryCrypt keeps store patches small. For a key that ships with no copy
+of the game, use an online key. Publish games with a BinaryCrypt you built yourself: a prebuilt
+release shares its build key with everyone who downloads it.
 
 ### Online key (Steam, Epic, itch.io, Meta, your own server)
 
@@ -419,7 +399,7 @@ player is the same in both modes.
   to the provider.
 - *Always online*, or *Offline after 1st launch*: after one successful launch the key stays on the
   player's computer (Windows: protected with DPAPI for that Windows user; Linux and macOS: bound to
-  the machine id and user, as hard to recover as the build key from the launcher).
+  the machine and the user).
 - The game executable's command-line arguments go to the provider, never to the player: stores pass
   login tokens that way.
 
@@ -514,12 +494,10 @@ microseconds; a game without a key (or Blender) has no finder at all. Data files
 compressed: when a store compresses its downloads and a data file is large and compressible,
 compress it in the game's own format before the export.
 
-**What it protects.** The source and the data never reach the disk in clear, but once imported, a
-module's code objects live in the player, where Python code can disassemble them; what keeps
-foreign Python out of the player is the integrity check. At *Player + Libraries + Python* (the default) an encrypted
-module replaced by a plain one stops the game, as any changed `.py` does; at the lower levels it
-would be imported. Python scripts that use Blender's API may have to be made available as source
-anyway (see *Your game's license*, below).
+**What it protects.** The source and the data never reach the disk in clear. At *Player +
+Libraries + Python* (the default) an encrypted module replaced by a plain one stops the game, as
+any changed `.py` does. Python scripts that use Blender's API may have to be made available as
+source anyway (see *Your game's license*, below).
 
 ### Project file (`.bcproj`)
 

@@ -130,8 +130,7 @@ typedef struct BC_Manifest {
 } BC_Manifest;
 
 /** Mask of the project key: keyed BLAKE3 (build key) over its key id and the player hash, so it
- * differs per game. XOR with it both hides and recovers the key. Obfuscation: the build key ships
- * in the launcher. */
+ * differs per game. XOR with it both hides and recovers the key. */
 void bc_manifest_key_mask(const uint8_t build_key[BC_KEY_SIZE], const BC_Manifest *m, uint8_t r_mask[BC_KEY_SIZE]);
 
 typedef enum BC_ManifestResult {

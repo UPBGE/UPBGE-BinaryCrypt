@@ -185,14 +185,9 @@ out = ChaCha20-Poly1305 (RFC 8439)(k, nonce = 12 zero bytes, ad = key id, conten
 `key id` = keyed BLAKE2b-64 of `"UPBGE-BinaryCrypt key id v1"` with the content key
 (`bc_key_id`). `bc_keyserver.seal()` is the reference implementation, 6 lines of Python.
 
-## Limits
+## Operation
 
-- Every player downloads the same files from the store, so every player gets the same content key.
-  A player who owns the game can extract it from memory while the game runs and share it; nothing
-  on the client side prevents that. What the online key adds: the key is not in any shipped file
-  (no extraction without buying the game), and it belongs to the project instead of the
-  BinaryCrypt build.
-- With one key, revoking a leaked key means encrypting the game again with a new key file and
-  publishing an update. With a key per update, every update already brings a new key for what it
-  changes: a leaked key keeps opening only the files it was used for.
-- The reference server has no rate limiting: put it behind a proxy that has some.
+- The key is in no shipped file, and it belongs to the project instead of the BinaryCrypt build.
+- Replacing a key means encrypting the game again with a new key file and publishing an update.
+  With a key per update, every update already brings a new key for what it changes.
+- Put the reference server behind a proxy with rate limiting.

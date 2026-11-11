@@ -69,8 +69,7 @@ int main(int argc, char **argv)
   /* Two shares instead of the key itself (see bc_key_split): no 32 bytes of the binaries are the
    * key, so scanning them for it finds nothing. Each share sits at a random byte offset inside a
    * block of random bytes, one block in read-only data and the other in writable data, so the two
-   * are neither adjacent nor aligned: someone who knows this scheme must try every byte offset of
-   * one block against every byte offset of the other (BC_KEY_BLOCK_SIZE^2 candidate keys). */
+   * are neither adjacent nor aligned. */
   static uint8_t blocks[2][BC_KEY_BLOCK_SIZE + BC_KEY_SIZE];
   uint8_t shares[2][BC_KEY_SIZE];
   uint16_t offsets[2];

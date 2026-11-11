@@ -24,7 +24,7 @@ extern "C" {
 
 /** Key compiled into this executable. It is stored as two shares, never as the key itself:
  * scanning the binary for 32 bytes that match a key id (in a container header or a manifest)
- * finds nothing. Obfuscation, not secrecy: see the README. */
+ * finds nothing. */
 const uint8_t *bc_build_key(void);
 /** Wipe the joined build key; the next bc_build_key() joins it again. The launcher calls it
  * before starting the player, so the key does not sit in its memory for the whole game. */

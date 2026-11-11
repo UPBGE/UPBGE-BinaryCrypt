@@ -4,19 +4,15 @@
  *
  * The launcher hashes the player before handing it the keys, but the player loads other code from
  * the game folder: its DLLs and shared libraries (found first in the executable's own folder),
- * Python extension modules, Python modules. Replacing one, or adding one under a name the loader
- * looks for (a proxy version.dll, a .pth or sitecustomize.py in site-packages), runs code inside
- * the player with the keys in memory. The digest covers every such file of the folder, so a
- * changed, added or removed one is refused at launch.
+ * Python extension modules, Python modules: all of it must be the game's. The digest covers every
+ * such file of the folder, so a changed, added or removed one is refused at launch.
  *
  * Native code = names ending in .exe, .dll, .pyd, .so, .dylib, or a versioned .so.N[.N...].
  * Python (optional) = .py, .pyw, .pth and .zip (the default sys.path names a python3XX.zip before
  * the standard library). ASCII case-insensitive.
  *
  * Python bytecode (.pyc, .pyo) cannot be hashed: the player writes .pyc files next to the modules
- * it imports, and a hash of .py alone is pointless while a .pyc that claims the source's time and
- * size is loaded without reading the source. So the Python level removes every bytecode file
- * instead: at export, before each launch and after the player exits. In a folder the player
+ * it imports. So the Python level removes every bytecode file instead: at export, before each launch and after the player exits. In a folder the player
  * cannot write (Program Files, /opt) none can appear, because the export left none; one that
  * cannot be removed was put there by someone else, and the launch is refused.
  *
@@ -81,8 +77,7 @@ bool bc_native_digest(const char *root,
 
 /** Files bc_native_digest_held hashed and keeps open. Windows: shared for reading only, so nobody
  * can write, replace or delete them until they are released; the player loads exactly the code
- * that was checked, even a module it imports long after the start. Elsewhere it stays empty: a
- * file can be renamed over while open, so holding it would prove nothing. */
+ * that was checked, even a module it imports long after the start. Elsewhere it stays empty. */
 typedef struct BC_NativeHold {
   void **handles;
   int count;
