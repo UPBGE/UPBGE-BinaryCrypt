@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!-- SPDX-License-Identifier: GPL-2.0-or-later -->
+<!-- bc_tool is a console program, so that the batch mode prints in a terminal and returns its exit
+     code there. "detached": started from Explorer, Windows 11 24H2 (build 26100) and later give it
+     no console, so no console window flashes before the editor opens; started from a terminal, it
+     still writes to that terminal. Older Windows ignore the setting (see main in bc_tool_main.c). -->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <application>
+    <windowsSettings>
+      <consoleAllocationPolicy xmlns="http://schemas.microsoft.com/SMI/2024/WindowsSettings">detached</consoleAllocationPolicy>
+    </windowsSettings>
+  </application>
+</assembly>

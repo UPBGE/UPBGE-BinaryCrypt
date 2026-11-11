@@ -130,8 +130,9 @@ int main(int argc, char **argv)
 #ifdef BC_WITH_GUI
   if (argc == 1 || (argc == 2 && argv[1][0] != '-')) {
 #  ifdef _WIN32
-    /* Console program so the batch mode can print; when started by double click the console
-     * belongs to this process alone and is released so only the editor window remains. */
+    /* Console program so the batch mode can print. Started from Explorer, Windows 11 24H2 and
+     * later give it no console (bc_tool.manifest); older Windows give it one of its own, released
+     * here so only the editor window remains (it still shows for a moment). */
     DWORD processes[2];
     if (GetConsoleProcessList(processes, 2) == 1) {
       FreeConsole();

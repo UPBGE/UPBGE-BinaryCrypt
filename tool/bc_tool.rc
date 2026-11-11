@@ -3,3 +3,9 @@
 /* GLFW gives its window class the icon named GLFW_ICON: title bar, taskbar and Alt-Tab, at the
  * size each DPI asks for. Explorer shows the first icon group of the executable: this one. */
 GLFW_ICON ICON "binarycrypt.ico"
+
+/* MSVC merges bc_tool.manifest into the manifest its linker embeds (CMakeLists.txt); MinGW embeds
+ * none, so the resource script does. */
+#ifdef __MINGW32__
+1 24 "bc_tool.manifest"
+#endif

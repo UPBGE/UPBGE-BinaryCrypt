@@ -209,6 +209,13 @@ if(WIN32)
   target_include_directories(bc_tool PRIVATE res)
   set_source_files_properties(launcher/bc_launcher.rc tool/bc_tool.rc PROPERTIES
     OBJECT_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/res/binarycrypt.ico)
+  # No console window flashing when the editor is opened from Explorer (tool/bc_tool.manifest).
+  if(MSVC)
+    target_sources(bc_tool PRIVATE tool/bc_tool.manifest)
+  else()
+    set_property(SOURCE tool/bc_tool.rc APPEND PROPERTY
+      OBJECT_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tool/bc_tool.manifest)
+  endif()
 endif()
 
 if(BINARYCRYPT_BUILD_GUI)
