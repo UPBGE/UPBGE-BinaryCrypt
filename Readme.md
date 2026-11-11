@@ -1,11 +1,11 @@
 # UPBGE BinaryCrypt
 
+<img width="1919" height="1032" alt="image" src="https://github.com/user-attachments/assets/310b20ba-6629-4b9b-a1a1-04784996f79a" />
+
+
 UPBGE BinaryCrypt encrypts the `.blend` files, Python modules and data files of a UPBGE game so
 that they can be shipped without handing out the editable sources. It is the open-source successor of BPPlayer and follows the same
 model: an **encryption tool** for the developer and a **launcher** shipped with the game.
-
-<img width="1919" height="1032" alt="image" src="https://github.com/user-attachments/assets/310b20ba-6629-4b9b-a1a1-04784996f79a" />
-
 
 | Component | Shipped with the game | Role |
 |---|---|---|
