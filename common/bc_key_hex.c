@@ -5,6 +5,7 @@
 
 #include "bc_key.h"
 #include "bc_platform.h"
+#include "blake3.h"
 
 static const char bc_hex_digits[] = "0123456789abcdef";
 
@@ -64,13 +65,13 @@ void bc_key_fingerprint(const uint8_t key[BC_KEY_SIZE], char out[BC_FINGERPRINT_
   out[2 * BC_KEY_ID_SIZE] = '\0';
 }
 
+/* A key derived from share a: BLAKE3's derive_key mode, under a context string used nowhere else. */
 static void bc_key_share_mask(const uint8_t a[BC_KEY_SIZE], uint8_t r_mask[BC_KEY_SIZE])
 {
-  crypto_blake2b_ctx ctx;
-  crypto_blake2b_init(&ctx, BC_KEY_SIZE);
-  crypto_blake2b_update(&ctx, (const uint8_t *)BC_KEY_SHARE_CONTEXT, sizeof(BC_KEY_SHARE_CONTEXT) - 1);
-  crypto_blake2b_update(&ctx, a, BC_KEY_SIZE);
-  crypto_blake2b_final(&ctx, r_mask);
+  blake3_hasher hasher;
+  blake3_hasher_init_derive_key(&hasher, BC_KEY_SHARE_CONTEXT);
+  blake3_hasher_update(&hasher, a, BC_KEY_SIZE);
+  blake3_hasher_finalize(&hasher, r_mask, BC_KEY_SIZE);
 }
 
 bool bc_key_split(const uint8_t key[BC_KEY_SIZE], uint8_t r_a[BC_KEY_SIZE], uint8_t r_b[BC_KEY_SIZE])

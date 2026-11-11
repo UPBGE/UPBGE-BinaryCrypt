@@ -41,9 +41,9 @@ typedef struct BC_Compressor {
   uint32_t *frames;
   int frame_count;
   int frame_capacity;
-  crypto_blake2b_ctx hash;
+  blake3_hasher hash;
   uint64_t in_done;
-  /** Set when bc_compress_step returns 0: size and BLAKE2b-256 of the output (the plaintext the
+  /** Set when bc_compress_step returns 0: size and BLAKE3-256 of the output (the plaintext the
    * sealer gets). */
   uint64_t out_size;
   uint8_t out_hash[BC_PLAIN_HASH_SIZE];

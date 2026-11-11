@@ -289,11 +289,11 @@ static void fake_sign(const char *path)
 /** The MAC bc_manifest_encode appends, over the first \a body bytes of \a data, written after them. */
 static void test_manifest_mac(uint8_t *data, const size_t body)
 {
-  crypto_blake2b_ctx ctx;
-  crypto_blake2b_keyed_init(&ctx, BC_MANIFEST_MAC_SIZE, bc_build_key(), BC_KEY_SIZE);
-  crypto_blake2b_update(&ctx, (const uint8_t *)BC_MANIFEST_CONTEXT, sizeof(BC_MANIFEST_CONTEXT) - 1);
-  crypto_blake2b_update(&ctx, data, body);
-  crypto_blake2b_final(&ctx, data + body);
+  blake3_hasher hasher;
+  blake3_hasher_init_keyed(&hasher, bc_build_key());
+  blake3_hasher_update(&hasher, BC_MANIFEST_CONTEXT, sizeof(BC_MANIFEST_CONTEXT) - 1);
+  blake3_hasher_update(&hasher, data, body);
+  blake3_hasher_finalize(&hasher, data + body, BC_MANIFEST_MAC_SIZE);
 }
 
 static void test_manifest(void)

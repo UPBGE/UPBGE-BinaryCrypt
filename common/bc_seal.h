@@ -26,6 +26,7 @@
 
 #include "bc_platform.h"
 #include "binarycrypt_format.h"
+#include "blake3.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -37,7 +38,7 @@ extern "C" {
 
 typedef struct BC_Sealer {
   FILE *in;
-  crypto_blake2b_ctx hash;
+  blake3_hasher hash;
   uint8_t plain_hash[BC_PLAIN_HASH_SIZE];
   uint8_t source_hash[BC_PLAIN_HASH_SIZE];
   FILE *out;
@@ -56,7 +57,7 @@ typedef struct BC_Sealer {
 /**
  * Open \a in_path, check that it is not already sealed and, for #BC_KIND_BLEND, that it is a
  * .blend (plain, gzip or zstd), and start writing the container of \a kind to a temporary file
- * next to \a out_path (parent directories are created). Empty files cannot be sealed. \a plain_hash is the BLAKE2b-256 of the input (#bc_hash_file), \a source_hash that of
+ * next to \a out_path (parent directories are created). Empty files cannot be sealed. \a plain_hash is the BLAKE3-256 of the input (#bc_hash_file), \a source_hash that of
  * the file the input was made from (the same when sealed as it is). On failure nothing is left on
  * disk and \a err holds the reason.
  */
@@ -83,7 +84,7 @@ uint64_t bc_seal_bytes_done(const BC_Sealer *s);
 /** Stop early: close everything and remove the temporary output. Safe after completion. */
 void bc_seal_abort(BC_Sealer *s);
 
-/** BLAKE2b-256 of a whole file in one call (the job hashes in slices instead). */
+/** BLAKE3-256 of a whole file in one call (the job hashes in slices instead). */
 bool bc_hash_file(const char *path, uint8_t r_hash[BC_PLAIN_HASH_SIZE]);
 
 /** Header that sealing \a plain_size bytes of \a kind with plaintext hash \a plain_hash, made

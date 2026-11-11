@@ -4,6 +4,8 @@
 
 #include <string.h>
 
+#include "blake3.h"
+
 bool bc_manifest_path_is_safe(const char *path)
 {
   if (path[0] == '\0' || path[0] == '/' || strchr(path, '\\') || strchr(path, ':')) {
@@ -26,11 +28,11 @@ static void bc_manifest_mac(const uint8_t key[BC_KEY_SIZE],
                             size_t body_size,
                             uint8_t mac[BC_MANIFEST_MAC_SIZE])
 {
-  crypto_blake2b_ctx ctx;
-  crypto_blake2b_keyed_init(&ctx, BC_MANIFEST_MAC_SIZE, key, BC_KEY_SIZE);
-  crypto_blake2b_update(&ctx, (const uint8_t *)BC_MANIFEST_CONTEXT, sizeof(BC_MANIFEST_CONTEXT) - 1);
-  crypto_blake2b_update(&ctx, body, body_size);
-  crypto_blake2b_final(&ctx, mac);
+  blake3_hasher hasher;
+  blake3_hasher_init_keyed(&hasher, key);
+  blake3_hasher_update(&hasher, BC_MANIFEST_CONTEXT, sizeof(BC_MANIFEST_CONTEXT) - 1);
+  blake3_hasher_update(&hasher, body, body_size);
+  blake3_hasher_finalize(&hasher, mac, BC_MANIFEST_MAC_SIZE);
 }
 
 bool bc_manifest_url_is_valid(const char *url)
@@ -49,12 +51,12 @@ bool bc_manifest_url_is_valid(const char *url)
 
 void bc_manifest_key_mask(const uint8_t build_key[BC_KEY_SIZE], const BC_Manifest *m, uint8_t r_mask[BC_KEY_SIZE])
 {
-  crypto_blake2b_ctx ctx;
-  crypto_blake2b_keyed_init(&ctx, BC_KEY_SIZE, build_key, BC_KEY_SIZE);
-  crypto_blake2b_update(&ctx, (const uint8_t *)BC_PROJECT_KEY_CONTEXT, sizeof(BC_PROJECT_KEY_CONTEXT) - 1);
-  crypto_blake2b_update(&ctx, m->key_ids[0], BC_KEY_ID_SIZE);
-  crypto_blake2b_update(&ctx, m->player_hash, BC_PLAYER_HASH_SIZE);
-  crypto_blake2b_final(&ctx, r_mask);
+  blake3_hasher hasher;
+  blake3_hasher_init_keyed(&hasher, build_key);
+  blake3_hasher_update(&hasher, BC_PROJECT_KEY_CONTEXT, sizeof(BC_PROJECT_KEY_CONTEXT) - 1);
+  blake3_hasher_update(&hasher, m->key_ids[0], BC_KEY_ID_SIZE);
+  blake3_hasher_update(&hasher, m->player_hash, BC_PLAYER_HASH_SIZE);
+  blake3_hasher_finalize(&hasher, r_mask, BC_KEY_SIZE);
 }
 
 size_t bc_manifest_encode(const BC_Manifest *m,

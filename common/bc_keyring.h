@@ -12,7 +12,7 @@
  *   Key per update:
  *     # comment
  *     key <update> <64 hex>
- *     file <update> <64 hex: BLAKE2b-256 of the source> <size> <mtime> <path inside the game folder>
+ *     file <update> <64 hex: BLAKE3-256 of the source> <size> <mtime> <path inside the game folder>
  *
  * A file line records the last export of a file: the update whose key sealed it, the hash of its
  * source, and the source's size and modification time (nanoseconds since 1970), which tell the

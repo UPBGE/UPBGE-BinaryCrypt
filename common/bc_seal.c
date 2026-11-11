@@ -68,7 +68,7 @@ bool bc_seal_begin(BC_Sealer *s,
   s->key = key;
   memcpy(s->plain_hash, plain_hash, BC_PLAIN_HASH_SIZE);
   memcpy(s->source_hash, source_hash, BC_PLAIN_HASH_SIZE);
-  crypto_blake2b_init(&s->hash, BC_PLAIN_HASH_SIZE);
+  blake3_hasher_init(&s->hash);
   snprintf(s->in_path, sizeof(s->in_path), "%s", in_path);
 
   uint64_t plain_size;
@@ -138,7 +138,7 @@ int bc_seal_step(BC_Sealer *s, char *err, size_t err_size)
     bc_seal_close(s, true);
     return -1;
   }
-  crypto_blake2b_update(&s->hash, s->buffer, size);
+  blake3_hasher_update(&s->hash, s->buffer, size);
   uint8_t nonce[BC_NONCE_SIZE];
   bc_chunk_nonce(s->header.nonce_prefix, index, nonce);
   /* Sealed in place: the MAC lands right after the ciphertext, ready to write in one call. */
@@ -163,7 +163,7 @@ int bc_seal_step(BC_Sealer *s, char *err, size_t err_size)
   /* Last chunk: the input must end exactly here and still hash as before. Otherwise the nonce
    * belongs to other data: the output must never be used. */
   uint8_t hash[BC_PLAIN_HASH_SIZE];
-  crypto_blake2b_final(&s->hash, hash);
+  blake3_hasher_finalize(&s->hash, hash, BC_PLAIN_HASH_SIZE);
   if (fgetc(s->in) != EOF || crypto_verify32(hash, s->plain_hash) != 0) {
     snprintf(err, err_size, "'%s' changed while it was being read", s->in_path);
     bc_seal_close(s, true);
@@ -199,14 +199,14 @@ bool bc_hash_file(const char *path, uint8_t r_hash[BC_PLAIN_HASH_SIZE])
   FILE *f = bc_fopen(path, "rb");
   uint8_t *buffer = (uint8_t *)malloc(BC_IO_BUFFER_SIZE);
   bool ok = f != NULL && buffer != NULL;
-  crypto_blake2b_ctx ctx;
-  crypto_blake2b_init(&ctx, BC_PLAIN_HASH_SIZE);
+  blake3_hasher hasher;
+  blake3_hasher_init(&hasher);
   size_t n;
   while (ok && (n = fread(buffer, 1, BC_IO_BUFFER_SIZE, f)) > 0) {
-    crypto_blake2b_update(&ctx, buffer, n);
+    blake3_hasher_update(&hasher, buffer, n);
   }
   ok = ok && !ferror(f);
-  crypto_blake2b_final(&ctx, r_hash);
+  blake3_hasher_finalize(&hasher, r_hash, BC_PLAIN_HASH_SIZE);
   if (f != NULL) {
     fclose(f);
   }
@@ -218,11 +218,11 @@ static void bc_source_id(const uint8_t key[BC_KEY_SIZE],
                          const uint8_t source_hash[BC_PLAIN_HASH_SIZE],
                          uint8_t r_id[BC_SOURCE_ID_SIZE])
 {
-  crypto_blake2b_ctx ctx;
-  crypto_blake2b_keyed_init(&ctx, BC_SOURCE_ID_SIZE, key, BC_KEY_SIZE);
-  crypto_blake2b_update(&ctx, (const uint8_t *)BC_SOURCE_ID_CONTEXT, sizeof(BC_SOURCE_ID_CONTEXT) - 1);
-  crypto_blake2b_update(&ctx, source_hash, BC_PLAIN_HASH_SIZE);
-  crypto_blake2b_final(&ctx, r_id);
+  blake3_hasher hasher;
+  blake3_hasher_init_keyed(&hasher, key);
+  blake3_hasher_update(&hasher, BC_SOURCE_ID_CONTEXT, sizeof(BC_SOURCE_ID_CONTEXT) - 1);
+  blake3_hasher_update(&hasher, source_hash, BC_PLAIN_HASH_SIZE);
+  blake3_hasher_finalize(&hasher, r_id, BC_SOURCE_ID_SIZE);
 }
 
 void bc_seal_header(const uint8_t key[BC_KEY_SIZE],
@@ -239,16 +239,16 @@ void bc_seal_header(const uint8_t key[BC_KEY_SIZE],
   r_header->plain_size = plain_size;
   bc_key_id(key, r_header->key_id);
   bc_source_id(key, source_hash, r_header->source_id);
-  /* Nonce prefix = keyed BLAKE2b over every header field (nonce still zero) and the plaintext
+  /* Nonce prefix = keyed BLAKE3 over every header field (nonce still zero) and the plaintext
    * hash: equal only for the same plaintext sealed the same way. */
   uint8_t raw[BC_HEADER_SIZE];
   bc_header_write(r_header, raw);
-  crypto_blake2b_ctx ctx;
-  crypto_blake2b_keyed_init(&ctx, BC_NONCE_PREFIX_SIZE, key, BC_KEY_SIZE);
-  crypto_blake2b_update(&ctx, (const uint8_t *)BC_NONCE_CONTEXT, sizeof(BC_NONCE_CONTEXT) - 1);
-  crypto_blake2b_update(&ctx, raw, BC_HEADER_SIZE);
-  crypto_blake2b_update(&ctx, plain_hash, BC_PLAIN_HASH_SIZE);
-  crypto_blake2b_final(&ctx, r_header->nonce_prefix);
+  blake3_hasher hasher;
+  blake3_hasher_init_keyed(&hasher, key);
+  blake3_hasher_update(&hasher, BC_NONCE_CONTEXT, sizeof(BC_NONCE_CONTEXT) - 1);
+  blake3_hasher_update(&hasher, raw, BC_HEADER_SIZE);
+  blake3_hasher_update(&hasher, plain_hash, BC_PLAIN_HASH_SIZE);
+  blake3_hasher_finalize(&hasher, r_header->nonce_prefix, BC_NONCE_PREFIX_SIZE);
 }
 
 bool bc_seal_output_is_current(const uint8_t key[BC_KEY_SIZE],

@@ -35,7 +35,7 @@
  *          code, plus Python files with BC_MANIFEST_PYTHON_CHECK
  *       X  extension: data a newer bc_tool adds under a feature bit, skipped by launchers that do
  *          not know it
- *  end  32  MAC: keyed BLAKE2b-256 (build key) of BC_MANIFEST_CONTEXT || all preceding bytes
+ *  end  32  MAC: keyed BLAKE3-256 (build key) of BC_MANIFEST_CONTEXT || all preceding bytes
  *
  * Evolution, as for the container header (binarycrypt_format.h): the version changes only for a
  * redesign; a launcher refuses a manifest with a required feature it does not know (exported by a
@@ -89,7 +89,7 @@ extern "C" {
   (BC_MANIFEST_KEY_FLAGS | BC_MANIFEST_NATIVE_DIGEST | BC_MANIFEST_PYTHON_CHECK)
 #define BC_PROJECT_KEY_CONTEXT "UPBGE-BinaryCrypt project key v1"
 /* Domain separation: the MAC key is the build key, so the input is prefixed with a context that
- * no other keyed BLAKE2b in the system uses. */
+ * no other keyed hash in the system uses. */
 #define BC_MANIFEST_CONTEXT "UPBGE-BinaryCrypt manifest v1"
 /* External manifest next to the game executable. Chosen at build time
  * (BINARYCRYPT_MANIFEST_FILENAME): the launcher must find it before it has read anything, and with
@@ -115,7 +115,7 @@ typedef struct BC_Manifest {
   uint8_t native_digest[BC_NATIVE_DIGEST_SIZE];
 } BC_Manifest;
 
-/** Mask of the project key: keyed BLAKE2b (build key) over its key id and the player hash, so it
+/** Mask of the project key: keyed BLAKE3 (build key) over its key id and the player hash, so it
  * differs per game. XOR with it both hides and recovers the key. Obfuscation: the build key ships
  * in the launcher. */
 void bc_manifest_key_mask(const uint8_t build_key[BC_KEY_SIZE], const BC_Manifest *m, uint8_t r_mask[BC_KEY_SIZE]);

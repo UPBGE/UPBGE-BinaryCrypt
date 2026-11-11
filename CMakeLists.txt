@@ -35,9 +35,12 @@ endif()
 add_library(monocypher STATIC common/monocypher/monocypher.c)
 target_include_directories(monocypher PUBLIC common/monocypher)
 
-# BLAKE3 (common/blake3): the integrity hashes the launcher computes at every start. The SIMD
-# kernels are built with their own instruction set flags and picked at run time from the CPU's
-# features, so the binaries still run on any x86-64 or ARM64 CPU.
+# BLAKE3 (common/blake3): every hash and keyed hash of the tool and the launcher. Monocypher's
+# BLAKE2b remains only where another program computes the same value: the key id
+# (binarycrypt_format.h, also the UPBGE player's, which carries Monocypher only) and the envelope
+# key (bc_envelope.h, also the Python key server's). The SIMD kernels are built with their own
+# instruction set flags and picked at run time from the CPU's features, so the binaries still run
+# on any x86-64 or ARM64 CPU.
 add_library(blake3 STATIC common/blake3/blake3.c common/blake3/blake3_dispatch.c common/blake3/blake3_portable.c)
 target_include_directories(blake3 PUBLIC common/blake3)
 include(CheckCSourceCompiles)
@@ -129,6 +132,8 @@ endif()
 # Generated while building, never at configure time: it does not appear in compile flags,
 # compile_commands.json or any log. Random mode has no dependency, so the key only changes on a
 # clean build (or when the header is deleted); reconfiguring or updating the sources keeps it.
+# Fixed mode also depends on bc_keygen: rebuilt, it splits the key file's key again, so a change
+# in how shares are joined can never turn the header into another key.
 
 add_executable(bc_keygen keygen/bc_keygen.c)
 target_link_libraries(bc_keygen PRIVATE bc_core)
@@ -152,7 +157,7 @@ if(BINARYCRYPT_KEY_FILE)
     OUTPUT ${BC_KEY_DIR}/bc_key_data.h
     COMMAND ${CMAKE_COMMAND} -E make_directory ${BC_KEY_DIR}
     COMMAND ${BC_KEYGEN} --from-file ${BC_KEY_FILE_ABS} ${BC_KEY_DIR}/bc_key_data.h
-    DEPENDS ${BC_KEY_FILE_ABS}
+    DEPENDS ${BC_KEY_FILE_ABS} ${BC_KEYGEN}
     COMMENT "Reading the BinaryCrypt key from BINARYCRYPT_KEY_FILE"
     VERBATIM
   )

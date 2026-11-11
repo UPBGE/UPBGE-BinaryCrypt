@@ -9,6 +9,7 @@
 #include "bc_envelope.h"
 #include "bc_key.h"
 #include "bc_platform.h"
+#include "blake3.h"
 
 #ifdef _WIN32
 #  ifndef WIN32_LEAN_AND_MEAN
@@ -437,13 +438,13 @@ static bool bc_cache_wrap_key(const uint8_t key_id[BC_KEY_ID_SIZE], uint8_t r_wr
   }
 #  endif
   const uint32_t uid = (uint32_t)getuid();
-  crypto_blake2b_ctx ctx;
-  crypto_blake2b_keyed_init(&ctx, 32, bc_build_key(), BC_KEY_SIZE);
-  crypto_blake2b_update(&ctx, (const uint8_t *)BC_CACHE_CONTEXT, sizeof(BC_CACHE_CONTEXT) - 1);
-  crypto_blake2b_update(&ctx, (const uint8_t *)machine, machine_size);
-  crypto_blake2b_update(&ctx, (const uint8_t *)&uid, sizeof(uid));
-  crypto_blake2b_update(&ctx, key_id, BC_KEY_ID_SIZE);
-  crypto_blake2b_final(&ctx, r_wrap);
+  blake3_hasher hasher;
+  blake3_hasher_init_keyed(&hasher, bc_build_key());
+  blake3_hasher_update(&hasher, BC_CACHE_CONTEXT, sizeof(BC_CACHE_CONTEXT) - 1);
+  blake3_hasher_update(&hasher, machine, machine_size);
+  blake3_hasher_update(&hasher, &uid, sizeof(uid));
+  blake3_hasher_update(&hasher, key_id, BC_KEY_ID_SIZE);
+  blake3_hasher_finalize(&hasher, r_wrap, 32);
   return true;
 }
 

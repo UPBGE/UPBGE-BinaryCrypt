@@ -18,7 +18,9 @@
  *
  * k is unique to the pair of fresh key pairs, so the constant nonce never repeats under one key.
  * The key id as associated data binds the answer to the game asked for. Plain RFC primitives: the
- * reference server implements it with Python's "cryptography" package in a few lines. */
+ * reference server implements it with Python's "cryptography" package in a few lines. BLAKE2b,
+ * not the BLAKE3 of the rest of BinaryCrypt: the server derives k too, and Python's hashlib has
+ * BLAKE2b but no BLAKE3. */
 
 #ifndef BC_ENVELOPE_H
 #define BC_ENVELOPE_H

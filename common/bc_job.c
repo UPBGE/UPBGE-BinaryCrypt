@@ -71,7 +71,7 @@ struct BC_Job {
   /** Outputs already up to date: not encrypted nor written again. */
   int kept_files;
   FILE *file_hash_in;
-  crypto_blake2b_ctx file_hash_ctx;
+  blake3_hasher file_hash_ctx;
   uint16_t key_flags;
   char provider_rel[BC_PATH_MAX];
   char key_url[BC_PROJECT_URL_MAX];
@@ -1115,11 +1115,11 @@ static void bc_job_hash_file(BC_Job *job, BC_JobFile *file)
       bc_job_set_failed(job);
       return;
     }
-    crypto_blake2b_init(&job->file_hash_ctx, BC_PLAIN_HASH_SIZE);
+    blake3_hasher_init(&job->file_hash_ctx);
     snprintf(job->status, sizeof(job->status), "%s", bc_display(job, file->in));
   }
   const size_t n = fread(job->hash_buffer, 1, BC_HASH_READ_SIZE, job->file_hash_in);
-  crypto_blake2b_update(&job->file_hash_ctx, job->hash_buffer, n);
+  blake3_hasher_update(&job->file_hash_ctx, job->hash_buffer, n);
   job->done_bytes += n;
   if (first) {
     file->compress = file->kind == BC_KIND_BLEND && bc_blend_is_uncompressed(job->hash_buffer, n);
@@ -1130,7 +1130,7 @@ static void bc_job_hash_file(BC_Job *job, BC_JobFile *file)
   const bool error = ferror(job->file_hash_in) != 0;
   fclose(job->file_hash_in);
   job->file_hash_in = NULL;
-  crypto_blake2b_final(&job->file_hash_ctx, file->hash);
+  blake3_hasher_finalize(&job->file_hash_ctx, file->hash, BC_PLAIN_HASH_SIZE);
   file->hashed = true;
   if (error || !bc_job_choose_key(job, file)) {
     bc_log(job, BC_LOG_ERROR, "Cannot read '%s'", file->in);

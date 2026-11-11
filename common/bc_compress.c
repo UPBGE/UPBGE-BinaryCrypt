@@ -66,13 +66,13 @@ bool bc_compress_begin(BC_Compressor *c, const char *in_path, const char *out_pa
     bc_compress_end(c, false);
     return false;
   }
-  crypto_blake2b_init(&c->hash, BC_PLAIN_HASH_SIZE);
+  blake3_hasher_init(&c->hash);
   return true;
 }
 
 static bool bc_compress_write(BC_Compressor *c, const void *data, const size_t size)
 {
-  crypto_blake2b_update(&c->hash, (const uint8_t *)data, size);
+  blake3_hasher_update(&c->hash, data, size);
   c->out_size += size;
   return fwrite(data, 1, size, c->out) == size;
 }
@@ -137,7 +137,7 @@ int bc_compress_step(BC_Compressor *c, char *err, const size_t err_size)
     return -1;
   }
   const bool ok = bc_compress_write_seek_table(c);
-  crypto_blake2b_final(&c->hash, c->out_hash);
+  blake3_hasher_finalize(&c->hash, c->out_hash, BC_PLAIN_HASH_SIZE);
   const bool closed = fclose(c->out) == 0;
   c->out = NULL;
   if (!ok || !closed) {

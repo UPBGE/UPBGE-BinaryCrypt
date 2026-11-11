@@ -34,7 +34,7 @@ void bc_build_key_forget(void);
 /** Random bytes around each share in the binaries (bc_keygen). */
 #define BC_KEY_BLOCK_SIZE 4096
 
-/** \a r_b = key XOR BLAKE2b-256(context || a) with \a r_a random. False if randomness failed. */
+/** \a r_b = key XOR BLAKE3 derive_key(context, a) with \a r_a random. False if randomness failed. */
 bool bc_key_split(const uint8_t key[BC_KEY_SIZE], uint8_t r_a[BC_KEY_SIZE], uint8_t r_b[BC_KEY_SIZE]);
 /** Inverse of bc_key_split. */
 void bc_key_join(const uint8_t a[BC_KEY_SIZE], const uint8_t b[BC_KEY_SIZE], uint8_t r_key[BC_KEY_SIZE]);
