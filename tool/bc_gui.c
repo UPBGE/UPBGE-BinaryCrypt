@@ -2088,6 +2088,36 @@ static void bc_gui_file_list(BC_Gui *g, const Rectangle bounds, const bool page_
  * and Python modules are always encrypted, code the system or Python loads (.dll, .so, .pyc...)
  * never, any other type when ticked (the project's data file extensions).
  */
+/** Tick box of the editor, 16 px: a 1 px edge (the accent under the mouse) and, ticked, the
+ * accent filled 3 px inside it; grey when it cannot change. */
+static void bc_draw_tick(const Rectangle box, const bool ticked, const bool active, const bool hover)
+{
+  const Color edge = GetColor((unsigned int)(!active ? GuiGetStyle(DEFAULT, BORDER_COLOR_DISABLED) :
+                                             hover   ? BC_RGB(BC_RGB_ACCENT) :
+                                                       GuiGetStyle(DEFAULT, BORDER_COLOR_NORMAL)));
+  DrawRectangleLinesEx(box, 1, edge);
+  if (ticked) {
+    DrawRectangleRec(bc_rect(box.x + 3, box.y + 3, box.width - 6, box.height - 6), GetColor((unsigned int)BC_RGB(active ? BC_RGB_ACCENT : 0x5c5c5c)));
+  }
+}
+
+/** A tick box and its text in \a row; a click anywhere on them flips \a value. \return true
+ * when flipped. */
+static bool bc_tick(const Rectangle row, const char *text, bool *value, const bool available)
+{
+  const bool active = available && GuiGetState() != STATE_DISABLED;
+  const bool hover = active && !GuiIsLocked() && IsCursorOnScreen() && CheckCollisionPointRec(GetMousePosition(), row);
+  const Rectangle box = bc_rect(row.x, row.y + (row.height - 16) / 2, 16, 16);
+  bc_draw_tick(box, *value, active, hover);
+  const Vector2 at = {box.x + box.width + BC_GAP, row.y + (row.height - BC_TEXT_SIZE) / 2};
+  DrawTextEx(GuiGetFont(), text, at, BC_TEXT_SIZE, (float)GuiGetStyle(DEFAULT, TEXT_SPACING), GetColor((unsigned int)GuiGetStyle(DEFAULT, active ? TEXT_COLOR_NORMAL : TEXT_COLOR_DISABLED)));
+  if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+    *value = !*value;
+    return true;
+  }
+  return false;
+}
+
 static void bc_gui_types_list(BC_Gui *g, const Rectangle bounds, const bool page_wheeled)
 {
   const float spacing = (float)GuiGetStyle(DEFAULT, TEXT_SPACING);
@@ -2125,16 +2155,8 @@ static void bc_gui_types_list(BC_Gui *g, const Rectangle bounds, const bool page
     if (hover) {
       DrawRectangleRec(row, GetColor((unsigned int)BC_RGB(0x222222)));
     }
-    /* Tick box: the accent filled when ticked, grey when it cannot change. */
     const Rectangle box = bc_rect(row.x + BC_GAP, row.y + (BC_LIST_ROW - 16) / 2, 16, 16);
-    const Color edge = GetColor((unsigned int)(!choosable || disabled ? GuiGetStyle(DEFAULT, BORDER_COLOR_DISABLED) :
-                                               hover                 ? BC_RGB(BC_RGB_ACCENT) :
-                                                                       GuiGetStyle(DEFAULT, BORDER_COLOR_NORMAL)));
-    DrawRectangleLinesEx(box, 1, edge);
-    if (ticked) {
-      const unsigned int fill = choosable && !disabled ? BC_RGB_ACCENT : 0x5c5c5c;
-      DrawRectangleRec(bc_rect(box.x + 3, box.y + 3, box.width - 6, box.height - 6), GetColor((unsigned int)BC_RGB(fill)));
-    }
+    bc_draw_tick(box, ticked, choosable && !disabled, hover);
     char info[48];
     snprintf(info, sizeof(info), always ? "%d  \xc2\xb7  always" : never ? "%d  \xc2\xb7  never" : "%d", type->count);
     const float info_w = MeasureTextEx(font, info, BC_TEXT_SIZE, spacing).x;
@@ -2606,8 +2628,6 @@ static void bc_gui_draw(BC_Gui *g)
       const char *show_help = "Debug displays\nWhat the game shows while you test it. Exporting with any of them on warns: turn them off before shipping.";
       GuiLabel(bc_rect(x0, sy, BC_LABEL_W, BC_ROW), "Show");
       bc_tip(bc_rect(x0, sy, BC_LABEL_W, BC_ROW), show_help);
-      const float box = BC_ROW - 12;
-      const float padding = (float)GuiGetStyle(CHECKBOX, TEXT_PADDING);
       float cx = x0 + BC_LABEL_W;
       for (int i = 0; i < 5; i++) {
 #ifdef _WIN32
@@ -2615,16 +2635,12 @@ static void bc_gui_draw(BC_Gui *g)
 #else
         const bool available = i != 0; /* The console is a Windows matter. */
 #endif
-        const float text_w = MeasureTextEx(font, show_names[i], BC_TEXT_SIZE, text_spacing).x;
-        const bool before = *show_values[i];
-        const bool greyed_show = bc_enable_begin(available);
-        GuiCheckBox(bc_rect(cx, sy + (BC_ROW - box) / 2, box, box), show_names[i], show_values[i]);
-        bc_enable_end(greyed_show);
-        if (*show_values[i] != before) {
+        const Rectangle item = bc_rect(cx, sy, 16 + BC_GAP + MeasureTextEx(font, show_names[i], BC_TEXT_SIZE, text_spacing).x, BC_ROW);
+        if (bc_tick(item, show_names[i], show_values[i], available)) {
           bc_gui_set_modified(g);
         }
-        bc_tip(bc_rect(cx, sy, box + padding + text_w, BC_ROW), show_helps[i]);
-        cx += box + padding + text_w + 4 * BC_GAP;
+        bc_tip(item, show_helps[i]);
+        cx += item.width + 4 * BC_GAP;
       }
     }
     y += windows_h + 2 * BC_GAP;
