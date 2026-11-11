@@ -196,6 +196,8 @@ static void test_paths(void)
   CHECK(!bc_path_relative(p, sizeof(p), "/game", "/gameplay/a.blend"));
   CHECK(bc_path_relative(p, sizeof(p), "/", "/x/y"));
   CHECK_STR(p, "x/y");
+  /* A folder not set yet holds nothing: an empty output folder never "contains" the sources. */
+  CHECK(!bc_path_relative(p, sizeof(p), "", "/x/y") && !bc_path_is_inside("", "/x/y"));
   CHECK(bc_path_join(p, sizeof(p), "/a/b", "../c"));
   CHECK_STR(p, "/a/c");
   CHECK(bc_path_join(p, sizeof(p), "/a/b", "/abs"));

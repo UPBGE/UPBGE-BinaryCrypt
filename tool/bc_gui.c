@@ -479,6 +479,28 @@ static void bc_gui_add_input(BC_Gui *g, const char *path)
   bc_gui_set_modified(g);
 }
 
+/** Source folder picked or typed. A list still empty, or holding only the previous source folder,
+ * follows it: its files show up as when the folder is dropped on the window. A list of your own
+ * stays as it is. */
+static void bc_gui_set_source(BC_Gui *g, const char *path)
+{
+  BC_Project *p = &g->project;
+  char normalized[BC_PATH_MAX];
+  snprintf(normalized, sizeof(normalized), "%s", path);
+  bc_path_normalize(normalized);
+  const bool follows = p->input_count == 0 || (p->input_count == 1 && bc_path_is_inside(p->inputs[0], p->source_root) &&
+                                                bc_path_is_inside(p->source_root, p->inputs[0]));
+  if (follows && p->input_count == 1) {
+    bc_project_remove_input(p, 0);
+  }
+  snprintf(p->source_root, sizeof(p->source_root), "%s", normalized);
+  if (follows && normalized[0] != '\0' && bc_is_dir(normalized)) {
+    bc_project_add_input(p, normalized);
+  }
+  bc_gui_set_modified(g);
+  bc_gui_rebuild_items(g);
+}
+
 static void bc_gui_load(BC_Gui *g, const char *path)
 {
   BC_Project loaded;
@@ -2297,9 +2319,7 @@ static void bc_gui_draw(BC_Gui *g)
     if (bc_gui_path_row(x0, y, right, BC_LABEL_W, "Source folder", "Root of the game sources\nEvery file to encrypt is inside it, and the output folder mirrors its tree with the same names, so relative paths, linked libraries and imports keep working.", "Required: drop your game folder on the window", &check->source, g->project.source_root, g->source_text, &g->source_edit, &committed)) {
       r = bc_dialog_pick_folder("Source folder", path, sizeof(path));
       if (r == BC_DIALOG_OK) {
-        snprintf(g->project.source_root, sizeof(g->project.source_root), "%s", path);
-        bc_gui_set_modified(g);
-        bc_gui_rebuild_items(g);
+        bc_gui_set_source(g, path);
       }
       else if (r == BC_DIALOG_UNAVAILABLE) {
         bc_gui_dialog_unavailable(g);
@@ -2307,9 +2327,7 @@ static void bc_gui_draw(BC_Gui *g)
     }
     if (committed) {
       bc_gui_resolve(g, g->source_text, resolved);
-      snprintf(g->project.source_root, sizeof(g->project.source_root), "%s", resolved);
-      bc_gui_set_modified(g);
-      bc_gui_rebuild_items(g);
+      bc_gui_set_source(g, resolved);
     }
     y += BC_ROW + BC_GAP;
 

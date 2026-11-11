@@ -524,7 +524,10 @@ static bool bc_path_prefix_equal(const char *a, const char *b, size_t n)
 bool bc_path_relative(char *out, size_t size, const char *base_dir, const char *path)
 {
   size_t n = strlen(base_dir);
-  if (n > 0 && base_dir[n - 1] == '/') {
+  if (n == 0) {
+    return false; /* No folder (a field not set yet) holds nothing: not even "/..." on POSIX. */
+  }
+  if (base_dir[n - 1] == '/') {
     n--; /* Root "/" or "C:/". */
   }
   if (strlen(path) < n || !bc_path_prefix_equal(base_dir, path, n)) {
