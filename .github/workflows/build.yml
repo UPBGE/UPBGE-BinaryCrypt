@@ -2,9 +2,10 @@
 #
 # Builds bc_tool, bc_launcher and the key providers that need no store SDK (bc_provider_dev,
 # bc_provider_itch) for Windows x64, Linux x64 and macOS arm64, optionally runs the tests, and
-# uploads one archive per platform. The providers that need a store's SDK, which may not be
-# redistributed, get a note on how to build them instead. Started by hand only (Actions tab,
-# Build, Run workflow), by anyone with write access to the repository.
+# uploads two archives per platform (cpack): the tools, and the key server with the providers.
+# The providers that need a store's SDK, which may not be redistributed, get a note on how to build
+# them instead. With "release", a last job puts the six archives in a draft release. Started by
+# hand only (Actions tab, Build, Run workflow), by anyone with write access to the repository.
 #
 # Build key: each platform generates its own random key, never printed (bc_keygen writes it into a
 # header of the build folder, which is not uploaded). With "pinned_key", every platform reads the
@@ -22,6 +23,10 @@ on:
         default: false
       run_tests:
         description: "Run the tests before packaging"
+        type: boolean
+        default: false
+      release:
+        description: "Create a draft release (tag v<PROJECT_VERSION>) with the archives"
         type: boolean
         default: false
 
@@ -99,57 +104,30 @@ jobs:
           echo "BC_KEY_FILE=$temp/binarycrypt.key" >> "$GITHUB_ENV"
           echo "BC_KEY_ARGS=-DBINARYCRYPT_KEY_FILE=$temp/binarycrypt.key" >> "$GITHUB_ENV"
 
-      # CMAKE_POLICY_VERSION_MINIMUM: a CMake 4 runner still configures raylib and zstd, whose
-      # cmake_minimum_required is old (an older CMake only warns that it is unused).
-      - name: Configure
+      # Providers that need a store's SDK, which may not be redistributed: how to build each one
+      # from the sources of this release, installed next to the others (BC_PACKAGE_PROVIDER_NOTES).
+      - name: Notes for the providers that need a store SDK
         run: |
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
-            ${{ matrix.cmake_args }} $BC_KEY_ARGS
-
-      - name: Build
-        run: cmake --build build --config Release --parallel
-
-      - name: Remove the pinned key file
-        if: always() && inputs.pinned_key
-        run: rm -f "$BC_KEY_FILE"
-
-      - name: Test
-        if: inputs.run_tests
-        run: ctest --test-dir build -C Release --output-on-failure
-
-      - name: Package
-        run: |
-          version=$(sed -n 's/^set(PROJECT_VERSION \(.*\))$/\1/p' CMakeLists.txt)
-          name="UPBGE-BinaryCrypt-$version-${{ matrix.platform }}"
+          notes="$RUNNER_TEMP/provider-notes"
+          if [ "$RUNNER_OS" = Windows ]; then notes=$(cygpath -m "$notes"); fi
+          mkdir -p "$notes"
           exe=""
           if [ "$RUNNER_OS" = Windows ]; then exe=".exe"; fi
-          out="package/$name"
-          mkdir -p "$out/providers" "$out/keyserver"
-          # Picked by name: the build folder also holds the generated key header, never shipped.
-          binary() { find build -type f -name "$1$exe" -not -path "*/CMakeFiles/*" -print -quit; }
-          for target in bc_tool bc_launcher; do
-            cp "$(binary $target)" "$out/"
-          done
-          for target in bc_provider_dev bc_provider_itch; do
-            found=$(binary $target)
-            if [ -n "$found" ]; then cp "$found" "$out/providers/"; fi
-          done
-          # Providers that need a store's SDK: how to build each one from the sources of this package.
           repo="${{ github.server_url }}/${{ github.repository }}"
           case "$RUNNER_OS" in
             Windows) steam_lib=steam_api64.dll; epic_lib=EOSSDK-Win64-Shipping.dll ;;
             macOS) steam_lib=libsteam_api.dylib; epic_lib=libEOSSDK-Mac-Shipping.dylib ;;
             *) steam_lib=libsteam_api.so; epic_lib=libEOSSDK-Linux-Shipping.so ;;
           esac
-          # sdk_note <provider> <store> <SDK> <values> <CMake options> <game folder files> <section>
+          # sdk_note <provider> <store> <SDK> <values> <CMake options> <files> <section>
           # Commands on one line each: they paste into any shell (bash, cmd, PowerShell).
           sdk_note() {
-            cat > "$out/providers/$1.txt" <<EOF
+            cat > "$notes/$1.txt" <<EOF
           $1$exe: key provider for games sold on $2.
 
-          It is not in this package: it links $3, which may not be
+          It is not in this archive: it links $3, which may not be
           redistributed. Build it yourself from the providers folder of the UPBGE-BinaryCrypt sources
-          this package was built from:
+          this archive was built from:
 
             $repo/tree/${{ github.sha }}/keyserver/providers
 
@@ -171,8 +149,7 @@ jobs:
 
             $6
 
-          The key server side is described in keyserver/README.md, section "$7", in the keyserver
-          folder of this package.
+          The key server side is described in README.md of this archive, section "$7".
           EOF
           }
           sdk_note bc_provider_steam Steam "the Steamworks SDK (partner.steamgames.com)" "" \
@@ -193,18 +170,64 @@ jobs:
               "bc_provider_meta.exe (nothing else: the Meta app on the player's computer brings its library)" \
               "Meta (Meta Horizon Store, PC VR)"
           fi
-          cp Readme.md LICENSE.txt "$out/"
-          cp keyserver/bc_keyserver.py keyserver/keyserver.example.json keyserver/README.md keyserver/LICENSE "$out/keyserver/"
-          "$out/bc_tool$exe" --fingerprint > "$out/FINGERPRINT.txt"
-          # Zip archives drop the execute permission: a tarball keeps it.
-          if [ "$RUNNER_OS" != Windows ]; then
-            tar -czf "package/$name.tar.gz" -C package "$name"
-            rm -rf "$out"
-          fi
-          echo "PACKAGE_NAME=$name" >> "$GITHUB_ENV"
+          echo "BC_NOTES_ARGS=-DBC_PACKAGE_PROVIDER_NOTES=$notes" >> "$GITHUB_ENV"
+
+      # CMAKE_POLICY_VERSION_MINIMUM: a CMake 4 runner still configures raylib and zstd, whose
+      # cmake_minimum_required is old (an older CMake only warns that it is unused).
+      - name: Configure
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            ${{ matrix.cmake_args }} $BC_KEY_ARGS $BC_NOTES_ARGS
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Remove the pinned key file
+        if: always() && inputs.pinned_key
+        run: rm -f "$BC_KEY_FILE"
+
+      - name: Test
+        if: inputs.run_tests
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      # The packages of CMakeLists.txt (cpack): bc_tool and bc_launcher with their licenses and the
+      # fingerprint of the build key; the key server and providers with theirs, plus how to build
+      # the providers that need a store's SDK. The build folder also holds the generated key header:
+      # cpack takes only what the install rules name.
+      - name: Package
+        run: |
+          cpack --config build/CPackConfig.cmake -C Release -B package
+          version=$(sed -n 's/^set(PROJECT_VERSION \(.*\))$/\1/p' CMakeLists.txt)
+          echo "PACKAGE_NAME=UPBGE-BinaryCrypt-$version-${{ matrix.platform }}" >> "$GITHUB_ENV"
 
       - uses: actions/upload-artifact@v6
         with:
           name: ${{ env.PACKAGE_NAME }}
-          path: package/
+          path: |
+            package/*.zip
+            package/*.tar.gz
           if-no-files-found: error
+
+  # A draft release with the archives of every platform: published by hand once checked.
+  release:
+    name: Release
+    needs: build
+    if: inputs.release
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v6
+        with:
+          path: assets
+          merge-multiple: true
+
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(sed -n 's/^set(PROJECT_VERSION \(.*\))$/\1/p' CMakeLists.txt)
+          gh release create "v$version" assets/* --draft --target "${{ github.sha }}" \
+            --title "UPBGE-BinaryCrypt $version" --generate-notes

@@ -388,7 +388,8 @@ endif()
 #                                 built into them)
 #   UPBGE-BinaryCrypt-keyserver/  key server and the providers built here (MIT)
 # cmake --install build [--prefix <dir>] installs both folders; cpack --config build/CPackConfig.cmake
-# (or the package target) zips each one: UPBGE-BinaryCrypt[-keyserver]-<version>-<platform>.zip.
+# (or the package target) archives each one: UPBGE-BinaryCrypt[-keyserver]-<version>-<platform>.zip,
+# .tar.gz on Linux.
 
 install(TARGETS bc_tool bc_launcher RUNTIME DESTINATION ${BC_PACKAGE_TOOLS} COMPONENT tools)
 install(FILES LICENSE.txt Readme.md DESTINATION ${BC_PACKAGE_TOOLS} COMPONENT tools)
@@ -413,6 +414,23 @@ if(BINARYCRYPT_BUILD_GUI)
 endif()
 install(FILES keyserver/bc_keyserver.py keyserver/keyserver.example.json keyserver/README.md keyserver/LICENSE
         DESTINATION ${BC_PACKAGE_KEYSERVER} COMPONENT keyserver)
+# Which key the tools hold, never the key: told by bc_tool, so not when cross compiling.
+if(NOT CMAKE_CROSSCOMPILING)
+  install(CODE "execute_process(COMMAND \"$<TARGET_FILE:bc_tool>\" --fingerprint
+                  OUTPUT_FILE \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${BC_PACKAGE_TOOLS}/FINGERPRINT.txt\"
+                  RESULT_VARIABLE bc_result)
+                if(NOT bc_result EQUAL 0)
+                  message(FATAL_ERROR \"bc_tool --fingerprint failed\")
+                endif()"
+          COMPONENT tools)
+endif()
+# Text files to put beside the providers (the release workflow's notes on the providers that need
+# a store's SDK).
+set(BC_PACKAGE_PROVIDER_NOTES "" CACHE PATH "Folder of text files installed into the key server package's providers/")
+if(BC_PACKAGE_PROVIDER_NOTES)
+  file(TO_CMAKE_PATH "${BC_PACKAGE_PROVIDER_NOTES}" bc_notes)
+  install(DIRECTORY ${bc_notes}/ DESTINATION ${BC_PACKAGE_KEYSERVER}/providers COMPONENT keyserver)
+endif()
 
 # The target's architecture: MSVC names it (x64, ARM64); a cross toolchain may name no processor.
 string(TOLOWER "${CMAKE_C_COMPILER_ARCHITECTURE_ID}" bc_arch)
@@ -433,7 +451,12 @@ elseif(APPLE)
 else()
   string(TOLOWER ${CMAKE_SYSTEM_NAME}-${bc_arch} bc_platform)
 endif()
-set(CPACK_GENERATOR ZIP)
+# Linux: a tarball, as its users expect (both keep the execute permission).
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  set(CPACK_GENERATOR TGZ)
+else()
+  set(CPACK_GENERATOR ZIP)
+endif()
 set(CPACK_PACKAGE_NAME ${BC_PACKAGE_TOOLS})
 set(CPACK_PACKAGE_VERSION ${PROJECT_VERSION})
 set(CPACK_ARCHIVE_COMPONENT_INSTALL ON)

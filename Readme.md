@@ -109,17 +109,17 @@ is used, otherwise zstd 1.5.7 is downloaded and built. The editor uses
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release
 ctest --test-dir build -C Release        # optional
-cmake --build build --config Release --target package   # optional: the two zips below
+cmake --build build --config Release --target package   # optional: the two archives below
 ```
 
 Packages: two parts, each in a folder of its own with its license. `UPBGE-BinaryCrypt/` holds
 `bc_tool` and `bc_launcher` (GPL-3.0; `licenses/` holds the licenses of the code built into them:
-Monocypher, BLAKE3, zstd, raylib, GLFW, raygui, Montserrat); `UPBGE-BinaryCrypt-keyserver/` holds
-the key server and the providers of this build (MIT), each store provider with its library. The
-`package` target zips each folder into the build folder
-(`UPBGE-BinaryCrypt-<version>-<platform>.zip` and
-`UPBGE-BinaryCrypt-keyserver-<version>-<platform>.zip`); `cmake --install build --config Release
---prefix <folder>` installs both folders there.
+Monocypher, BLAKE3, zstd, raylib, GLFW, raygui, Montserrat; `FINGERPRINT.txt` names the build key,
+except in a cross build); `UPBGE-BinaryCrypt-keyserver/` holds the key server and the providers of
+this build (MIT), each store provider with its library. The `package` target archives each folder
+into the build folder (`UPBGE-BinaryCrypt-<version>-<platform>.zip` and
+`UPBGE-BinaryCrypt-keyserver-<version>-<platform>.zip`, `.tar.gz` on Linux); `cmake --install build
+--config Release --prefix <folder>` installs both folders there.
 
 Platform notes:
 
@@ -145,15 +145,15 @@ Platform notes:
 | `BINARYCRYPT_KEY_FILE` | empty | Build with a fixed key instead of a random one (see below). |
 | `BINARYCRYPT_HOST_KEYGEN` | empty | Host `bc_keygen` executable, required when cross compiling. |
 
-**GitHub Actions.** The *Build* workflow (`.github/workflows/build.yml`) builds Windows x64,
-Linux x64 (in Debian 12, for older glibc versions) and macOS arm64, and uploads one archive per
-platform: `bc_tool`, `bc_launcher`, the key server, the fingerprint of the build key, and a
-`providers` folder with the providers that need no store SDK. For each provider that needs one,
-the folder holds `bc_provider_<store>.txt` instead, on how to build it from `keyserver/providers`
-of the same sources. It starts by hand only (*Actions*, *Build*, *Run workflow*), by anyone with
-write access to the repository; *run_tests* runs the tests first (off by default). Each platform
-gets a random build key unless *pinned_key* is set: the `BINARYCRYPT_KEY` secret (64 hex digits)
-then gives every platform the same key.
+**GitHub Actions.** The *Build* workflow (`.github/workflows/build.yml`) builds Windows x64, Linux
+x64 (in Debian 12, for older glibc versions) and macOS arm64, and uploads the two packages above
+per platform. The providers that need a store SDK are not in them: for each one, `providers/` holds
+`bc_provider_<store>.txt` instead, on how to build it from `keyserver/providers` of the same
+sources. It starts by hand only (*Actions*, *Build*, *Run workflow*), by anyone with write access
+to the repository; *run_tests* runs the tests first (off by default); *release* puts the six
+archives in a draft release tagged `v<version>`, to check and publish by hand. Each platform gets a
+random build key unless *pinned_key* is set: the `BINARYCRYPT_KEY` secret (64 hex digits) then
+gives every platform the same key.
 
 ## Key management
 
