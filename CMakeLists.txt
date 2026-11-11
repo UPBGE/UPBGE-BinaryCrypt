@@ -1,6 +1,14 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 cmake_minimum_required(VERSION 3.18)
+# MSVC: static C runtime. The launcher ships in every game, and the player's computer may lack the
+# Visual C++ redistributable (engine/blender.crt serves the UPBGE player, not the launcher beside
+# the game executable). CMP0091 NEW applies it to raylib and zstd too, whose CMake files predate
+# the setting; a prebuilt raylib must use the same runtime (/MT), or the link fails (LNK2038).
+if(NOT DEFINED CMAKE_MSVC_RUNTIME_LIBRARY)
+  set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
+set(CMAKE_POLICY_DEFAULT_CMP0091 NEW)
 # Release version of the tool, shown in the bc_tool window title: raise it for each release. The
 # file formats carry their own versions (binarycrypt_format.h, bc_manifest.h, bc_project.h).
 project(UPBGE_BinaryCrypt LANGUAGES C)
@@ -96,6 +104,8 @@ elseif(BINARYCRYPT_FETCH_ZSTD)
     SOURCE_SUBDIR build/cmake
   )
   FetchContent_MakeAvailable(zstd)
+  # Linked in, never installed: its headers and library stay out of cmake --install and the zips.
+  set_property(DIRECTORY ${zstd_SOURCE_DIR}/build/cmake PROPERTY EXCLUDE_FROM_ALL TRUE)
   set(BC_ZSTD libzstd_static)
 else()
   message(FATAL_ERROR "zstd not found: install it (libzstd-dev) or enable BINARYCRYPT_FETCH_ZSTD")
@@ -239,6 +249,7 @@ if(BINARYCRYPT_BUILD_GUI)
       GIT_SHALLOW TRUE
     )
     FetchContent_MakeAvailable(raylib)
+    set_property(DIRECTORY ${raylib_SOURCE_DIR} PROPERTY EXCLUDE_FROM_ALL TRUE)
     set(BC_RAYLIB raylib)
   else()
     message(FATAL_ERROR "raylib not found: install it, enable BINARYCRYPT_FETCH_RAYLIB or set BINARYCRYPT_BUILD_GUI=OFF")
@@ -290,6 +301,20 @@ if(BINARYCRYPT_BUILD_GUI)
 endif()
 
 # ---------------------------------------------------------------------------------------------
+# Key providers (keyserver/, MIT): bc_provider_dev and bc_provider_itch always, the store ones when
+# their SDK is given (keyserver/providers/CMakeLists.txt). HTTPS through WinHTTP, else libcurl.
+
+# Folders of the two packages (end of this file); the providers install into the second one.
+set(BC_PACKAGE_TOOLS UPBGE-BinaryCrypt)
+set(BC_PACKAGE_KEYSERVER UPBGE-BinaryCrypt-keyserver)
+find_package(CURL QUIET)
+if(WIN32 OR CURL_FOUND)
+  add_subdirectory(keyserver/providers)
+else()
+  message(STATUS "libcurl not found: no key providers")
+endif()
+
+# ---------------------------------------------------------------------------------------------
 # Tests
 
 include(CTest)
@@ -332,10 +357,6 @@ if(BUILD_TESTING)
 
   # Reference key server and providers (keyserver/, MIT). With Python and its "cryptography"
   # package, the whole chain runs: launcher -> bc_provider_dev -> bc_keyserver.py -> player.
-  find_package(CURL QUIET)
-  if(WIN32 OR CURL_FOUND)
-    add_subdirectory(keyserver/providers)
-  endif()
   find_package(Python3 COMPONENTS Interpreter QUIET)
   if(Python3_FOUND AND NOT CMAKE_CROSSCOMPILING)
     execute_process(COMMAND ${Python3_EXECUTABLE} -c "import cryptography"
@@ -356,3 +377,55 @@ if(BUILD_TESTING)
     endif()
   endif()
 endif()
+
+# ---------------------------------------------------------------------------------------------
+# Packages. Two parts, each in a folder of its own with its license:
+#   UPBGE-BinaryCrypt/            bc_tool, bc_launcher (GPL-3.0; licenses/: notices of the code
+#                                 built into them)
+#   UPBGE-BinaryCrypt-keyserver/  key server and the providers built here (MIT)
+# cmake --install build [--prefix <dir>] installs both folders; cpack --config build/CPackConfig.cmake
+# (or the package target) zips each one: UPBGE-BinaryCrypt[-keyserver]-<version>-<platform>.zip.
+
+install(TARGETS bc_tool bc_launcher RUNTIME DESTINATION ${BC_PACKAGE_TOOLS} COMPONENT tools)
+install(FILES LICENSE.txt Readme.md DESTINATION ${BC_PACKAGE_TOOLS} COMPONENT tools)
+# Licenses that ask for their notice in binary copies: zstd (BSD-3-Clause, when built here) and the
+# editor's font (SIL OFL 1.1). Monocypher and BLAKE3 are used under CC0, raylib and raygui under
+# zlib, which asks it of source copies only.
+if(zstd_SOURCE_DIR)
+  install(FILES ${zstd_SOURCE_DIR}/LICENSE DESTINATION ${BC_PACKAGE_TOOLS}/licenses RENAME zstd-LICENSE.txt COMPONENT tools)
+endif()
+if(BINARYCRYPT_BUILD_GUI)
+  install(FILES tool/fonts/OFL.txt DESTINATION ${BC_PACKAGE_TOOLS}/licenses RENAME Montserrat-OFL.txt COMPONENT tools)
+endif()
+install(FILES keyserver/bc_keyserver.py keyserver/keyserver.example.json keyserver/README.md keyserver/LICENSE
+        DESTINATION ${BC_PACKAGE_KEYSERVER} COMPONENT keyserver)
+
+# The target's architecture: MSVC names it (x64, ARM64); a cross toolchain may name no processor.
+string(TOLOWER "${CMAKE_C_COMPILER_ARCHITECTURE_ID}" bc_arch)
+if(NOT bc_arch)
+  string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" bc_arch)
+endif()
+if(bc_arch MATCHES "^(amd64|x86_64|x64)$" OR (NOT bc_arch AND CMAKE_SIZEOF_VOID_P EQUAL 8))
+  set(bc_arch x64)
+elseif(bc_arch MATCHES "^(arm64|aarch64)$")
+  set(bc_arch arm64)
+elseif(NOT bc_arch)
+  set(bc_arch x86)
+endif()
+if(WIN32)
+  set(bc_platform windows-${bc_arch})
+elseif(APPLE)
+  set(bc_platform macos-${bc_arch})
+else()
+  string(TOLOWER ${CMAKE_SYSTEM_NAME}-${bc_arch} bc_platform)
+endif()
+set(CPACK_GENERATOR ZIP)
+set(CPACK_PACKAGE_NAME ${BC_PACKAGE_TOOLS})
+set(CPACK_PACKAGE_VERSION ${PROJECT_VERSION})
+set(CPACK_ARCHIVE_COMPONENT_INSTALL ON)
+set(CPACK_COMPONENTS_ALL tools keyserver)
+# The folders above are already the top level of each zip.
+set(CPACK_INCLUDE_TOPLEVEL_DIRECTORY OFF)
+set(CPACK_ARCHIVE_TOOLS_FILE_NAME ${BC_PACKAGE_TOOLS}-${PROJECT_VERSION}-${bc_platform})
+set(CPACK_ARCHIVE_KEYSERVER_FILE_NAME ${BC_PACKAGE_KEYSERVER}-${PROJECT_VERSION}-${bc_platform})
+include(CPack)

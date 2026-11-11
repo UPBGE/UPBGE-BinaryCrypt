@@ -42,10 +42,8 @@ jobs:
         include:
           - platform: windows-x64
             os: windows-2025
-            # Static C runtime: the launcher ships in every game, and a player's computer may lack
-            # the Visual C++ redistributable. CMP0091 NEW applies it to raylib and zstd too, whose
-            # CMake files predate the setting.
-            cmake_args: -A x64 -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DCMAKE_POLICY_DEFAULT_CMP0091=NEW
+            # Static C runtime: CMakeLists.txt sets it.
+            cmake_args: -A x64
           - platform: linux-x64
             os: ubuntu-24.04
             container: debian:12

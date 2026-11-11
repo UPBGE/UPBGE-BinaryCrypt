@@ -30,6 +30,14 @@ if(BCP_KEY_URL)
   target_compile_definitions(bc_provider_itch PRIVATE "BCP_ITCH_KEY_URL=\"${BCP_KEY_URL}\"")
 endif()
 
+# Installed into the key server's package (the UPBGE-BinaryCrypt build) or <prefix>/providers
+# (standalone), each store provider with the library it loads.
+if(NOT BC_PACKAGE_KEYSERVER)
+  set(BC_PACKAGE_KEYSERVER .)
+endif()
+set(bcp_destination ${BC_PACKAGE_KEYSERVER}/providers)
+install(TARGETS bc_provider_dev bc_provider_itch RUNTIME DESTINATION ${bcp_destination} COMPONENT keyserver)
+
 if(BCP_STEAMWORKS_SDK)
   enable_language(CXX)
   add_executable(bc_provider_steam bc_provider_steam.cpp)
@@ -49,6 +57,8 @@ if(BCP_STEAMWORKS_SDK)
   # The library beside the provider, as it ships: bc_tool copies both into the game's provider/.
   add_custom_command(TARGET bc_provider_steam POST_BUILD
                      COMMAND ${CMAKE_COMMAND} -E copy_if_different ${bcp_steam_runtime} $<TARGET_FILE_DIR:bc_provider_steam>)
+  install(TARGETS bc_provider_steam RUNTIME DESTINATION ${bcp_destination} COMPONENT keyserver)
+  install(FILES ${bcp_steam_runtime} DESTINATION ${bcp_destination} COMPONENT keyserver)
   if(BCP_KEY_URL)
     target_compile_definitions(bc_provider_steam PRIVATE "BCP_STEAM_KEY_URL=\"${BCP_KEY_URL}\"")
   endif()
@@ -81,6 +91,8 @@ if(BCP_EOS_SDK)
   endif()
   add_custom_command(TARGET bc_provider_epic POST_BUILD
                      COMMAND ${CMAKE_COMMAND} -E copy_if_different ${bcp_eos_runtime} $<TARGET_FILE_DIR:bc_provider_epic>)
+  install(TARGETS bc_provider_epic RUNTIME DESTINATION ${bcp_destination} COMPONENT keyserver)
+  install(FILES ${bcp_eos_runtime} DESTINATION ${bcp_destination} COMPONENT keyserver)
 endif()
 
 if(BCP_META_PLATFORM_SDK)
@@ -100,4 +112,5 @@ if(BCP_META_PLATFORM_SDK)
     target_compile_definitions(bc_provider_meta PRIVATE "BCP_META_KEY_URL=\"${BCP_KEY_URL}\"")
   endif()
   target_link_libraries(bc_provider_meta PRIVATE bcp_common ${BCP_META_PLATFORM_SDK}/Windows/LibOVRPlatform64_1.lib)
+  install(TARGETS bc_provider_meta RUNTIME DESTINATION ${bcp_destination} COMPONENT keyserver)
 endif()

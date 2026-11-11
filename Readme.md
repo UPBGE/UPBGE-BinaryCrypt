@@ -99,8 +99,8 @@ looked at: a feature bit gives them a meaning. Every byte is authenticated, rese
 included. So a newer UPBGE player still opens the games of today, and today's player opens files
 of a newer bc_tool unless they need a feature it lacks, in which case it says so.
 
-The release version of the tool, shown in the `bc_tool` window title, is the `VERSION` of
-`project()` in `CMakeLists.txt`: raise it for each release.
+The release version of the tool, shown in the `bc_tool` window title, is `PROJECT_VERSION` in
+`CMakeLists.txt` (for example `1.0-alpha`, `1.0-beta`, `1.0`): raise it for each release.
 
 ## Building
 
@@ -114,12 +114,24 @@ is used, otherwise zstd 1.5.7 is downloaded and built. The editor uses
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release
 ctest --test-dir build -C Release        # optional
+cmake --build build --config Release --target package   # optional: the two zips below
 ```
+
+Packages: two parts, each in a folder of its own with its license. `UPBGE-BinaryCrypt/` holds
+`bc_tool` and `bc_launcher` (GPL-3.0; `licenses/` holds the notices of the code built
+into them: zstd, Montserrat); `UPBGE-BinaryCrypt-keyserver/` holds the key server and the providers
+of this build (MIT), each store provider with its library. The `package` target zips each folder
+into the build folder (`UPBGE-BinaryCrypt-<version>-<platform>.zip` and
+`UPBGE-BinaryCrypt-keyserver-<version>-<platform>.zip`); `cmake --install build --config Release
+--prefix <folder>` installs both folders there.
 
 Platform notes:
 
-- **Windows:** a prebuilt raylib in `../Libs/raylib-5.5_win64_msvc16` is detected; otherwise it is
-  downloaded. `bc_launcher.exe` is a GUI application: it never opens a console window.
+- **Windows:** MSVC builds link the C runtime statically (`CMAKE_MSVC_RUNTIME_LIBRARY`), so the
+  launcher shipped in every game needs no Visual C++ redistributable on the player's computer. A
+  prebuilt raylib in `../Libs/raylib-5.5_win64_msvc16` is detected; it must use the same runtime
+  (`/MT`), or the link fails (LNK2038). Without one, raylib is downloaded and built with it.
+  `bc_launcher.exe` is a GUI application: it never opens a console window.
 - Keep `bc_launcher` next to `bc_tool`: the tool copies the launcher of its own build (same key)
   into each exported game.
 - **Linux:** raylib needs the X11 and OpenGL development packages
@@ -145,8 +157,7 @@ the folder holds `bc_provider_<store>.txt` instead, on how to build it from `key
 of the same sources. It starts by hand only (*Actions*, *Build*, *Run workflow*), by anyone with
 write access to the repository; *run_tests* runs the tests first (off by default). Each platform
 gets a random build key unless *pinned_key* is set: the `BINARYCRYPT_KEY` secret (64 hex digits)
-then gives every platform the same key. The Windows build links the C runtime statically, so the
-launcher needs no Visual C++ redistributable on the player's computer.
+then gives every platform the same key.
 
 ## Key management
 
