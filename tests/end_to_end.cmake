@@ -31,6 +31,18 @@ function(bc_expect_output text)
   endif()
 endfunction()
 
+# The integrity log next to the game executable holds \a text.
+function(bc_expect_log text)
+  if(NOT EXISTS "${report}")
+    message(FATAL_ERROR "no integrity log '${report}'")
+  endif()
+  file(READ "${report}" log)
+  string(FIND "${log}" "${text}" found)
+  if(found EQUAL -1)
+    message(FATAL_ERROR "expected the integrity log to hold '${text}', got:\n${log}")
+  endif()
+endfunction()
+
 # Optional second argument: the kind byte (offset 11) as two hex digits, 00 .blend, 01 Python
 # module, 02 data file.
 function(bc_expect_sealed file)
@@ -106,14 +118,33 @@ bc_expect_output("decrypted correctly")
 # Integrity check (+ Python by default): a library added next to the player (a proxy DLL), a
 # changed one, a .pth or a changed Python module stops the game. Bytecode is removed by the
 # export, before every launch and after the player exits, so a test run leaves none to ship.
+# Each refusal names the file, also in a log next to the game executable, gone once the game
+# starts again (the export keeps the list of the checked files in engine/.bc_code).
+set(report "${DIST}/My Game-integrity.log")
+if(NOT EXISTS "${DIST}/engine/.bc_code")
+  message(FATAL_ERROR "the export saved no list of the checked files")
+endif()
 file(WRITE "${DIST}/engine/version.dll" "proxy")
 bc_run(FALSE "${DIST}/${game}")
 bc_expect_output("library, program or Python file")
+bc_expect_output("(added engine/version.dll); see My Game-integrity.log")
+bc_expect_log("added    engine/version.dll")
 file(REMOVE "${DIST}/engine/version.dll")
 file(WRITE "${DIST}/engine/startup.pth" "import os")
 bc_run(FALSE "${DIST}/${game}")
 bc_expect_output("library, program or Python file")
+bc_expect_log("added    engine/startup.pth")
+# A list that does not match the export's digest is not believed: no file named. The next export
+# writes it again.
+file(APPEND "${DIST}/engine/.bc_code" "x")
+bc_run(FALSE "${DIST}/${game}")
+bc_expect_log("Which file cannot be told")
 file(REMOVE "${DIST}/engine/startup.pth")
+bc_run(TRUE "${BC_TOOL}" --batch "${BC_WORK}/game.bcproj")
+bc_run(TRUE "${DIST}/${game}")
+if(EXISTS "${report}")
+  message(FATAL_ERROR "the integrity log outlived a launch that passed")
+endif()
 set(pyc "${DIST}/engine/scripts/__pycache__/menu.cpython-311.pyc")
 file(WRITE "${DIST}/engine/scripts/menu.py" "print()")
 file(WRITE "${pyc}" "left by a test run")
@@ -130,6 +161,7 @@ if(EXISTS "${pyc}")
 endif()
 file(WRITE "${DIST}/engine/scripts/menu.py" "print('patched')")
 bc_run(FALSE "${DIST}/${game}")
+bc_expect_log("changed  engine/scripts/menu.py")
 file(WRITE "${DIST}/engine/scripts/menu.py" "print()")
 bc_run(TRUE "${DIST}/${game}")
 # An encrypted module swapped for a plain one (the player would import it) stops the game too.
@@ -187,6 +219,7 @@ file(RENAME "${DIST}/renamed${BC_EXE_SUFFIX}" "${DIST}/${game}")
 file(APPEND "${DIST}/engine/${player_name}" "patched")
 bc_run(FALSE "${DIST}/${game}")
 bc_expect_output("modified or replaced")
+bc_expect_log("changed  engine/${player_name}")
 file(REMOVE "${DIST}/engine/${player_name}")
 file(COPY "${BC_PLAYER}" DESTINATION "${DIST}/engine")
 bc_run(TRUE "${DIST}/${game}")

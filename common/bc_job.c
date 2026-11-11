@@ -1340,8 +1340,10 @@ static void bc_job_write_game_exe(BC_Job *job)
     char exe_rel[BC_PATH_MAX];
     const char *skip[2] = {exe_rel, job->player_rel};
     static BC_NativeScan scan;
+    uint8_t *records = NULL;
+    size_t records_size = 0;
     if (!bc_path_relative(exe_rel, sizeof(exe_rel), job->dist_root, job->game_exe) ||
-        !bc_native_digest(job->dist_root, skip, 2, python, manifest.native_digest, &scan))
+        !bc_native_digest_records(job->dist_root, skip, 2, python, manifest.native_digest, &scan, &records, &records_size))
     {
       if (scan.locked[0] != '\0') {
         bc_log(job, BC_LOG_ERROR, "Cannot remove the Python bytecode file '%s'", scan.locked);
@@ -1353,6 +1355,24 @@ static void bc_job_write_game_exe(BC_Job *job)
       return;
     }
     manifest.flags |= BC_MANIFEST_NATIVE_DIGEST | (python ? BC_MANIFEST_PYTHON_CHECK : 0);
+    /* The digest input, for a launcher that finds the folder changed to tell which file. */
+    char player_dir[BC_PATH_MAX], record[BC_PATH_MAX] = "", record_tmp[BC_PATH_MAX + 8] = "";
+    bc_path_dirname(player_dir, sizeof(player_dir), job->player_abs);
+    FILE *f = bc_path_join(record, sizeof(record), player_dir, BC_NATIVE_RECORD) &&
+                      (size_t)snprintf(record_tmp, sizeof(record_tmp), "%s.tmp", record) < sizeof(record_tmp) ?
+                  bc_fopen(record_tmp, "wb") :
+                  NULL;
+    bool saved = f != NULL && (records_size == 0 || fwrite(records, 1, records_size, f) == records_size);
+    if (f != NULL) {
+      saved = fclose(f) == 0 && saved;
+    }
+    free(records);
+    if (!saved || !bc_rename_replace(record_tmp, record)) {
+      if (record_tmp[0] != '\0') {
+        bc_remove(record_tmp);
+      }
+      bc_log(job, BC_LOG_WARNING, "Cannot write '%s': a changed game folder is still refused, without saying which file", record);
+    }
     if (scan.bytecode_removed > 0) {
       bc_log(job, BC_LOG_INFO, "Removed %d Python bytecode file(s) from the game folder", scan.bytecode_removed);
     }

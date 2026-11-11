@@ -125,7 +125,39 @@ typedef struct BC_NativeWalk {
   bool python;
   BC_NativeHold *hold;
   BC_NativeScan scan;
+  /** bc_native_digest_records: the digest input, kept. */
+  bool keep;
+  uint8_t *records;
+  size_t records_size, records_capacity;
 } BC_NativeWalk;
+
+/** Hash a record, and keep it when asked. */
+static bool bc_native_record(BC_NativeWalk *w, const char *rel, const uint8_t hash[32])
+{
+  /* The NUL ends the path, so "a" + hash can never read as a longer path. */
+  const size_t n = strlen(rel) + 1;
+  blake3_hasher_update(&w->digest, rel, n);
+  blake3_hasher_update(&w->digest, hash, 32);
+  if (!w->keep) {
+    return true;
+  }
+  if (w->records_size + n + 32 > w->records_capacity) {
+    size_t capacity = w->records_capacity ? 2 * w->records_capacity : 64 * 1024;
+    while (w->records_size + n + 32 > capacity) {
+      capacity *= 2;
+    }
+    uint8_t *records = (uint8_t *)realloc(w->records, capacity);
+    if (records == NULL) {
+      return false;
+    }
+    w->records = records;
+    w->records_capacity = capacity;
+  }
+  memcpy(w->records + w->records_size, rel, n);
+  memcpy(w->records + w->records_size + n, hash, 32);
+  w->records_size += n + 32;
+  return true;
+}
 
 #ifdef _WIN32
 /** Hash through a handle that denies writing and deleting to everyone, and keep it in the hold:
@@ -229,13 +261,8 @@ static bool bc_native_walk(BC_NativeWalk *w, const char *dir, const char *rel, c
       continue;
     }
     uint8_t hash[32];
-    ok = bc_native_file_hash(w, path, hash);
-    if (ok) {
-      /* The NUL ends the path, so "a" + hash can never read as a longer path. */
-      blake3_hasher_update(&w->digest, sub, strlen(sub) + 1);
-      blake3_hasher_update(&w->digest, hash, sizeof(hash));
-      w->scan.files++;
-    }
+    ok = bc_native_file_hash(w, path, hash) && bc_native_record(w, sub, hash);
+    w->scan.files += ok;
   }
   for (int i = 0; i < list.count; i++) {
     free(list.items[i].name);
@@ -244,13 +271,15 @@ static bool bc_native_walk(BC_NativeWalk *w, const char *dir, const char *rel, c
   return ok;
 }
 
-bool bc_native_digest_held(const char *root,
-                           const char *const *skip,
-                           const int skip_count,
-                           const bool python,
-                           uint8_t r_digest[BC_NATIVE_DIGEST_SIZE],
-                           BC_NativeScan *r_scan,
-                           BC_NativeHold *hold)
+static bool bc_native_digest_walk(const char *root,
+                                  const char *const *skip,
+                                  const int skip_count,
+                                  const bool python,
+                                  uint8_t r_digest[BC_NATIVE_DIGEST_SIZE],
+                                  BC_NativeScan *r_scan,
+                                  BC_NativeHold *hold,
+                                  uint8_t **r_records,
+                                  size_t *r_records_size)
 {
   /* Its scan holds a path and its hashers about 4 KiB: keep it off the stack. Single threaded. */
   static BC_NativeWalk w;
@@ -259,6 +288,7 @@ bool bc_native_digest_held(const char *root,
   w.skip_count = skip_count;
   w.python = python;
   w.hold = hold;
+  w.keep = r_records != NULL;
   w.buffer = (uint8_t *)malloc(BC_NATIVE_READ_SIZE);
   if (w.buffer == NULL) {
     return false;
@@ -270,7 +300,116 @@ bool bc_native_digest_held(const char *root,
   if (r_scan != NULL) {
     *r_scan = w.scan;
   }
+  if (r_records != NULL) {
+    *r_records = ok ? w.records : NULL;
+    *r_records_size = ok ? w.records_size : 0;
+    if (!ok) {
+      free(w.records);
+    }
+  }
   return ok;
+}
+
+bool bc_native_digest_held(const char *root,
+                           const char *const *skip,
+                           const int skip_count,
+                           const bool python,
+                           uint8_t r_digest[BC_NATIVE_DIGEST_SIZE],
+                           BC_NativeScan *r_scan,
+                           BC_NativeHold *hold)
+{
+  return bc_native_digest_walk(root, skip, skip_count, python, r_digest, r_scan, hold, NULL, NULL);
+}
+
+bool bc_native_digest_records(const char *root,
+                              const char *const *skip,
+                              const int skip_count,
+                              const bool python,
+                              uint8_t r_digest[BC_NATIVE_DIGEST_SIZE],
+                              BC_NativeScan *r_scan,
+                              uint8_t **r_records,
+                              size_t *r_records_size)
+{
+  return bc_native_digest_walk(root, skip, skip_count, python, r_digest, r_scan, NULL, r_records, r_records_size);
+}
+
+void bc_native_records_digest(const uint8_t *records, const size_t size, uint8_t r_digest[BC_NATIVE_DIGEST_SIZE])
+{
+  blake3_hasher hasher;
+  blake3_hasher_init_derive_key(&hasher, BC_NATIVE_CONTEXT);
+  blake3_hasher_update(&hasher, records, size);
+  blake3_hasher_finalize(&hasher, r_digest, BC_NATIVE_DIGEST_SIZE);
+}
+
+typedef struct BC_NativeEntry {
+  const char *path;
+  const uint8_t *hash;
+} BC_NativeEntry;
+
+static int bc_native_entry_compare(const void *a, const void *b)
+{
+  return strcmp(((const BC_NativeEntry *)a)->path, ((const BC_NativeEntry *)b)->path);
+}
+
+/** Records as entries sorted by path (walk order is not path order: "a.b" < "a/b" bytewise, but
+ * the walk visits folder "a" before file "a.b"). \return the count, -1 if malformed. */
+static int bc_native_entries(const uint8_t *records, const size_t size, BC_NativeEntry **r_entries)
+{
+  int count = 0;
+  for (size_t at = 0; at < size; count++) {
+    const uint8_t *nul = (const uint8_t *)memchr(records + at, 0, size - at);
+    if (nul == NULL || nul == records + at || (size_t)(nul - records) + 1 + 32 > size) {
+      return -1;
+    }
+    at = (size_t)(nul - records) + 1 + 32;
+  }
+  *r_entries = (BC_NativeEntry *)malloc(sizeof(BC_NativeEntry) * (size_t)(count ? count : 1));
+  if (*r_entries == NULL) {
+    return -1;
+  }
+  size_t at = 0;
+  for (int i = 0; i < count; i++) {
+    (*r_entries)[i].path = (const char *)records + at;
+    at += strlen((const char *)records + at) + 1;
+    (*r_entries)[i].hash = records + at;
+    at += 32;
+  }
+  qsort(*r_entries, (size_t)count, sizeof(BC_NativeEntry), bc_native_entry_compare);
+  return count;
+}
+
+int bc_native_compare(const uint8_t *reference,
+                      const size_t reference_size,
+                      const uint8_t *current,
+                      const size_t current_size,
+                      void (*fn)(void *user, const char *change, const char *path),
+                      void *user)
+{
+  BC_NativeEntry *ref = NULL, *now = NULL;
+  const int ref_count = bc_native_entries(reference, reference_size, &ref);
+  const int now_count = ref_count < 0 ? -1 : bc_native_entries(current, current_size, &now);
+  if (ref_count < 0 || now_count < 0) {
+    free(ref);
+    return -1;
+  }
+  /* Both sorted: one merge walk. */
+  int changes = 0, i = 0, j = 0;
+  while (i < ref_count || j < now_count) {
+    const int order = i == ref_count ? 1 : j == now_count ? -1 : strcmp(ref[i].path, now[j].path);
+    const char *change = order < 0                                    ? "removed" :
+                         order > 0                                    ? "added" :
+                         memcmp(ref[i].hash, now[j].hash, 32) != 0 ? "changed" :
+                                                                        NULL;
+    if (change != NULL) {
+      fn(user, change, order < 0 ? ref[i].path : now[j].path);
+      changes++;
+    }
+    i += order <= 0;
+    j += order >= 0;
+  }
+  free(ref);
+  free(now);
+  return changes;
 }
 
 bool bc_native_digest(const char *root,

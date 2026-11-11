@@ -282,6 +282,15 @@ reach: one edited line in a module of the runtime's standard library (imported b
 starts) can save its textures, meshes and scripts to disk. The lower levels suit a game that
 accepts that risk for a faster start.
 
+**Which file.** A refused launch names what differs in a log next to the game executable,
+`<game>-integrity.log` (one line per file: `changed`, `added` or `removed`, then its path), and
+the error message gives the first one and the log's name. A launch that passes deletes the log.
+To tell which file, the export saves the digest's input, the path and hash of every checked file,
+as `.bc_code` in the player's folder: the game executable believes it only when it hashes to the
+digest of the manifest, and reads it only after a refusal, never on a normal start. Without it,
+or with a changed one, the log says which file cannot be told. A changed or missing player is
+logged the same way.
+
 The game executable and the player have their own checks and are not part of the digest. On
 Windows the game executable keeps every file it checked open until the player exits, shared for
 reading only: none can be replaced between the check and the moment the player loads it, even a
@@ -539,7 +548,7 @@ input = src                     # a folder (scanned for *.blend, *.py and the da
 | *the game manifest has been modified* / *the game manifest is corrupt* | The manifest (inside the executable, or `binarycrypt.manifest`) was edited or damaged. Encrypt again. |
 | *this executable carries no game and there is no binarycrypt.manifest next to it* | `bc_launcher` started directly, data was appended after the embedded manifest, or the manifest file was not shipped. Export with `bc_tool`. |
 | *... is missing* | The player or the main file is not where the manifest says. |
-| *a library or program (or Python file) of the game folder was changed, added or removed* | Integrity check: a file it covers differs from the export. Export again after changing the runtime or a script. |
+| *a library or program (or Python file) of the game folder was changed, added or removed* | Integrity check: a file it covers differs from the export; `<game>-integrity.log`, next to the game executable, names each one. Export again after changing the runtime or a script. |
 | *... cannot be removed (Python bytecode that was not part of the game ...)* | *Player + Libraries + Python* level: a `.pyc` in a folder the player cannot write. The game shipped without any; reinstall it. |
 | *cannot reach the key server*, *access denied*, ... | Online key: the provider's or key server's own message. |
 | *the key provider did not answer within 60 seconds* | Online key: the provider hung (store client not running?). |

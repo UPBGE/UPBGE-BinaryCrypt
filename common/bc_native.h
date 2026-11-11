@@ -23,7 +23,12 @@
  * digest = BLAKE3 in key derivation mode, context BC_NATIVE_CONTEXT, over: for each covered file,
  *          in walk order, relative path (UTF-8, '/' separators) || 0x00 || BLAKE3-256(contents)
  * Walk order: depth first, the entries of each folder sorted bytewise by name. Symbolic links to
- * folders and reparse points are not followed (bc_list_dir); links to files are hashed through. */
+ * folders and reparse points are not followed (bc_list_dir); links to files are hashed through.
+ *
+ * The digest input itself, the records, is what the export also saves as BC_NATIVE_RECORD in the
+ * player's folder. A launcher whose digest differs reads it, trusts it only when it hashes to the
+ * manifest's digest, and compares: which file was changed, added or removed (bc_native_compare).
+ * The success path never reads it. */
 
 #ifndef BC_NATIVE_H
 #define BC_NATIVE_H
@@ -40,6 +45,10 @@ extern "C" {
 
 #define BC_NATIVE_CONTEXT "UPBGE-BinaryCrypt native code v1"
 #define BC_NATIVE_DIGEST_SIZE 32
+/** The records of the export, in the player's folder. No code extension: never covered itself. */
+#define BC_NATIVE_RECORD ".bc_code"
+/** Largest record file a launcher reads: far above any game (about 100 bytes a file). */
+#define BC_NATIVE_RECORD_MAX (64u << 20)
 
 /** True when \a name (a file name, not a path) is native code by the rule above. */
 bool bc_is_native_code(const char *name);
@@ -79,6 +88,30 @@ typedef struct BC_NativeHold {
   int count;
   int capacity;
 } BC_NativeHold;
+
+/** bc_native_digest that also hands back its input, the records (see above), for BC_NATIVE_RECORD
+ * or for bc_native_compare. *r_records is malloc'ed (free it), NULL on failure. */
+bool bc_native_digest_records(const char *root,
+                              const char *const *skip,
+                              int skip_count,
+                              bool python,
+                              uint8_t r_digest[BC_NATIVE_DIGEST_SIZE],
+                              BC_NativeScan *r_scan,
+                              uint8_t **r_records,
+                              size_t *r_records_size);
+
+/** The digest of \a records: equal to the manifest's, they are the export's own. */
+void bc_native_records_digest(const uint8_t *records, size_t size, uint8_t r_digest[BC_NATIVE_DIGEST_SIZE]);
+
+/** Each file that differs between the export's records (\a reference) and the game folder's now
+ * (\a current), by path: \a fn gets "changed", "added" or "removed". \return how many, -1 when a
+ * record list is malformed or memory runs out. */
+int bc_native_compare(const uint8_t *reference,
+                      size_t reference_size,
+                      const uint8_t *current,
+                      size_t current_size,
+                      void (*fn)(void *user, const char *change, const char *path),
+                      void *user);
 
 /** bc_native_digest that keeps every hashed file open in \a hold (released by bc_native_release,
  * also on failure). */

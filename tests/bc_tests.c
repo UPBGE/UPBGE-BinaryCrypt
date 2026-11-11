@@ -847,6 +847,48 @@ static void test_brand(void)
 #endif
 }
 
+typedef struct NativeChanges {
+  char text[512];
+} NativeChanges;
+
+static void native_change(void *user, const char *change, const char *path)
+{
+  NativeChanges *c = (NativeChanges *)user;
+  snprintf(c->text + strlen(c->text), sizeof(c->text) - strlen(c->text), "%s %s;", change, path);
+}
+
+/** Append the record of \a path with a hash filled with \a byte. */
+static size_t native_record(uint8_t *out, size_t at, const char *path, const uint8_t byte)
+{
+  const size_t n = strlen(path) + 1;
+  memcpy(out + at, path, n);
+  memset(out + at + n, byte, 32);
+  return at + n + 32;
+}
+
+/** The export's records against the folder's now: by path, whatever the walk order. */
+static void test_native_compare(void)
+{
+  uint8_t ref[512], now[512];
+  size_t r = 0, n = 0;
+  /* Walk order: folder "a" before file "a.b", though "a.b" < "a/x" bytewise. */
+  r = native_record(ref, r, "a/x.dll", 1);
+  r = native_record(ref, r, "a.b.dll", 2);
+  r = native_record(ref, r, "gone.dll", 3);
+  n = native_record(now, n, "a/x.dll", 1);
+  n = native_record(now, n, "a.b.dll", 9);
+  n = native_record(now, n, "new.pyd", 4);
+  NativeChanges c = {""};
+  CHECK(bc_native_compare(ref, r, now, n, native_change, &c) == 3);
+  CHECK_STR(c.text, "changed a.b.dll;removed gone.dll;added new.pyd;");
+  c.text[0] = '\0';
+  CHECK(bc_native_compare(ref, r, ref, r, native_change, &c) == 0 && c.text[0] == '\0');
+  /* Cut short, or an empty path: malformed. */
+  CHECK(bc_native_compare(ref, r - 1, now, n, native_change, &c) == -1);
+  uint8_t empty[33] = {0};
+  CHECK(bc_native_compare(empty, sizeof(empty), now, n, native_change, &c) == -1);
+}
+
 static void test_native(void)
 {
   CHECK(bc_is_native_code("player.exe") && bc_is_native_code("Python311.DLL"));
@@ -872,6 +914,15 @@ static void test_native(void)
   uint8_t base[BC_NATIVE_DIGEST_SIZE], d[BC_NATIVE_DIGEST_SIZE], py[BC_NATIVE_DIGEST_SIZE];
   static BC_NativeScan scan;
   CHECK(bc_native_digest(root, skip, 2, false, base, &scan) && scan.files == 3 && scan.bytes == 12);
+  /* The records the export saves hash to the very digest the manifest carries. */
+  {
+    uint8_t *records = NULL, again[BC_NATIVE_DIGEST_SIZE], walked[BC_NATIVE_DIGEST_SIZE];
+    size_t records_size = 0;
+    CHECK(bc_native_digest_records(root, skip, 2, false, walked, NULL, &records, &records_size) && records != NULL);
+    bc_native_records_digest(records, records_size, again);
+    CHECK(memcmp(walked, base, sizeof(base)) == 0 && memcmp(again, base, sizeof(base)) == 0);
+    free(records);
+  }
   /* Libraries level: Python sources and bytecode, data, the skipped game executable and player
    * are not covered, and nothing is removed. */
   write_text("native/engine/4.5/python/lib/bge.py", "print('changed')");
@@ -2563,6 +2614,7 @@ int main(int argc, char **argv)
   test_envelope();
   test_embed();
   test_native();
+  test_native_compare();
   test_format();
   test_seal();
   test_compress();

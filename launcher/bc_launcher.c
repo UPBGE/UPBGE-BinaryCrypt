@@ -23,6 +23,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "bc_embed.h"
 #include "bc_key.h"
@@ -48,6 +49,139 @@ extern char **environ;
 #endif
 
 #define BC_READ_SIZE (1 << 20)
+
+static int bc_fail(const char *format, ...);
+
+/* -------------------------------------------------------------------------------------------- */
+/* Integrity log: when the check refuses the game, a file next to the game executable says what
+ * was changed, added or removed (support can ask for it; a store can verify those files). A
+ * launch that passes removes it, so it always describes the folder as it is. */
+
+typedef struct BC_Report {
+  FILE *log;
+  int count;
+  char first[BC_PATH_MAX + 16];
+} BC_Report;
+
+/** <game executable without its extension>-integrity.log, next to it. */
+static bool bc_report_path(const char *exe, char *out, const size_t size)
+{
+  char base[BC_PATH_MAX];
+  snprintf(base, sizeof(base), "%s", exe);
+  const size_t n = strlen(base), ext = strlen(bc_exe_extension());
+  if (ext > 0 && n > ext && bc_path_has_extension(base, bc_exe_extension())) {
+    base[n - ext] = '\0';
+  }
+  return (size_t)snprintf(out, size, "%s-integrity.log", base) < size;
+}
+
+/** Start the log with the time and \a what; NULL where the folder cannot be written. */
+static FILE *bc_report_open(const char *path, const char *what)
+{
+  FILE *f = bc_fopen(path, "w");
+  if (f != NULL) {
+    char when[32] = "";
+    const time_t now = time(NULL);
+    const struct tm *t = localtime(&now);
+    if (t != NULL) {
+      strftime(when, sizeof(when), "%Y-%m-%d %H:%M:%S", t);
+    }
+    fprintf(f, "%s  The game did not start: %s since it was exported.\n", when, what);
+  }
+  return f;
+}
+
+static void bc_report_change(void *user, const char *change, const char *path)
+{
+  BC_Report *r = (BC_Report *)user;
+  if (r->count++ == 0) {
+    snprintf(r->first, sizeof(r->first), "%s %s", change, path);
+  }
+  if (r->log != NULL) {
+    fprintf(r->log, "%-8s %s\n", change, path);
+  }
+}
+
+static void bc_report_close(BC_Report *r)
+{
+  if (r->log != NULL) {
+    fprintf(r->log, "Reinstall the game, or have the store verify its files.\n");
+    fclose(r->log);
+    r->log = NULL;
+  }
+}
+
+/** The player differs from the export, or is gone: refuse, saying so in the log too. */
+static int bc_refuse_player(const char *exe, const BC_Manifest *m, const char *change, const char *message)
+{
+  char log_path[BC_PATH_MAX];
+  BC_Report r = {NULL, 0, ""};
+  if (bc_report_path(exe, log_path, sizeof(log_path))) {
+    r.log = bc_report_open(log_path, "its player was changed");
+  }
+  const bool logged = r.log != NULL;
+  bc_report_change(&r, change, m->player_path);
+  bc_report_close(&r);
+  return bc_fail("%s%s%s", message, logged ? "; see " : "", logged ? bc_path_basename(log_path) : "");
+}
+
+/** The code of the game folder differs from the export: refuse, naming the files. The export's
+ * records (BC_NATIVE_RECORD, next to the player) count only when they hash to the manifest's
+ * digest; then a second walk of the folder, now, tells which file differs. */
+static int bc_refuse_code(const char *dir, const char *exe, const BC_Manifest *m, const char *const *skip, const bool python)
+{
+  const char *kind = python ? "library, program or Python file" : "library or program";
+  char log_path[BC_PATH_MAX], player_file[BC_PATH_MAX], player_dir[BC_PATH_MAX] = "", record[BC_PATH_MAX];
+  BC_Report r = {NULL, 0, ""};
+  if (bc_report_path(exe, log_path, sizeof(log_path))) {
+    r.log = bc_report_open(log_path, "files of its folder were changed, added or removed");
+  }
+  const bool logged = r.log != NULL;
+
+  uint8_t *reference = NULL, *current = NULL;
+  size_t reference_size = 0, current_size = 0;
+  uint64_t size = 0, mtime = 0;
+  bool listed = false;
+  if (bc_path_join(player_file, sizeof(player_file), dir, m->player_path)) {
+    bc_path_dirname(player_dir, sizeof(player_dir), player_file);
+  }
+  if (player_dir[0] != '\0' && bc_path_join(record, sizeof(record), player_dir, BC_NATIVE_RECORD) && bc_file_stat(record, &size, &mtime) &&
+      size <= BC_NATIVE_RECORD_MAX && (reference = (uint8_t *)malloc((size_t)size + 1)) != NULL)
+  {
+    FILE *f = bc_fopen(record, "rb");
+    uint8_t digest[BC_NATIVE_DIGEST_SIZE];
+    reference_size = (size_t)size;
+    listed = f != NULL && fread(reference, 1, reference_size, f) == reference_size;
+    if (f != NULL) {
+      fclose(f);
+    }
+    if (listed) {
+      bc_native_records_digest(reference, reference_size, digest);
+      listed = crypto_verify32(digest, m->native_digest) == 0 &&
+               bc_native_digest_records(dir, skip, 2, python, digest, NULL, &current, &current_size) &&
+               bc_native_compare(reference, reference_size, current, current_size, bc_report_change, &r) > 0;
+    }
+  }
+  free(reference);
+  free(current);
+  if (!listed && r.log != NULL) {
+    fprintf(r.log, "Which file cannot be told: the list of the exported files (%s) is missing or was changed.\n", BC_NATIVE_RECORD);
+  }
+  bc_report_close(&r);
+  char more[48] = "";
+  if (listed && r.count > 1) {
+    snprintf(more, sizeof(more), ", and %d more", r.count - 1);
+  }
+  return bc_fail("cannot start the game: a %s of the game folder was changed, added or removed since the game was "
+                 "exported%s%s%s%s%s%s",
+                 kind,
+                 listed ? " (" : "",
+                 listed ? r.first : "",
+                 more,
+                 listed ? ")" : "",
+                 logged ? "; see " : "",
+                 logged ? bc_path_basename(log_path) : "");
+}
 
 static int bc_fail(const char *format, ...)
 {
@@ -625,8 +759,10 @@ int main(int argc, char **argv)
   }
 
   BC_PlayerFile player = bc_player_open(player_path);
+  char message[2 * BC_PATH_MAX];
   if (player == BC_PLAYER_INVALID) {
-    return bc_fail("cannot start the game: the player '%s' is missing", player_path);
+    snprintf(message, sizeof(message), "cannot start the game: the player '%s' is missing", player_path);
+    return bc_refuse_player(exe, &manifest, "removed", message);
   }
   uint8_t hash[BC_PLAYER_HASH_SIZE];
   if (!bc_player_hash(player, hash)) {
@@ -635,8 +771,8 @@ int main(int argc, char **argv)
   }
   if (crypto_verify32(hash, manifest.player_hash) != 0) {
     bc_player_close(player);
-    return bc_fail("cannot start the game: the player '%s' has been modified or replaced",
-                   player_path);
+    snprintf(message, sizeof(message), "cannot start the game: the player '%s' has been modified or replaced", player_path);
+    return bc_refuse_player(exe, &manifest, "changed", message);
   }
   const bool python_check = (manifest.flags & BC_MANIFEST_PYTHON_CHECK) != 0;
   /* Every checked file stays open until the player exits (Windows: nobody can replace it). */
@@ -664,9 +800,14 @@ int main(int argc, char **argv)
     if (crypto_verify32(digest, manifest.native_digest) != 0) {
       bc_native_release(&hold);
       bc_player_close(player);
-      return bc_fail("cannot start the game: a %s of the game folder was changed, added or removed "
-                     "since the game was exported",
-                     python_check ? "library, program or Python file" : "library or program");
+      return bc_refuse_code(dir, exe, &manifest, skip, python_check);
+    }
+  }
+  /* Checked: a log of an earlier refusal no longer describes this folder. */
+  {
+    char log_path[BC_PATH_MAX];
+    if (bc_report_path(exe, log_path, sizeof(log_path))) {
+      bc_remove(log_path);
     }
   }
 
