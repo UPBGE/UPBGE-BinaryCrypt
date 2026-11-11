@@ -395,9 +395,15 @@ def main():
     parser.add_argument("--tls-cert", help="certificate chain (PEM) to serve HTTPS directly")
     parser.add_argument("--tls-key", help="private key (PEM) of the certificate")
     args = parser.parse_args()
+    # A console flushes every line, a pipe (Git Bash, a service log) only when full: line by line
+    # here, so the server says at once that it listens.
+    sys.stdout.reconfigure(line_buffering=True)
 
     with open(args.config, encoding="utf-8") as f:
-        config = json.load(f)
+        try:
+            config = json.load(f)
+        except json.JSONDecodeError as error:
+            sys.exit(f"{args.config}: {error} (in JSON a Windows path is written with / or \\\\, not \\)")
     host, port = args.listen.rsplit(":", 1)
     server = KeyServer((host, int(port)), config, os.path.dirname(os.path.abspath(args.config)))
     if args.tls_cert:
@@ -408,8 +414,13 @@ def main():
         platforms = [name for name, on in (("steam", game.steam), ("epic", game.epic), ("itch", game.itch),
                                            ("meta", game.meta), ("dev", game.dev_tokens)) if on]
         print(f"{game.name}: {len(game.keys)} key(s), {', '.join(platforms) or 'no platform'}")
-    print(f"listening on {'https' if args.tls_cert else 'http'}://{args.listen}/key")
-    server.serve_forever()
+    print(f"listening on {'https' if args.tls_cert else 'http'}://{args.listen}/key (Ctrl+C stops)")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("stopped")
+    finally:
+        server.server_close()
 
 
 if __name__ == "__main__":
