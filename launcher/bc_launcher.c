@@ -264,6 +264,7 @@ static void bc_to_backslashes(wchar_t *s)
 
 static int bc_run_player(BC_PlayerFile player_file,
                          const char *player_path,
+                         const char *title,
                          const char *main_path,
                          const char *work_dir,
                          uint8_t *keys,
@@ -271,6 +272,7 @@ static int bc_run_player(BC_PlayerFile player_file,
 {
   (void)player_file; /* Held open by the caller until the process exists. */
   wchar_t *wplayer = bc_utf16(player_path);
+  wchar_t *wtitle = bc_utf16(title);
   wchar_t *wmain = bc_utf16(main_path);
   wchar_t *wdir = bc_utf16(work_dir);
   static wchar_t cmd[32768];
@@ -278,13 +280,15 @@ static int bc_run_player(BC_PlayerFile player_file,
   int result = -1;
   HANDLE read_end = NULL, write_end = NULL;
 
-  if (wplayer == NULL || wmain == NULL || wdir == NULL) {
+  if (wplayer == NULL || wtitle == NULL || wmain == NULL || wdir == NULL) {
     goto cleanup;
   }
   bc_to_backslashes(wplayer);
   bc_to_backslashes(wmain);
   bc_to_backslashes(wdir);
-  if (!bc_append_quoted(cmd, 32768, &len, wplayer) || !bc_append_quoted(cmd, 32768, &len, wmain)) {
+  if (!bc_append_quoted(cmd, 32768, &len, wplayer) || !bc_append_quoted(cmd, 32768, &len, L"-t") ||
+      !bc_append_quoted(cmd, 32768, &len, wtitle) || !bc_append_quoted(cmd, 32768, &len, wmain))
+  {
     goto cleanup;
   }
 
@@ -364,6 +368,7 @@ cleanup:
     CloseHandle(write_end);
   }
   free(wplayer);
+  free(wtitle);
   free(wmain);
   free(wdir);
   return result;
@@ -395,6 +400,7 @@ static void bc_cloexec_all_but(const int keep)
 
 static int bc_run_player(BC_PlayerFile player_file,
                          const char *player_path,
+                         const char *title,
                          const char *main_path,
                          const char *work_dir,
                          uint8_t *keys,
@@ -433,7 +439,7 @@ static int bc_run_player(BC_PlayerFile player_file,
     bc_cloexec_all_but(fds[0]);
     setenv(BC_KEY_PIPE_ENV, value, 1);
     if (chdir(work_dir) == 0) {
-      char *args[] = {(char *)player_path, (char *)main_path, NULL};
+      char *args[] = {(char *)player_path, (char *)"-t", (char *)title, (char *)main_path, NULL};
 #  ifdef __linux__
       /* Execute the very file that was hashed, not whatever the path names by now. */
       fexecve(player_file, args, environ);
@@ -652,7 +658,15 @@ int main(int argc, char **argv)
     memcpy(keys[0], bc_build_key(), BC_KEY_SIZE);
   }
   bc_build_key_forget();
-  const int exit_code = bc_run_player(player, player_path, main_path, dir, &keys[0][0], key_count);
+  /* The player's window shows the game's name, the executable's: a renamed game shows its new
+   * name, whichever .blend file the game loads. */
+  char title[BC_PATH_MAX];
+  snprintf(title, sizeof(title), "%s", bc_path_basename(exe));
+  const size_t title_len = strlen(title), ext_len = strlen(bc_exe_extension());
+  if (ext_len > 0 && title_len > ext_len && bc_path_has_extension(title, bc_exe_extension())) {
+    title[title_len - ext_len] = '\0';
+  }
+  const int exit_code = bc_run_player(player, player_path, title, main_path, dir, &keys[0][0], key_count);
   crypto_wipe(keys, BC_KEY_TABLE_SIZE);
   bc_native_release(&hold);
   bc_player_close(player);

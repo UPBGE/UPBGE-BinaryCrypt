@@ -89,10 +89,13 @@ static bool bc_leaked(void)
 
 int main(int argc, char **argv)
 {
-  if (argc != 2) {
-    fprintf(stderr, "fake player: expected exactly one argument, got %d\n", argc - 1);
+  /* Exactly what the launcher passes: -t <game name> <main file>. */
+  if (argc != 4 || strcmp(argv[1], "-t") != 0) {
+    fprintf(stderr, "fake player: expected -t <title> <file>, got %d argument(s)\n", argc - 1);
     return 13;
   }
+  const char *title = argv[2];
+  const char *main_file = argv[3];
   const char *pipe_value = getenv(BC_KEY_PIPE_ENV);
   if (pipe_value == NULL) {
     return 10;
@@ -106,10 +109,10 @@ int main(int argc, char **argv)
   uint64_t plain_size = 0, expected_size = 0;
   bool decrypted = false;
   for (int i = 0; i < key_count && !decrypted; i++) {
-    decrypted = bc_test_decrypt(argv[1], keys[i], &plain, &plain_size); /* Checks the key id first. */
+    decrypted = bc_test_decrypt(main_file, keys[i], &plain, &plain_size); /* Checks the key id first. */
   }
   if (!decrypted) {
-    fprintf(stderr, "fake player: cannot decrypt '%s'\n", argv[1]);
+    fprintf(stderr, "fake player: cannot decrypt '%s'\n", main_file);
     return 12;
   }
   const char *expected_path = getenv("BC_TEST_EXPECTED");
@@ -137,9 +140,10 @@ int main(int argc, char **argv)
     fprintf(stderr, "fake player: inherited a handle of the launcher's parent\n");
     return 15;
   }
-  printf("fake player: '%s' decrypted correctly (%llu bytes, %d key(s))\n",
-         argv[1],
+  printf("fake player: '%s' decrypted correctly (%llu bytes, %d key(s)) in the window '%s'\n",
+         main_file,
          (unsigned long long)plain_size,
-         key_count);
+         key_count,
+         title);
   return 0;
 }

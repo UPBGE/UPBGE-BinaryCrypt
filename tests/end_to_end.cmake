@@ -97,6 +97,8 @@ endif()
 set(ENV{BC_TEST_EXPECTED} "${SRC}/game.blend")
 bc_run(TRUE "${DIST}/${game}")
 bc_expect_output("decrypted correctly")
+# The player's window shows the game's name (a space in it survives the Windows command line).
+bc_expect_output("in the window 'My Game'")
 # A handle left inheritable by whoever starts the game (a store client, a script) must not reach
 # the player: the launcher passes the key pipe and its standard streams, nothing else.
 bc_run(TRUE "${BC_TESTS}" --spawn-leaking "${DIST}/${game}")
@@ -172,6 +174,7 @@ bc_run(TRUE "${DIST}/${game}" -p evil.py)
 # The game executable keeps working when renamed or moved with its folder.
 file(RENAME "${DIST}/${game}" "${DIST}/renamed${BC_EXE_SUFFIX}")
 bc_run(TRUE "${DIST}/renamed${BC_EXE_SUFFIX}")
+bc_expect_output("in the window 'renamed'")
 file(RENAME "${DIST}/renamed${BC_EXE_SUFFIX}" "${DIST}/${game}")
 
 # A modified player is refused before it gets the key.

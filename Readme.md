@@ -67,7 +67,8 @@ out of reach of any file check.
    key.
 3. **Launch.** The game executable reads and authenticates its manifest, hashes the player and
    the code of the game folder, refuses to continue on any mismatch, starts the player on
-   the main file and writes the key into an inherited pipe, then wipes its own copy. The key never
+   the main file, with the game's name (that of the executable) as its window title, and writes
+   the key into an inherited pipe, then wipes its own copy. The key never
    travels on the command line or through a file. The player inherits that pipe and its standard
    streams only, not other handles of whoever started the game.
 4. **Loading.** The player reads the key into a memory page locked out of swap (and, on Linux,
