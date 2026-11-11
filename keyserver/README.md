@@ -46,12 +46,13 @@ game executable ──runs──> key provider ──HTTPS──> key server
 
 1. **Project.** In `bc_tool`, set *Key* to *Online*; the *Key file* is created on the first
    export, next to the project file unless you choose another place outside the game folder. Set
-   the *Provider* (for example `provider/bc_provider_steam.exe`, copied into the game folder
-   beforehand: *Store* fills it in) and the server *URL*.
+   the *Store*, choose the built *Provider* where it is, and set the server *URL*. Every export
+   copies the provider into the game folder's `provider/`, with the store's library
+   (`steam_api64.dll`, `EOSSDK-Win64-Shipping.dll`...) that the provider build puts next to it:
+   with the integrity check (libraries by default) the game refuses libraries added or changed
+   after the export, so they must be there when it runs.
    *Offline after 1st launch* keeps the keys on the player's computer after one successful launch.
-   Copy the provider and the store's libraries (`steam_api64.dll`, `EOSSDK-Win64-Shipping.dll`...)
-   into the game folder's `provider/` **before exporting**: with the integrity check (libraries by default) the
-   game refuses libraries added or changed after the export. Shipping these libraries next to a
+   Shipping these libraries next to a
    GPL game is mere aggregation, which the GPL permits: only the provider, a separate MIT program,
    loads them, never the launcher or the player, and they are needed only with an online key.
    *New key per update* gives every published update its own key (see the main README).
@@ -77,10 +78,10 @@ game executable ──runs──> key provider ──HTTPS──> key server
   and put it (64 hex digits) in the `steam.ticket_key` field. Never ship it.
 - `steam.library`: Valve's `sdkencryptedappticket` library for the server's platform, from the
   Steamworks SDK (under `public/steam/lib/`).
-- Build the provider: `cmake -S keyserver/providers -B build-providers -DBCP_STEAMWORKS_SDK=<sdk>`,
-  then copy `bc_provider_steam(.exe)` and `steam_api64.dll` / `libsteam_api.so` into the game
-  folder. To test outside Steam, put a `steam_appid.txt` with your app id in the game folder (never
-  ship it).
+- Build the provider: `cmake -S keyserver/providers -B build-providers -DBCP_STEAMWORKS_SDK=<sdk>`.
+  The build puts `steam_api64.dll` / `libsteam_api.so` next to `bc_provider_steam(.exe)`; choose
+  the provider there in `bc_tool`, every export copies both. To test outside Steam, put a
+  `steam_appid.txt` with your app id in the game folder (never ship it).
 - Steam allows one ticket request per minute; a relaunch within that minute reuses the previous
   ticket (`max_age` must allow it, default one hour).
 
@@ -89,7 +90,7 @@ game executable ──runs──> key provider ──HTTPS──> key server
 - Build the provider with your product's values from the Epic Developer Portal:
   `-DBCP_EOS_SDK=<SDK> -DBCP_EPIC_PRODUCT_ID=... -DBCP_EPIC_SANDBOX_ID=... -DBCP_EPIC_DEPLOYMENT_ID=...
   -DBCP_EPIC_CLIENT_ID=... -DBCP_EPIC_CLIENT_SECRET=... -DBCP_EPIC_CATALOG_ITEM_ID=...`
-  (client credentials of a *GameClient* policy, which are meant to ship in games). Copy
+  (client credentials of a *GameClient* policy, which are meant to ship in games). The build puts
   `EOSSDK-Win64-Shipping.dll` next to it.
 - The Epic launcher passes `-AUTH_PASSWORD=<exchange code>` to the game executable, which forwards
   its arguments to the provider (never to the player).
@@ -115,7 +116,7 @@ game executable ──runs──> key provider ──HTTPS──> key server
   (download keys).
 - Players must start the game from the itch app. A copy downloaded from the web page and started
   directly has no login and does not start: say so on the game's page.
-- `bc_provider_itch` needs no SDK: it builds with the others. Copy it into the game folder.
+- `bc_provider_itch` needs no SDK: it builds with the others. Choose it in `bc_tool`.
 
 ### Meta (Meta Horizon Store, PC VR)
 

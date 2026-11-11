@@ -1577,6 +1577,8 @@ typedef struct LogCapture {
   int copied;
   /* The UPBGE runtime copy: files copied and removed, or -1 when it said it was up to date. */
   int runtime_copied, runtime_removed;
+  /* The same for the key provider. */
+  int provider_copied, provider_removed;
   char last_encrypted[1024];
   char last_error[1024];
   char last_warning[1024];
@@ -1598,6 +1600,11 @@ static void capture_log(void *user, BC_LogLevel level, const char *message)
       strncmp(message, "UPBGE runtime up to date", 24) == 0)
   {
     c->runtime_copied = -1;
+  }
+  if (sscanf(message, "Key provider: %d file(s) copied (%*[^)]), %d old", &c->provider_copied, &c->provider_removed) != 2 &&
+      strncmp(message, "Key provider up to date", 23) == 0)
+  {
+    c->provider_copied = -1;
   }
   if (level == BC_LOG_WARNING) {
     c->warnings++;
@@ -2407,6 +2414,112 @@ static void test_runtime_job(void)
   bc_project_free(&p);
 }
 
+/** A key provider outside the game folder: every export copies it into provider/, with the store
+ * library beside it, the same way as the runtime (only what changed; a copy changed on purpose
+ * stays; what a switch of provider leaves behind goes). */
+static void test_provider_copy(void)
+{
+  char saved_launcher[BC_PATH_MAX], steam[64], library[64], dev[64], copy[64], path[BC_PATH_MAX];
+  snprintf(saved_launcher, sizeof(saved_launcher), "%s", g_launcher);
+  work_path(g_launcher, "pc/tool/bc_launcher");
+  write_text("pc/tool/bc_launcher", "pretend this is the launcher");
+  write_blend("pc/src/game.blend", 3000, 37);
+  write_text("pc/dist/engine/player", "pretend this is the UPBGE player");
+  snprintf(steam, sizeof(steam), "pc/providers/bc_provider_steam%s", bc_exe_extension());
+  snprintf(library, sizeof(library), "pc/providers/%s", bc_key_store_library(BC_STORE_STEAM));
+  snprintf(dev, sizeof(dev), "pc/providers/bc_provider_dev%s", bc_exe_extension());
+  write_text(steam, "steam provider");
+  write_text(dev, "dev provider");
+
+  BC_Project p;
+  bc_project_init(&p);
+  p.key_mode = BC_KEY_ONLINE;
+  work_path(p.key_file, "pc/content.key");
+  work_path(p.source_root, "pc/src");
+  work_path(p.output_dir, "pc/dist");
+  snprintf(p.player, sizeof(p.player), "engine/player");
+  snprintf(p.game_name, sizeof(p.game_name), "Game");
+  work_path(p.main, "pc/src/game.blend");
+  bc_project_add_input(&p, p.main);
+  work_path(p.key_provider_from, steam);
+  char rel[BC_PATH_MAX];
+  CHECK(bc_project_key_store(&p) == BC_STORE_STEAM);
+  CHECK(strcmp(bc_project_provider(&p, rel, sizeof(rel)), BC_DEFAULT_PROVIDER_DIR "/") > 0 &&
+        strcmp(bc_path_basename(rel), bc_path_basename(p.key_provider_from)) == 0);
+
+  /* No library beside it: the provider alone, and a note naming where the library goes (after the
+   * warning that the key file was created). */
+  LogCapture c;
+  CHECK(run_job(&p, &c) == 0 && c.errors == 0 && c.warnings == 2 && c.provider_copied == 1);
+  CHECK(strstr(c.last_warning, "every export copies it") != NULL && strstr(c.last_warning, "providers/)") != NULL);
+  snprintf(copy, sizeof(copy), "pc/dist/provider/%s", bc_path_basename(steam));
+  CHECK(work_text_is(copy, "steam provider"));
+  CHECK(work_exists("pc/dist/provider/" BC_RUNTIME_RECORD));
+  {
+    BC_Manifest m;
+    char game[BC_PATH_MAX];
+    work_path(game, "pc/dist/Game");
+    strcat(game, bc_exe_extension());
+    CHECK(bc_embed_read(game, bc_build_key(), &m) == BC_MANIFEST_OK);
+    CHECK_STR(m.provider_path, rel);
+  }
+  /* The library beside it comes along; then nothing to do. */
+  write_text(library, "steam library");
+  CHECK(run_job(&p, &c) == 0 && c.errors == 0 && c.warnings == 0 && c.provider_copied == 1 && c.provider_removed == 0);
+  snprintf(copy, sizeof(copy), "pc/dist/provider/%s", bc_key_store_library(BC_STORE_STEAM));
+  CHECK(work_text_is(copy, "steam library"));
+  CHECK(run_job(&p, &c) == 0 && c.errors == 0 && c.provider_copied == -1);
+  /* A signed copy stays until the provider changes. */
+  snprintf(copy, sizeof(copy), "pc/dist/provider/%s", bc_path_basename(steam));
+  write_text(copy, "signed");
+  CHECK(run_job(&p, &c) == 0 && c.errors == 0 && c.provider_copied == -1 && work_text_is(copy, "signed"));
+  write_text(steam, "steam provider, rebuilt");
+  CHECK(run_job(&p, &c) == 0 && c.errors == 0 && c.provider_copied == 1 && work_text_is(copy, "steam provider, rebuilt"));
+
+  /* Another provider: the Steam files go, files of your own in provider/ stay. */
+  write_text("pc/dist/provider/mine.txt", "mine");
+  work_path(p.key_provider_from, dev);
+  CHECK(bc_project_key_store(&p) == BC_STORE_CUSTOM);
+  CHECK(run_job(&p, &c) == 0 && c.errors == 0 && c.provider_copied == 1 && c.provider_removed == 2);
+  CHECK(!work_exists(copy) && work_text_is("pc/dist/provider/mine.txt", "mine"));
+  snprintf(copy, sizeof(copy), "pc/dist/provider/%s", bc_path_basename(dev));
+  CHECK(work_text_is(copy, "dev provider"));
+
+  /* The project keeps it, relative to the project file. */
+  char project_file[BC_PATH_MAX], err[BC_PATH_MAX + 128];
+  BC_Project loaded;
+  bc_project_init(&loaded);
+  work_path(project_file, "pc/game.bcproj");
+  CHECK(bc_project_save(&p, project_file, err, sizeof(err)));
+  {
+    uint8_t *text;
+    uint64_t text_size;
+    CHECK(bc_test_read_file(project_file, &text, &text_size));
+    text = (uint8_t *)realloc(text, (size_t)text_size + 1);
+    text[text_size] = '\0';
+    CHECK(strstr((const char *)text, "\nkey_provider_from = providers/bc_provider_dev") != NULL);
+    free(text);
+  }
+  CHECK(bc_project_load(&loaded, project_file, err, sizeof(err)));
+  CHECK_STR(loaded.key_provider_from, p.key_provider_from);
+  bc_project_free(&loaded);
+
+  /* Refused: a missing provider, one already inside the game folder, a source file where the
+   * copy goes. */
+  work_path(p.key_provider_from, "pc/providers/missing");
+  CHECK(run_job(&p, &c) == -2 && strstr(c.last_error, "not found") != NULL);
+  work_path(p.key_provider_from, copy);
+  CHECK(run_job(&p, &c) == -2 && strstr(c.last_error, "inside the game folder") != NULL);
+  work_path(p.key_provider_from, dev);
+  snprintf(copy, sizeof(copy), "pc/src/provider/%s", bc_path_basename(dev));
+  write_text(copy, "a source file where the provider goes");
+  work_path(path, copy);
+  bc_project_add_input(&p, path);
+  CHECK(run_job(&p, &c) == -2 && strstr(c.last_error, "would overwrite the key provider") != NULL);
+  snprintf(g_launcher, sizeof(g_launcher), "%s", saved_launcher);
+  bc_project_free(&p);
+}
+
 #ifdef _WIN32
 /** Through the job: the player is branded before hashing, the game executable before the manifest
  * is appended, and an already branded player is never rewritten. */
@@ -2623,6 +2736,7 @@ int main(int argc, char **argv)
   test_keyring();
   test_job();
   test_runtime_job();
+  test_provider_copy();
 #ifdef _WIN32
   test_brand_job();
 #endif

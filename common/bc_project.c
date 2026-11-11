@@ -32,7 +32,7 @@ bool bc_project_key_file(const BC_Project *p, char *out, const size_t size)
 BC_KeyStore bc_project_key_store(const BC_Project *p)
 {
   /* The file name without bc_exe_extension(), any case: Windows names are case-insensitive. */
-  const char *name = bc_path_basename(p->key_provider);
+  const char *name = bc_path_basename(p->key_provider_from[0] != '\0' ? p->key_provider_from : p->key_provider);
   size_t n = strlen(name);
   const size_t ext = strlen(bc_exe_extension());
   if (ext > 0 && n > ext && bc_path_has_extension(name, bc_exe_extension())) {
@@ -255,6 +255,18 @@ const char *bc_project_player(const BC_Project *p)
   return p->upbge_dir[0] != '\0' ? BC_RUNTIME_DIR "/" BC_RUNTIME_PLAYER : p->player;
 }
 
+const char *bc_project_provider(const BC_Project *p, char *buf, const size_t size)
+{
+  if (p->key_provider_from[0] == '\0') {
+    return p->key_provider;
+  }
+  const int n = snprintf(buf, size, BC_DEFAULT_PROVIDER_DIR "/%s", bc_path_basename(p->key_provider_from));
+  if (n < 0 || (size_t)n >= size) {
+    buf[0] = '\0';
+  }
+  return buf;
+}
+
 /* -------------------------------------------------------------------------------------------- */
 /* Text format */
 
@@ -406,6 +418,9 @@ bool bc_project_load(BC_Project *p, const char *file_path, char *err, size_t err
       ok = (size_t)snprintf(p->key_provider, sizeof(p->key_provider), "%s", value) < sizeof(p->key_provider);
       bc_path_normalize(p->key_provider);
     }
+    else if (strcmp(key, "key_provider_from") == 0) {
+      ok = value[0] == '\0' || bc_resolve(p->key_provider_from, project_dir, value);
+    }
     else if (strcmp(key, "key_url") == 0) {
       ok = (size_t)snprintf(p->key_url, sizeof(p->key_url), "%s", value) < sizeof(p->key_url);
     }
@@ -552,9 +567,12 @@ bool bc_project_save(const BC_Project *p, const char *file_path, char *err, size
   if (p->key_file[0] != '\0') {
     bc_write_path(f, "key_file", project_dir, p->key_file);
   }
-  if (p->key_mode == BC_KEY_ONLINE || p->key_provider[0] != '\0' || p->key_url[0] != '\0') {
+  if (p->key_mode == BC_KEY_ONLINE || p->key_provider[0] != '\0' || p->key_provider_from[0] != '\0' || p->key_url[0] != '\0') {
     if (p->key_provider[0] != '\0') {
       bc_write_value(f, "key_provider", p->key_provider);
+    }
+    if (p->key_provider_from[0] != '\0') {
+      bc_write_path(f, "key_provider_from", project_dir, p->key_provider_from);
     }
     if (p->key_url[0] != '\0') {
       bc_write_value(f, "key_url", p->key_url);

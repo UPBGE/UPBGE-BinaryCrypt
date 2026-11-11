@@ -398,8 +398,13 @@ player is the same in both modes.
   `steam_appid.txt` left in the game folder (for testing only: never ship it), for itch.io a
   missing `.itch.toml`, for Meta a key kept after the first launch. They are notes, not errors:
   the export goes ahead and repeats them in the log.
-- *Provider*: path inside the game folder, like the player. *URL*: the key server, given to the
-  provider.
+- *Provider*: choose it where it is, for example the folder the providers were built in: every
+  export copies it into the game folder's `provider/`, with the store's library when it is next to
+  it (the provider build puts it there), only when they changed, like the runtime into `engine/`
+  (a copy you signed stays until the original changes; choosing another provider removes the old
+  copies, never files of your own in `provider/`). One already inside the game folder is used as
+  it is. *Store* switches to the store's provider in the same folder. *URL*: the key server, given
+  to the provider.
 - *Always online*, or *Offline after 1st launch*: after one successful launch the key stays on the
   player's computer (Windows: protected with DPAPI for that Windows user; Linux and macOS: bound to
   the machine id and user, as hard to recover as the build key from the launcher).
@@ -524,6 +529,8 @@ key = online                    # project (default) | online | build
 key_file = keys/mygame.key      # project, online: created on the first export; default
                                 #   <project name>.key next to the project file
 key_provider = provider/bc_provider_steam.exe  # online: relative to the game folder
+key_provider_from = ../providers/bc_provider_steam.exe  # online, optional: copied into provider/
+                                #   with its store library by every export
 key_url = https://keys.example.com/key       # online: given to the provider
 key_cache = none                # online: none | permanent (offline after the first launch)
 key_rotation = off              # online: off (one key) | per_update (a new key per update)

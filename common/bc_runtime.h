@@ -1,7 +1,8 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 
 /* UPBGE runtime copy: the player and what it loads, from a UPBGE folder (a release, or the bin
- * folder of a build) into the game folder's engine/, at every export.
+ * folder of a build) into the game folder's engine/, at every export. The key provider and its
+ * store library go into provider/ the same way (bc_runtime_begin_files).
  *
  * Only what the player needs is taken, by name (BC_RUNTIME_CONTENTS): never the editor, the build
  * tools, the batch files, debug symbols (.pdb) or Python bytecode (the Python integrity level would
@@ -99,6 +100,18 @@ typedef struct BC_RuntimeCopy {
  * folder has no player or cannot be read.
  */
 bool bc_runtime_begin(BC_RuntimeCopy *c, const char *upbge_dir, const char *engine_dir, char *err, size_t err_size);
+
+/**
+ * The same for \a name_count files of \a from_dir, by name, into \a to_dir: the key provider and its
+ * store library. Each must exist. A recorded file no longer named is removed, as above.
+ */
+bool bc_runtime_begin_files(BC_RuntimeCopy *c,
+                            const char *from_dir,
+                            const char *const *names,
+                            int name_count,
+                            const char *to_dir,
+                            char *err,
+                            size_t err_size);
 
 /** One unit of work with \a buffer: remove a file gone from the UPBGE folder, or copy one buffer.
  * \return 1 while work remains, 0 when done, -1 on failure (\a err; the partial copy is removed). */

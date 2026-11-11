@@ -167,13 +167,14 @@ jobs:
           Add -DBCP_KEY_URL=https://your.key.server/key to the first cmake command to build the key
           server address into the provider; otherwise the game's project gives it.
 
-          Copy into the provider/ folder of the game folder (beside engine/) before exporting with
-          bc_tool (the Runtime Check hashes the game's native code):
+          In bc_tool (Protection section), set Store to $2 and choose the built provider as
+          Provider: every export copies it into the game folder's provider/ (beside engine/), with
+          the library the build put next to it:
 
             $6
 
-          Then set Store to $2 in bc_tool (Protection section). The key server side is described
-          in keyserver/README.md, section "$7", in the keyserver folder of this package.
+          The key server side is described in keyserver/README.md, section "$7", in the keyserver
+          folder of this package.
           EOF
           }
           sdk_note bc_provider_steam Steam "the Steamworks SDK (partner.steamgames.com)" "" \

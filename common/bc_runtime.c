@@ -330,6 +330,8 @@ static bool bc_runtime_load_record(BC_RuntimeCopy *c, BC_RuntimeFile **r_rec, in
 /* -------------------------------------------------------------------------------------------- */
 /* Copy */
 
+static bool bc_runtime_plan(BC_RuntimeCopy *c, char *err, size_t err_size);
+
 bool bc_runtime_begin(BC_RuntimeCopy *c, const char *upbge_dir, const char *engine_dir, char *err, const size_t err_size)
 {
   memset(c, 0, sizeof(*c));
@@ -374,6 +376,48 @@ bool bc_runtime_begin(BC_RuntimeCopy *c, const char *upbge_dir, const char *engi
     bc_runtime_end(c);
     return false;
   }
+  return bc_runtime_plan(c, err, err_size);
+}
+
+bool bc_runtime_begin_files(BC_RuntimeCopy *c,
+                            const char *from_dir,
+                            const char *const *names,
+                            const int name_count,
+                            const char *to_dir,
+                            char *err,
+                            const size_t err_size)
+{
+  memset(c, 0, sizeof(*c));
+  if ((size_t)snprintf(c->from, sizeof(c->from), "%s", from_dir) >= sizeof(c->from) ||
+      (size_t)snprintf(c->to, sizeof(c->to), "%s", to_dir) >= sizeof(c->to) || c->from[0] == '\0')
+  {
+    bc_runtime_error(err, err_size, "Invalid folder '%s'", from_dir);
+    return false;
+  }
+  char path[BC_PATH_MAX];
+  for (int i = 0; i < name_count; i++) {
+    uint64_t size, mtime;
+    /* One name per record line, directly in to_dir. */
+    if (names[i][0] == '\0' || strpbrk(names[i], "/\\\n\r") != NULL || !bc_path_join(path, sizeof(path), c->from, names[i]) ||
+        !bc_file_stat(path, &size, &mtime))
+    {
+      bc_runtime_error(err, err_size, "Cannot read '%s/%s'", c->from, names[i]);
+      bc_runtime_end(c);
+      return false;
+    }
+    if (!bc_runtime_add(c, names[i], size, mtime)) {
+      bc_runtime_error(err, err_size, "Out of memory");
+      bc_runtime_end(c);
+      return false;
+    }
+  }
+  return bc_runtime_plan(c, err, err_size);
+}
+
+/** Both listings done: compare c->files with the record of c->to, which decides what is copied and
+ * what removed. Frees \a c on failure. */
+static bool bc_runtime_plan(BC_RuntimeCopy *c, char *err, const size_t err_size)
+{
   /* The arena is final: offsets become pointers. */
   for (int i = 0; i < c->file_count; i++) {
     c->files[i].path = c->names + (uintptr_t)c->files[i].path;
@@ -461,7 +505,7 @@ static int bc_runtime_remove_stale(BC_RuntimeCopy *c, char *err, const size_t er
   }
   if (!bc_remove(path)) {
     if (bc_is_file(path)) {
-      bc_runtime_error(err, err_size, "Cannot remove the old runtime file '%s': close the game if it is running", path);
+      bc_runtime_error(err, err_size, "Cannot remove the old copy '%s': close the game if it is running", path);
       return -1;
     }
     return 1; /* Already gone. */
@@ -575,8 +619,8 @@ bool bc_runtime_save(BC_RuntimeCopy *c, char *err, const size_t err_size)
     bc_runtime_error(err, err_size, "Cannot write '%s'", tmp);
     return false;
   }
-  fputs("# UPBGE runtime copied here by bc_tool (UPBGE-BinaryCrypt) from a UPBGE folder.\n"
-        "# Per file: size and time of the source, path. A listed file the UPBGE folder no longer has\n"
+  fputs("# Copied here by bc_tool (UPBGE-BinaryCrypt) from the UPBGE folder or the key provider's.\n"
+        "# Per file: size and time of the source, path. A listed file the source no longer gives\n"
         "# is removed by the next export; files not listed are never touched.\n",
         f);
   for (int i = 0; i < c->file_count; i++) {

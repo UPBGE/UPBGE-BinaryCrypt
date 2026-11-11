@@ -421,20 +421,49 @@ static const BC_KeyStore bc_store_items[BC_STORE_ITEMS] = {
     BC_STORE_STEAM, BC_STORE_EPIC, BC_STORE_CUSTOM, BC_STORE_ITCH, BC_STORE_META, BC_STORE_CUSTOM};
 
 /** Store template: the store's reference provider in the game folder's provider/, beside engine/
- * (another program than the player, with its store library), or no provider for one of your own. */
+ * (another program than the player, with its store library), or no provider for one of your own.
+ * A provider copied from elsewhere becomes the store's one in the same folder: the reference
+ * providers build side by side. */
 static void bc_gui_set_store(BC_Gui *g, const BC_KeyStore store)
 {
   BC_Project *p = &g->project;
   const char *name = bc_key_store_provider(store);
-  if (name == NULL) {
-    p->key_provider[0] = '\0';
+  char file[BC_PATH_MAX], dir[BC_PATH_MAX];
+  const int n = name ? snprintf(file, sizeof(file), "%s%s", name, bc_exe_extension()) : -1;
+  if (n < 0 || (size_t)n >= sizeof(file)) {
+    p->key_provider[0] = p->key_provider_from[0] = '\0';
   }
   else {
-    const int n = snprintf(p->key_provider, sizeof(p->key_provider), BC_DEFAULT_PROVIDER_DIR "/%s%s", name, bc_exe_extension());
-    if (n < 0 || (size_t)n >= sizeof(p->key_provider)) {
+    if (p->key_provider_from[0] != '\0') {
+      bc_path_dirname(dir, sizeof(dir), p->key_provider_from);
+      if (!bc_path_join(p->key_provider_from, sizeof(p->key_provider_from), dir, file)) {
+        p->key_provider_from[0] = '\0';
+      }
+    }
+    if ((size_t)snprintf(p->key_provider, sizeof(p->key_provider), BC_DEFAULT_PROVIDER_DIR "/%s", file) >= sizeof(p->key_provider)) {
       p->key_provider[0] = '\0';
     }
   }
+  bc_gui_set_modified(g);
+}
+
+/** Key provider: in the game folder (relative, or absolute inside it), or anywhere else, then
+ * copied into provider/ with its store library by every export. */
+static void bc_gui_set_provider(BC_Gui *g, const char *path)
+{
+  BC_Project *p = &g->project;
+  char normalized[BC_PATH_MAX], rel[BC_PATH_MAX];
+  snprintf(normalized, sizeof(normalized), "%s", path);
+  bc_path_normalize(normalized);
+  const char *dist = bc_project_dist_root(p);
+  if (!bc_path_is_absolute(normalized) || (dist[0] != '\0' && bc_path_relative(rel, sizeof(rel), dist, normalized))) {
+    p->key_provider_from[0] = '\0';
+    bc_gui_set_dist_path(g, normalized, p->key_provider, sizeof(p->key_provider), "key provider");
+    return;
+  }
+  snprintf(p->key_provider_from, sizeof(p->key_provider_from), "%s", normalized);
+  /* Stored too: the project file then tells where the copy goes. */
+  snprintf(p->key_provider, sizeof(p->key_provider), "%s", bc_project_provider(p, rel, sizeof(rel)));
   bc_gui_set_modified(g);
 }
 
@@ -1183,14 +1212,28 @@ static void bc_gui_refresh_check(BC_Gui *g)
   }
 
   if (p->key_mode == BC_KEY_ONLINE) {
-    if (p->key_provider[0] == '\0' && g->store_gog) {
+    const bool copied = p->key_provider_from[0] != '\0';
+    if (p->key_provider[0] == '\0' && !copied && g->store_gog) {
       bc_field_set(&c->provider, BC_FIELD_NONE, NULL);
       bc_todo(c, "set Key to Per project for the GOG build");
       bc_note(c, "GOG requires games to start without GOG Galaxy and its login: a GOG build uses a per project key");
     }
-    else if (p->key_provider[0] == '\0') {
+    else if (p->key_provider[0] == '\0' && !copied) {
       bc_field_set(&c->provider, BC_FIELD_NONE, NULL);
       bc_todo(c, "set the key provider");
+    }
+    else if (copied) {
+      if (!bc_is_file(p->key_provider_from)) {
+        bc_field_set(&c->provider, BC_FIELD_ERROR, "not found");
+        bc_todo(c, "the key provider does not exist");
+      }
+      else if (p->output_dir[0] != '\0' && bc_path_is_inside(p->output_dir, p->key_provider_from)) {
+        bc_field_set(&c->provider, BC_FIELD_ERROR, "inside the output");
+        bc_todo(c, "choose the key provider again: inside the output folder it needs no copy");
+      }
+      else {
+        bc_field_set(&c->provider, BC_FIELD_OK, NULL);
+      }
     }
     else if (c->output.state == BC_FIELD_OK) {
       if (bc_path_join(path, sizeof(path), p->output_dir, p->key_provider) && bc_is_file(path)) {
@@ -1198,7 +1241,7 @@ static void bc_gui_refresh_check(BC_Gui *g)
       }
       else {
         bc_field_set(&c->provider, BC_FIELD_ERROR, "not found");
-        bc_todo(c, "copy the key provider into the output folder");
+        bc_todo(c, "choose the key provider where it is: the export copies it into the output folder");
       }
     }
     bc_project_store_notes(p, bc_note_log, c);
@@ -1698,9 +1741,39 @@ static bool bc_gui_text_field(Rectangle bounds,
   return changed;
 }
 
-/** Editable path row from \a x to \a right: label, text box, browse button. \a placeholder shows
- * while it is empty and \a field (may be NULL) tells whether what it names checks out. Returns
- * true when the button was hit and sets *r_committed when an edit was just confirmed. */
+/** Editable path box: \a value shortened from its start while not edited, \a placeholder while it
+ * is empty, \a field (may be NULL) telling whether what it names checks out. Returns true when an
+ * edit was just confirmed: the path typed is then in \a text. */
+static bool bc_gui_path_box(const Rectangle box, const char *placeholder, const BC_Field *field, const char *value, char *text, bool *edit)
+{
+  bool committed = false;
+  /* The path gives up its start, never the check at the right end. */
+  const float reserved = bc_field_width(field);
+  if (!*edit) {
+    bc_fit_left(value, box.width - 16 - reserved, text, BC_PATH_MAX);
+  }
+  const bool toggled = GuiTextBox(box, text, BC_PATH_MAX - 1, *edit) != 0;
+  if (!*edit && !toggled) {
+    if (value[0] == '\0') {
+      bc_draw_placeholder(box, placeholder, reserved);
+    }
+    bc_draw_field(box, field);
+  }
+  if (toggled) {
+    if (*edit) {
+      committed = true;
+    }
+    else {
+      /* Editing starts on the full path, not on its shortened display. */
+      snprintf(text, BC_PATH_MAX, "%s", value);
+    }
+    *edit = !*edit;
+  }
+  return committed;
+}
+
+/** Editable path row from \a x to \a right: label, path box, browse button. Returns true when the
+ * button was hit and sets *r_committed when an edit was just confirmed (bc_gui_path_box). */
 static bool bc_gui_path_row(const float x,
                             const float y,
                             const float right,
@@ -1716,32 +1789,9 @@ static bool bc_gui_path_row(const float x,
 {
   const float button_x = right - BC_BUTTON_W;
   const float box_w = button_x - BC_GAP - (x + label_w);
-  const Rectangle box = bc_rect(x + label_w, y, box_w, BC_ROW);
   GuiLabel(bc_rect(x, y, label_w, BC_ROW), label);
   bc_tip(bc_rect(x, y, label_w + box_w, BC_ROW), help);
-  *r_committed = false;
-  /* The path gives up its start, never the check at the right end. */
-  const float reserved = bc_field_width(field);
-  if (!*edit) {
-    bc_fit_left(value, box_w - 16 - reserved, text, BC_PATH_MAX);
-  }
-  const bool toggled = GuiTextBox(box, text, BC_PATH_MAX - 1, *edit) != 0;
-  if (!*edit && !toggled) {
-    if (value[0] == '\0') {
-      bc_draw_placeholder(box, placeholder, reserved);
-    }
-    bc_draw_field(box, field);
-  }
-  if (toggled) {
-    if (*edit) {
-      *r_committed = true;
-    }
-    else {
-      /* Editing starts on the full path, not on its shortened display. */
-      snprintf(text, BC_PATH_MAX, "%s", value);
-    }
-    *edit = !*edit;
-  }
+  *r_committed = bc_gui_path_box(bc_rect(x + label_w, y, box_w, BC_ROW), placeholder, field, value, text, edit);
   return GuiButton(bc_rect(button_x, y, BC_BUTTON_W, BC_ROW), "Browse...");
 }
 
@@ -2665,7 +2715,8 @@ static void bc_gui_draw(BC_Gui *g)
              rotation,
              check_names[g->project.integrity <= BC_INTEGRITY_PYTHON ? g->project.integrity : 0],
              g->project.manifest_mode == BC_MANIFEST_EXTERNAL ? "Separate manifest file" : "Embedded manifest");
-    const bool error = check->provider.state == BC_FIELD_ERROR || (online && g->project.key_provider[0] == '\0');
+    const bool error = check->provider.state == BC_FIELD_ERROR ||
+                       (online && g->project.key_provider[0] == '\0' && g->project.key_provider_from[0] == '\0');
     if (bc_section(y, protection_h, inner, "4 \xc2\xb7 Protection", g->protection_open ? NULL : summary, error, g->protection_open ? 1 : 0, "Show or hide the protection settings\nWhere the content key comes from, what the game executable checks before every launch and where its manifest goes.")) {
       g->protection_open = !g->protection_open;
       g->check_edit = g->manifest_edit = g->key_edit = g->store_edit = false;
@@ -2777,24 +2828,27 @@ static void bc_gui_draw(BC_Gui *g)
 
         const float url_label_w = MeasureTextEx(font, "URL", BC_TEXT_SIZE, text_spacing).x + 3 * BC_GAP;
         const float provider_w = (right - key_x - BC_BUTTON_W - url_label_w - 2 * BC_GAP) * 0.45f;
-        const char *provider_help = "Key provider inside the game folder\nFor example " BC_DEFAULT_PROVIDER_DIR "/bc_provider_steam.exe, with the store's library beside it: proves to the key server that the player owns the game.";
+        const char *provider_help = "Key provider\nProves to the key server that the player owns the game. Choose it where it is (for example the folder the providers were built in): every export copies it, with the store's library beside it, into the game folder's " BC_DEFAULT_PROVIDER_DIR "/. One already in the game folder is used as it is.";
         const char *url_help = "Key server address\nGiven to the provider (https://...). Optional: a provider may know its server.";
         GuiLabel(bc_rect(x0, py, BC_LABEL_W, BC_ROW), "Provider");
         bc_tip(bc_rect(x0, py, BC_LABEL_W, BC_ROW), provider_help);
         const Rectangle provider_box = bc_rect(key_x, py, provider_w, BC_ROW);
-        if (bc_gui_text_field(provider_box, provider_help, "Required: your key provider, in the game folder", g->provider_text, sizeof(g->provider_text), g->project.key_provider, sizeof(g->project.key_provider), &g->provider_edit)) {
-          char entered[BC_PATH_MAX];
-          snprintf(entered, sizeof(entered), "%s", g->project.key_provider);
-          bc_gui_set_dist_path(g, entered, g->project.key_provider, sizeof(g->project.key_provider), "key provider");
-        }
-        if (!g->provider_edit && g->project.key_provider[0] != '\0') {
-          bc_draw_field(provider_box, &check->provider);
+        /* Shows the provider to copy when there is one, else the one in the game folder. */
+        bc_tip(provider_box, provider_help);
+        if (bc_gui_path_box(provider_box,
+                            "Required: your key provider",
+                            &check->provider,
+                            g->project.key_provider_from[0] ? g->project.key_provider_from : g->project.key_provider,
+                            g->provider_text,
+                            &g->provider_edit))
+        {
+          bc_gui_set_provider(g, g->provider_text);
         }
         float fx = key_x + provider_w + BC_GAP;
         if (GuiButton(bc_rect(fx, py, BC_BUTTON_W, BC_ROW), "Browse...")) {
           r = bc_dialog_open_files("Key provider executable", NULL, false, path, sizeof(path));
           if (r == BC_DIALOG_OK) {
-            bc_gui_set_dist_path(g, path, g->project.key_provider, sizeof(g->project.key_provider), "key provider");
+            bc_gui_set_provider(g, path);
           }
           else if (r == BC_DIALOG_UNAVAILABLE) {
             bc_gui_dialog_unavailable(g);

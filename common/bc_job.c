@@ -20,6 +20,7 @@
 
 typedef enum BC_JobPhase {
   BC_PHASE_COPY_RUNTIME,
+  BC_PHASE_COPY_PROVIDER,
   BC_PHASE_BRAND_PLAYER,
   BC_PHASE_HASH_PLAYER,
   BC_PHASE_SEAL,
@@ -90,6 +91,9 @@ struct BC_Job {
   /** A UPBGE folder: the runtime is copied into engine/ first, the player with it. */
   bool runtime_on;
   BC_RuntimeCopy runtime;
+  /** A key provider outside the game folder: copied into provider/ next, with its store library. */
+  bool provider_on;
+  BC_RuntimeCopy provider;
   /** Folders also give Python modules and the data files of these extensions. */
   char data_ext[BC_DATA_EXT_MAX][BC_DATA_EXT_SIZE];
   int data_ext_count;
@@ -538,8 +542,9 @@ static bool bc_job_setup_key(BC_Job *job, const BC_Project *p)
     return true;
   }
 
-  snprintf(job->provider_rel, sizeof(job->provider_rel), "%s", p->key_provider);
   char provider_abs[BC_PATH_MAX];
+  snprintf(job->provider_rel, sizeof(job->provider_rel), "%s", bc_project_provider(p, provider_abs, sizeof(provider_abs)));
+  const bool copied = p->key_provider_from[0] != '\0';
   if (!bc_manifest_path_is_safe(job->provider_rel) || strlen(job->provider_rel) >= BC_MANIFEST_PATH_MAX) {
     bc_log(job,
            BC_LOG_ERROR,
@@ -547,8 +552,16 @@ static bool bc_job_setup_key(BC_Job *job, const BC_Project *p)
            "'" BC_DEFAULT_PROVIDER_DIR "/bc_provider_steam.exe')");
     return false;
   }
+  if (copied && (!bc_is_file(p->key_provider_from) || bc_path_is_inside(job->dist_root, p->key_provider_from))) {
+    bc_log(job,
+           BC_LOG_ERROR,
+           bc_is_file(p->key_provider_from) ? "The key provider '%s' is inside the game folder: choose it there, without a copy" :
+                                              "Key provider '%s' not found",
+           p->key_provider_from);
+    return false;
+  }
   if (!bc_path_join(provider_abs, sizeof(provider_abs), job->dist_root, job->provider_rel) ||
-      !bc_is_file(provider_abs) || bc_path_equal(provider_abs, job->game_exe) ||
+      (!copied && !bc_is_file(provider_abs)) || bc_path_equal(provider_abs, job->game_exe) ||
       bc_path_equal(provider_abs, job->player_abs))
   {
     bc_log(job, BC_LOG_ERROR, "Key provider not found at '%s' (copy it into the game folder first)", provider_abs);
@@ -601,16 +614,27 @@ int bc_project_store_notes(const BC_Project *p, BC_LogFn log, void *user)
   }
   int notes = 0;
   char provider[BC_PATH_MAX], dir[BC_PATH_MAX], path[BC_PATH_MAX], message[BC_PATH_MAX + 128];
-  /* Only once the provider is there: a missing provider is an error of its own. */
-  if (bc_path_join(provider, sizeof(provider), dist, p->key_provider) && bc_is_file(provider)) {
+  char rel_buf[BC_PATH_MAX];
+  const char *library = bc_key_store_library(store);
+  const char *rel = bc_project_provider(p, rel_buf, sizeof(rel_buf));
+  const bool copied = p->key_provider_from[0] != '\0';
+  /* Only once the provider is there: a missing provider is an error of its own. Copied, the
+   * library comes from beside the original, or was put into provider/ by hand. */
+  if (library != NULL && (copied ? snprintf(provider, sizeof(provider), "%s", p->key_provider_from) > 0 :
+                                   bc_path_join(provider, sizeof(provider), dist, rel)) &&
+      bc_is_file(provider))
+  {
+    char shown[BC_PATH_MAX], copy_dir[BC_PATH_MAX], copy[BC_PATH_MAX];
     bc_path_dirname(dir, sizeof(dir), provider);
-    const char *library = bc_key_store_library(store);
-    if (library != NULL && bc_path_join(path, sizeof(path), dir, library) && !bc_is_file(path)) {
-      char shown[BC_PATH_MAX];
-      bc_path_dirname(shown, sizeof(shown), p->key_provider);
+    const bool missing = bc_path_join(path, sizeof(path), dir, library) && !bc_is_file(path) &&
+                         !(copied && bc_path_join(copy_dir, sizeof(copy_dir), dist, BC_DEFAULT_PROVIDER_DIR) &&
+                           bc_path_join(copy, sizeof(copy), copy_dir, library) && bc_is_file(copy));
+    if (missing) {
+      bc_path_dirname(shown, sizeof(shown), copied ? p->key_provider_from : rel);
       snprintf(message,
                sizeof(message),
-               "%s is missing next to the key provider%s%s%s: copy it there before exporting",
+               copied ? "%s is missing next to the key provider%s%s%s: put it there, every export copies it with the provider" :
+                        "%s is missing next to the key provider%s%s%s: copy it there before exporting",
                library,
                shown[0] ? " (" : "",
                shown,
@@ -828,6 +852,23 @@ BC_Job *bc_job_create(const BC_Project *p,
     }
     job->runtime_on = true;
   }
+  /* The key provider and its store library, against what an earlier export copied: reads only. */
+  if (p->key_mode == BC_KEY_ONLINE && p->key_provider_from[0] != '\0') {
+    char from[BC_PATH_MAX], to[BC_PATH_MAX], library[BC_PATH_MAX];
+    char why[BC_PATH_MAX + 256];
+    const char *names[2] = {bc_path_basename(p->key_provider_from), bc_key_store_library(bc_project_key_store(p))};
+    bc_path_dirname(from, sizeof(from), p->key_provider_from);
+    const int count = names[1] != NULL && bc_path_join(library, sizeof(library), from, names[1]) && bc_is_file(library) ? 2 : 1;
+    if (!bc_path_join(to, sizeof(to), job->dist_root, BC_DEFAULT_PROVIDER_DIR)) {
+      bc_log(job, BC_LOG_ERROR, "The output folder path is too long");
+      return bc_job_fail_create(job);
+    }
+    if (!bc_runtime_begin_files(&job->provider, from, names, count, to, why, sizeof(why))) {
+      bc_log(job, BC_LOG_ERROR, "%s", why);
+      return bc_job_fail_create(job);
+    }
+    job->provider_on = true;
+  }
 
   /* Outputs, sizes and the main file. */
   bool main_found = false;
@@ -850,6 +891,10 @@ BC_Job *bc_job_create(const BC_Project *p,
     }
     if (job->runtime_on && bc_path_relative(rel, sizeof(rel), job->runtime.to, out) && bc_runtime_has(&job->runtime, rel)) {
       bc_log(job, BC_LOG_ERROR, "'%s' would overwrite the UPBGE runtime file '%s/%s'", file->in, BC_RUNTIME_DIR, rel);
+      return bc_job_fail_create(job);
+    }
+    if (job->provider_on && bc_path_relative(rel, sizeof(rel), job->provider.to, out) && bc_runtime_has(&job->provider, rel)) {
+      bc_log(job, BC_LOG_ERROR, "'%s' would overwrite the key provider file '%s/%s'", file->in, BC_DEFAULT_PROVIDER_DIR, rel);
       return bc_job_fail_create(job);
     }
     if (strcmp(file->in, p->main) == 0) {
@@ -886,7 +931,7 @@ BC_Job *bc_job_create(const BC_Project *p,
     bc_file_size(job->player_abs, &player_size);
   }
   const uint64_t encrypt_bytes = job->total_bytes;
-  job->total_bytes += player_size + job->runtime.copy_bytes;
+  job->total_bytes += player_size + job->runtime.copy_bytes + job->provider.copy_bytes;
 
   /* The player is opened by the hash phase: branding may replace the file before. */
   job->hash_buffer = (uint8_t *)malloc(BC_HASH_READ_SIZE);
@@ -895,7 +940,10 @@ BC_Job *bc_job_create(const BC_Project *p,
     return bc_job_fail_create(job);
   }
   blake3_hasher_init(&job->hash_ctx);
-  job->phase = job->runtime_on ? BC_PHASE_COPY_RUNTIME : job->branding ? BC_PHASE_BRAND_PLAYER : BC_PHASE_HASH_PLAYER;
+  job->phase = job->runtime_on  ? BC_PHASE_COPY_RUNTIME :
+               job->provider_on ? BC_PHASE_COPY_PROVIDER :
+               job->branding    ? BC_PHASE_BRAND_PLAYER :
+                                  BC_PHASE_HASH_PLAYER;
 
   bc_log(job,
          BC_LOG_INFO,
@@ -946,11 +994,28 @@ BC_Job *bc_job_create(const BC_Project *p,
              c->stale_count);
     }
   }
+  if (job->provider_on) {
+    const BC_RuntimeCopy *c = &job->provider;
+    if (c->record_bad) {
+      bc_log(job, BC_LOG_WARNING, "%s/%s cannot be read: the key provider is copied again", BC_DEFAULT_PROVIDER_DIR, BC_RUNTIME_RECORD);
+    }
+    if (c->copy_count > 0 || c->stale_count > 0) {
+      bc_log(job,
+             BC_LOG_INFO,
+             "Key provider from '%s': %d of %d file(s) to copy into %s/, %d old one(s) to remove",
+             c->from,
+             c->copy_count,
+             c->file_count,
+             BC_DEFAULT_PROVIDER_DIR,
+             c->stale_count);
+    }
+  }
   snprintf(job->status,
            sizeof(job->status),
-           job->runtime_on ? "Copying the UPBGE runtime" :
-           job->branding   ? "Branding the player" :
-                             "Hashing the player");
+           job->runtime_on  ? "Copying the UPBGE runtime" :
+           job->provider_on ? "Copying the key provider" :
+           job->branding    ? "Branding the player" :
+                              "Hashing the player");
   return job;
 }
 
@@ -1005,10 +1070,14 @@ static BC_BrandResult bc_job_brand(BC_Job *job, const char *path, const char *si
   return result;
 }
 
-/* One file removed or one buffer copied (bc_runtime.h). */
+/* One file removed or one buffer copied (bc_runtime.h): of the UPBGE runtime into engine/, then of
+ * the key provider into provider/. */
 static void bc_job_copy_runtime(BC_Job *job)
 {
-  BC_RuntimeCopy *c = &job->runtime;
+  const bool runtime = job->phase == BC_PHASE_COPY_RUNTIME;
+  BC_RuntimeCopy *c = runtime ? &job->runtime : &job->provider;
+  const char *dir = runtime ? BC_RUNTIME_DIR : BC_DEFAULT_PROVIDER_DIR;
+  const char *what = runtime ? "UPBGE runtime" : "Key provider";
   char err[BC_PATH_MAX + 128];
   const uint64_t before = c->done_bytes;
   const int result = bc_runtime_step(c, job->hash_buffer, BC_HASH_READ_SIZE, err, sizeof(err));
@@ -1020,7 +1089,7 @@ static void bc_job_copy_runtime(BC_Job *job)
   }
   const char *current = bc_runtime_current(c);
   if (current != NULL) {
-    snprintf(job->status, sizeof(job->status), BC_RUNTIME_DIR "/%s", current);
+    snprintf(job->status, sizeof(job->status), "%s/%s", dir, current);
   }
   if (result > 0) {
     return;
@@ -1028,18 +1097,24 @@ static void bc_job_copy_runtime(BC_Job *job)
   if (c->copied + c->removed > 0) {
     bc_log(job,
            BC_LOG_INFO,
-           "UPBGE runtime: %d file(s) copied (%.1f MiB), %d old one(s) removed, %d up to date",
+           "%s: %d file(s) copied (%.1f MiB), %d old one(s) removed, %d up to date",
+           what,
            c->copied,
            (double)c->done_bytes / (1024.0 * 1024.0),
            c->removed,
            c->file_count - c->copied);
   }
   else {
-    bc_log(job, BC_LOG_INFO, "UPBGE runtime up to date (%d files in %s/)", c->file_count, BC_RUNTIME_DIR);
+    bc_log(job, BC_LOG_INFO, "%s up to date (%d files in %s/)", what, c->file_count, dir);
   }
   /* Failing to record costs the next export a full copy, never a broken game. */
   if (!bc_runtime_save(c, err, sizeof(err))) {
-    bc_log(job, BC_LOG_WARNING, "%s: the next export copies the whole runtime again", err);
+    bc_log(job, BC_LOG_WARNING, "%s: the next export copies everything again", err);
+  }
+  if (runtime && job->provider_on) {
+    job->phase = BC_PHASE_COPY_PROVIDER;
+    snprintf(job->status, sizeof(job->status), "Copying the key provider");
+    return;
   }
   job->phase = job->branding ? BC_PHASE_BRAND_PLAYER : BC_PHASE_HASH_PLAYER;
   snprintf(job->status, sizeof(job->status), job->branding ? "Branding the player" : "Hashing the player");
@@ -1453,6 +1528,7 @@ int bc_job_step(BC_Job *job, const double budget_seconds)
   while (job->phase != BC_PHASE_DONE && job->phase != BC_PHASE_FAILED) {
     switch (job->phase) {
       case BC_PHASE_COPY_RUNTIME:
+      case BC_PHASE_COPY_PROVIDER:
         bc_job_copy_runtime(job);
         break;
       case BC_PHASE_BRAND_PLAYER:
@@ -1511,6 +1587,7 @@ void bc_job_destroy(BC_Job *job)
   }
   free(job->old_records);
   bc_runtime_end(&job->runtime);
+  bc_runtime_end(&job->provider);
   bc_keyring_free(&job->ring);
   for (int i = 0; i < job->file_count; i++) {
     free(job->files[i].in);

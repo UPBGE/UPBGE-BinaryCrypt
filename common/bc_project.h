@@ -20,6 +20,9 @@
  *   key_file = keys/mygame.key    # project and online: the key, created on the first export;
  *                                 # private; default: next to the project file, named after it
  *   key_provider = provider/bc_provider_steam.exe  # online: relative to the distribution root
+ *   key_provider_from = ../providers/bc_provider_steam.exe  # online, optional: copied with its
+ *                                 # store library into provider/ by every export, only when
+ *                                 # changed (bc_runtime.h); the provider is then provider/<name>
  *   key_url = https://keys.example.com/key       # online: given to the provider, optional
  *   key_cache = none              # online: none | permanent (kept after the first launch)
  *   key_rotation = off            # online: off (one key) | per_update (a new key per update,
@@ -124,6 +127,9 @@ typedef struct BC_Project {
   BC_KeyMode key_mode;
   char key_file[BC_PATH_MAX];
   char key_provider[BC_PATH_MAX];
+  /** Provider copied into provider/ by every export, absolute; empty: key_provider is copied by
+   * hand. */
+  char key_provider_from[BC_PATH_MAX];
   char key_url[BC_PROJECT_URL_MAX];
   bool key_cache;
   bool key_rotation;
@@ -179,6 +185,10 @@ const char *bc_project_dist_root(const BC_Project *p);
 /** The player relative to the distribution root: engine/ + BC_RUNTIME_PLAYER with upbge_dir, else
  * #BC_Project.player. */
 const char *bc_project_player(const BC_Project *p);
+
+/** The key provider relative to the distribution root: provider/ + the name of key_provider_from
+ * when set (written into \a buf), else #BC_Project.key_provider. Empty when it does not fit. */
+const char *bc_project_provider(const BC_Project *p, char *buf, size_t size);
 
 /** The key file: key_file, else "<project file name>.key" next to the project file. False when
  * neither exists (an unsaved project without a key file). */

@@ -256,10 +256,10 @@ class ChainTest(unittest.TestCase):
         self.source = os.path.join(work, "src", "game.blend")
         with open(self.source, "wb") as f:
             f.write(b"BLENDER-v405" + os.urandom(150000))
-        for binary in ("BC_PLAYER", "BC_PROVIDER_DEV"):
-            shutil.copy2(os.environ[binary], os.path.join(work, "dist", "engine"))
+        shutil.copy2(os.environ["BC_PLAYER"], os.path.join(work, "dist", "engine"))
         player = os.path.basename(os.environ["BC_PLAYER"])
-        provider = os.path.basename(os.environ["BC_PROVIDER_DEV"])
+        # Taken where it was built: the export copies it into provider/.
+        provider = os.path.relpath(os.environ["BC_PROVIDER_DEV"], work).replace(os.sep, "/")
 
         # The key server address is known before the export: bind first, serve later.
         server = ks.KeyServer(("127.0.0.1", 0), {"games": []}, work, quiet=True)
@@ -267,7 +267,7 @@ class ChainTest(unittest.TestCase):
         with open(os.path.join(work, "game.bcproj"), "w") as f:
             f.write(f"version = 1\nsource_root = src\noutput_dir = dist\ngame_name = game\n"
                     f"player = engine/{player}\nmain = src/game.blend\ninput = src\n"
-                    f"key = online\nkey_file = game.key\nkey_provider = engine/{provider}\nkey_url = {url}\n")
+                    f"key = online\nkey_file = game.key\nkey_provider_from = {provider}\nkey_url = {url}\n")
         self.export(work)
         self.game = os.path.join(work, "dist", "game" + (".exe" if os.name == "nt" else ""))
 

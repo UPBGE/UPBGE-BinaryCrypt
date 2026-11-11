@@ -302,14 +302,19 @@ endif()
 # -- Online key -------------------------------------------------------------------------------
 # The content key is created on the first export, kept out of the game folder, and reaches the
 # player only through the provider and an envelope sealed for the launch.
+# The provider is taken where it was built: every export copies it into provider/.
 get_filename_component(provider_name "${BC_PROVIDER}" NAME)
-file(COPY "${BC_PROVIDER}" DESTINATION "${DIST}/engine")
-set(online_settings "key = online\nkey_file = content.key\nkey_provider = engine/${provider_name}\nkey_url = https://keys.example.com/key\n")
+file(RELATIVE_PATH provider_from "${BC_WORK}" "${BC_PROVIDER}")
+set(online_settings "key = online\nkey_file = content.key\nkey_provider_from = ${provider_from}\nkey_url = https://keys.example.com/key\n")
 file(WRITE "${BC_WORK}/online.bcproj" "${project}${online_settings}")
 bc_run(TRUE "${BC_TOOL}" --batch "${BC_WORK}/online.bcproj")
 bc_expect_output("Created the content key")
+bc_expect_output("Key provider: 1 file(s) copied")
 if(NOT EXISTS "${BC_WORK}/content.key")
   message(FATAL_ERROR "the content key file was not created")
+endif()
+if(NOT EXISTS "${DIST}/provider/${provider_name}")
+  message(FATAL_ERROR "the key provider was not copied into provider/")
 endif()
 set(ENV{BC_TEST_PROVIDER_KEY_FILE} "${BC_WORK}/content.key")
 set(ENV{BC_TEST_PROVIDER_EXPECT_URL} "https://keys.example.com/key")
@@ -362,6 +367,8 @@ set(ENV{BC_TEST_PROVIDER_MODE} "ok")
 # Key per update: update 2 changes the main file; the game then needs two keys (the player picks
 # the main file's by key id), the unchanged level, module and data file keep their bytes (the empty
 # __init__.py uses no key), and a cached key is not asked for again.
+# The provider kept in the game folder by hand from here on.
+file(COPY "${BC_PROVIDER}" DESTINATION "${DIST}/engine")
 set(ENV{BC_TEST_PROVIDER_KEY_FILE} "${BC_WORK}/updates.key")
 set(ENV{BC_TEST_PROVIDER_LOG} "${BC_WORK}/provider.log")
 set(rotation "key = online\nkey_file = updates.key\nkey_provider = engine/${provider_name}\nkey_url = https://keys.example.com/key\nkey_cache = permanent\nkey_rotation = per_update\n")
