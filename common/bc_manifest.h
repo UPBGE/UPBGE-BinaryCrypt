@@ -21,7 +21,7 @@
  *   56   2  number K of content keys (online: 1..BC_KEYS_MAX, project key: 1, build key: 0)
  *   58   2  provider path length V (online key only, else 0)
  *   60   2  key server URL length U (online key only, may be 0)
- *   62   2  optional features
+ *   62   2  optional features: what the player shows, BC_MANIFEST_SHOW_*
  *   64   2  extension size X, at most BC_MANIFEST_EXTENSION_MAX
  *   66  62  reserved, 0
  *  128   P  player path, UTF-8, relative to the manifest folder, '/' separators
@@ -84,6 +84,18 @@ extern "C" {
  * Python bytecode before the launch and after the player exits. */
 #define BC_MANIFEST_PYTHON_CHECK (1 << 4)
 #define BC_MANIFEST_KEY_FLAGS (BC_MANIFEST_ONLINE_KEY | BC_MANIFEST_KEY_CACHE | BC_MANIFEST_PROJECT_KEY)
+/* Optional features: debug displays for test builds, passed to the player. A launcher that does
+ * not know one starts the game without it. */
+/** Windows: the player gets a console window (else it runs without one). */
+#define BC_MANIFEST_SHOW_CONSOLE (1 << 0)
+/** -g show_framerate = 1 */
+#define BC_MANIFEST_SHOW_FRAMERATE (1 << 1)
+/** -g show_profile = 1: time per frame of logic, physics, rendering... */
+#define BC_MANIFEST_SHOW_PROFILE (1 << 2)
+/** -g show_physics = 1: physics shapes and contacts. */
+#define BC_MANIFEST_SHOW_PHYSICS (1 << 3)
+/** -g show_properties = 1: the debug properties. */
+#define BC_MANIFEST_SHOW_PROPERTIES (1 << 4)
 /* Required features this launcher understands. */
 #define BC_MANIFEST_REQUIRED_KNOWN \
   (BC_MANIFEST_KEY_FLAGS | BC_MANIFEST_NATIVE_DIGEST | BC_MANIFEST_PYTHON_CHECK)
@@ -105,6 +117,8 @@ typedef struct BC_Manifest {
   char main_path[BC_MANIFEST_PATH_MAX];
   /* Online key only; zero/empty otherwise. */
   uint16_t flags;
+  /** Optional features (BC_MANIFEST_SHOW_*); unknown bits are kept and ignored. */
+  uint16_t options;
   uint16_t key_count;
   uint8_t key_ids[BC_KEYS_MAX][BC_KEY_ID_SIZE];
   char provider_path[BC_MANIFEST_PATH_MAX];

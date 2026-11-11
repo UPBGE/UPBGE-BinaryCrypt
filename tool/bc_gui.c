@@ -2206,15 +2206,16 @@ static void bc_gui_draw(BC_Gui *g)
    * page. Every section folds. */
   const bool online = g->project.key_mode == BC_KEY_ONLINE;
   const bool key_file_row = g->project.key_mode != BC_KEY_BUILD;
-  /* Icon and version information only exist for Windows games: elsewhere the section stays folded
-   * and disabled (the project keeps them, the job ignores them with a warning). */
+  /* Icon and version information only exist for Windows games: elsewhere their rows stay disabled
+   * (the project keeps them, the job ignores them with a warning); the debug displays apply to
+   * every platform. */
   const bool brand = bc_brand_supported();
-  const bool windows_open = brand && g->windows_open;
+  const bool windows_open = g->windows_open;
   const float list_min_h = 3 * BC_LIST_ROW + 4;
   const float game_fixed_h = 2 * BC_GAP + (BC_ROW + BC_GAP) + BC_GAP + (BC_ROW + BC_GAP); /* Without the list. */
   const float game_min_h = g->game_open ? game_fixed_h + list_min_h : BC_FOLDED_H;
   const float build_h = g->build_open ? (float)(2 * BC_GAP + 3 * (BC_ROW + BC_GAP)) : BC_FOLDED_H;
-  const float windows_h = windows_open ? (float)(2 * BC_GAP + 2 * (BC_ROW + BC_GAP)) : BC_FOLDED_H;
+  const float windows_h = windows_open ? (float)(2 * BC_GAP + 3 * (BC_ROW + BC_GAP)) : BC_FOLDED_H;
   const int protection_rows = 2 + (key_file_row ? 1 : 0) + (online ? 3 : 0);
   const float protection_h = g->protection_open ? 2 * BC_GAP + (float)protection_rows * (BC_ROW + BC_GAP) : BC_FOLDED_H;
   const float help_h = g->help ? (float)(BC_GAP + BC_HELP_H) : 0.0f;
@@ -2513,31 +2514,47 @@ static void bc_gui_draw(BC_Gui *g)
     y += build_h + 2 * BC_GAP;
   }
 
-  /* 3 · Windows appearance: only where this build makes Windows games, folded and disabled
-   * elsewhere. Any value set brands both the game executable and the player. */
+  /* 3 · Appearance and debug: the Windows icon and version information (any value set brands both
+   * the game executable and the player; disabled where this build makes no Windows games), and the
+   * debug displays the game shows while testing. */
   {
+    /* In BC_MANIFEST_SHOW_* order. */
+    bool *const show_values[5] = {&g->project.show_console, &g->project.show_framerate, &g->project.show_profile, &g->project.show_physics, &g->project.show_properties};
+    static const char *const show_names[5] = {"Console", "Framerate", "Profile", "Physics", "Properties"};
+    static const char *const show_helps[5] = {
+        "Console\nWindows: a console window next to the game, with Python errors and prints. Off: the game runs without one.",
+        "Framerate\nThe frames per second, drawn over the game.",
+        "Profile\nTime per frame of logic, physics, animation, rendering..., drawn over the game.",
+        "Physics\nThe collision shapes and contacts, drawn over the game.",
+        "Properties\nThe game properties marked for debug, drawn over the game."};
+    char shown[96] = "";
+    for (int i = 0; i < 5; i++) {
+      if (*show_values[i]) {
+        snprintf(shown + strlen(shown), sizeof(shown) - strlen(shown), "%s%s", shown[0] ? ", " : "shows ", show_names[i]);
+      }
+    }
     if (brand) {
       const char *icon_name = g->project.icon[0] ? bc_path_basename(g->project.icon) : "no game icon";
       snprintf(summary,
                sizeof(summary),
-               "%s  \xc2\xb7  version %s%s%s",
+               "%s  \xc2\xb7  version %s%s%s  \xc2\xb7  %s",
                icon_name,
                g->project.game_version[0] ? g->project.game_version : "1.0.0.0",
                g->project.company[0] ? "  \xc2\xb7  " : "",
-               g->project.company);
+               g->project.company,
+               shown[0] ? shown : "no debug display");
     }
     else {
-      snprintf(summary, sizeof(summary), "Windows builds of bc_tool only");
+      snprintf(summary, sizeof(summary), "%s", shown[0] ? shown : "no debug display");
     }
-    const bool greyed = bc_enable_begin(brand);
     /* Open, its fields say what the summary would. */
-    const bool clicked = bc_section(y, windows_h, inner, "3 \xc2\xb7 Windows appearance", windows_open ? NULL : summary, check->icon.state == BC_FIELD_ERROR, windows_open ? 1 : 0, "Show or hide the Windows appearance\nIcon and version information of the game executable and of the player, as Explorer, the taskbar and Alt-Tab show them.");
-    bc_enable_end(greyed);
+    const bool clicked = bc_section(y, windows_h, inner, "3 \xc2\xb7 Appearance and debug", windows_open ? NULL : summary, check->icon.state == BC_FIELD_ERROR, windows_open ? 1 : 0, "Show or hide the appearance and the debug displays\nIcon and version information of the game executable and of the player (Windows), and what the game shows while you test it: console, frame rate, profile, physics, debug properties.");
     if (clicked) {
       g->windows_open = !g->windows_open;
     }
     else if (windows_open) {
       const float row_y = y + 2 * BC_GAP;
+      const bool greyed_brand = bc_enable_begin(brand);
       if (bc_gui_path_row(x0, row_y, right, BC_LABEL_W, "Icon", "Windows: icon of the game\nOf the game executable and of the game window (taskbar, Alt-Tab), any sizes in one .ico. Empty: the game executable shows the BinaryCrypt icon, the game window UPBGE's.", "Optional: the game icon", &check->icon, g->project.icon, g->icon_text, &g->icon_edit, &committed)) {
         r = bc_dialog_open_files("Game icon", "ico", false, path, sizeof(path));
         if (r == BC_DIALOG_OK) {
@@ -2581,6 +2598,33 @@ static void bc_gui_draw(BC_Gui *g)
       fx += copyright_label_w;
       if (bc_gui_text_field(bc_rect(fx, vy, right - fx, BC_ROW), copyright_help, "Optional", g->copyright_text, sizeof(g->copyright_text), g->project.copyright, sizeof(g->project.copyright), &g->copyright_edit)) {
         bc_gui_set_modified(g);
+      }
+      bc_enable_end(greyed_brand);
+
+      /* Debug displays: the player's -g options, passed by the game executable. */
+      const float sy = vy + BC_ROW + BC_GAP;
+      const char *show_help = "Debug displays\nWhat the game shows while you test it. Exporting with any of them on warns: turn them off before shipping.";
+      GuiLabel(bc_rect(x0, sy, BC_LABEL_W, BC_ROW), "Show");
+      bc_tip(bc_rect(x0, sy, BC_LABEL_W, BC_ROW), show_help);
+      const float box = BC_ROW - 12;
+      const float padding = (float)GuiGetStyle(CHECKBOX, TEXT_PADDING);
+      float cx = x0 + BC_LABEL_W;
+      for (int i = 0; i < 5; i++) {
+#ifdef _WIN32
+        const bool available = true;
+#else
+        const bool available = i != 0; /* The console is a Windows matter. */
+#endif
+        const float text_w = MeasureTextEx(font, show_names[i], BC_TEXT_SIZE, text_spacing).x;
+        const bool before = *show_values[i];
+        const bool greyed_show = bc_enable_begin(available);
+        GuiCheckBox(bc_rect(cx, sy + (BC_ROW - box) / 2, box, box), show_names[i], show_values[i]);
+        bc_enable_end(greyed_show);
+        if (*show_values[i] != before) {
+          bc_gui_set_modified(g);
+        }
+        bc_tip(bc_rect(cx, sy, box + padding + text_w, BC_ROW), show_helps[i]);
+        cx += box + padding + text_w + 4 * BC_GAP;
       }
     }
     y += windows_h + 2 * BC_GAP;

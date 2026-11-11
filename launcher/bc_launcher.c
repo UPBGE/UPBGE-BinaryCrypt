@@ -156,6 +156,27 @@ static bool bc_player_hash(BC_PlayerFile file, uint8_t hash[BC_PLAYER_HASH_SIZE]
 /* -------------------------------------------------------------------------------------------- */
 /* Start the player and hand over the key. Returns the player's exit code, or -1 on failure. */
 
+/* The player's -g options for the manifest's debug displays: "-g <name> = 1" each. */
+#define BC_SHOW_OPTION_COUNT 4
+static const struct {
+  uint16_t bit;
+  const char *name;
+#ifdef _WIN32
+  const wchar_t *wname;
+#endif
+} bc_show_options[BC_SHOW_OPTION_COUNT] = {
+#ifdef _WIN32
+#  define BC_SHOW(bit, name) {bit, name, L##name}
+#else
+#  define BC_SHOW(bit, name) {bit, name}
+#endif
+    BC_SHOW(BC_MANIFEST_SHOW_FRAMERATE, "show_framerate"),
+    BC_SHOW(BC_MANIFEST_SHOW_PROFILE, "show_profile"),
+    BC_SHOW(BC_MANIFEST_SHOW_PHYSICS, "show_physics"),
+    BC_SHOW(BC_MANIFEST_SHOW_PROPERTIES, "show_properties"),
+#undef BC_SHOW
+};
+
 #ifdef _WIN32
 /** Append \a arg quoted so that CommandLineToArgvW yields it back unchanged. */
 bool bc_append_quoted(wchar_t *cmd, size_t size, size_t *len, const wchar_t *arg);
@@ -265,6 +286,7 @@ static void bc_to_backslashes(wchar_t *s)
 static int bc_run_player(BC_PlayerFile player_file,
                          const char *player_path,
                          const char *title,
+                         const uint16_t show,
                          const char *main_path,
                          const char *work_dir,
                          uint8_t *keys,
@@ -287,8 +309,19 @@ static int bc_run_player(BC_PlayerFile player_file,
   bc_to_backslashes(wmain);
   bc_to_backslashes(wdir);
   if (!bc_append_quoted(cmd, 32768, &len, wplayer) || !bc_append_quoted(cmd, 32768, &len, L"-t") ||
-      !bc_append_quoted(cmd, 32768, &len, wtitle) || !bc_append_quoted(cmd, 32768, &len, wmain))
+      !bc_append_quoted(cmd, 32768, &len, wtitle))
   {
+    goto cleanup;
+  }
+  for (int i = 0; i < BC_SHOW_OPTION_COUNT; i++) {
+    if ((show & bc_show_options[i].bit) &&
+        (!bc_append_quoted(cmd, 32768, &len, L"-g") || !bc_append_quoted(cmd, 32768, &len, bc_show_options[i].wname) ||
+         !bc_append_quoted(cmd, 32768, &len, L"=") || !bc_append_quoted(cmd, 32768, &len, L"1")))
+    {
+      goto cleanup;
+    }
+  }
+  if (!bc_append_quoted(cmd, 32768, &len, wmain)) {
     goto cleanup;
   }
 
@@ -335,7 +368,10 @@ static int bc_run_player(BC_PlayerFile player_file,
     si.hStdError = std_handles[2];
     memcpy(inherited + 1, std_handles, sizeof(std_handles));
   }
-  const BOOL started = bc_create_process(wplayer, cmd, 0, wdir, &si, inherited, 4, &pi);
+  /* The player is a console program: without the console option it runs without one, so no
+   * console window opens behind the game (its output still reaches redirected handles). */
+  const DWORD creation = (show & BC_MANIFEST_SHOW_CONSOLE) ? 0 : CREATE_NO_WINDOW;
+  const BOOL started = bc_create_process(wplayer, cmd, creation, wdir, &si, inherited, 4, &pi);
   SetEnvironmentVariableW(L"" BC_KEY_PIPE_ENV, NULL);
   CloseHandle(read_end);
   read_end = NULL;
@@ -401,6 +437,7 @@ static void bc_cloexec_all_but(const int keep)
 static int bc_run_player(BC_PlayerFile player_file,
                          const char *player_path,
                          const char *title,
+                         const uint16_t show,
                          const char *main_path,
                          const char *work_dir,
                          uint8_t *keys,
@@ -439,7 +476,19 @@ static int bc_run_player(BC_PlayerFile player_file,
     bc_cloexec_all_but(fds[0]);
     setenv(BC_KEY_PIPE_ENV, value, 1);
     if (chdir(work_dir) == 0) {
-      char *args[] = {(char *)player_path, (char *)"-t", (char *)title, (char *)main_path, NULL};
+      /* player -t title [-g name = 1]... main: at most 3 + 4 per option + 2 entries. */
+      char *args[3 + 4 * BC_SHOW_OPTION_COUNT + 2] = {(char *)player_path, (char *)"-t", (char *)title};
+      int n = 3;
+      for (int i = 0; i < BC_SHOW_OPTION_COUNT; i++) {
+        if (show & bc_show_options[i].bit) {
+          args[n++] = (char *)"-g";
+          args[n++] = (char *)bc_show_options[i].name;
+          args[n++] = (char *)"=";
+          args[n++] = (char *)"1";
+        }
+      }
+      args[n++] = (char *)main_path;
+      args[n] = NULL;
 #  ifdef __linux__
       /* Execute the very file that was hashed, not whatever the path names by now. */
       fexecve(player_file, args, environ);
@@ -666,7 +715,7 @@ int main(int argc, char **argv)
   if (ext_len > 0 && title_len > ext_len && bc_path_has_extension(title, bc_exe_extension())) {
     title[title_len - ext_len] = '\0';
   }
-  const int exit_code = bc_run_player(player, player_path, title, main_path, dir, &keys[0][0], key_count);
+  const int exit_code = bc_run_player(player, player_path, title, manifest.options, main_path, dir, &keys[0][0], key_count);
   crypto_wipe(keys, BC_KEY_TABLE_SIZE);
   bc_native_release(&hold);
   bc_player_close(player);

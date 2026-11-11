@@ -4,6 +4,7 @@
 #include "bc_runtime.h"
 
 #include <ctype.h>
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -216,6 +217,39 @@ const char *bc_project_dist_root(const BC_Project *p)
   return p->output_dir;
 }
 
+/* Debug displays: one key each, 0 or 1, written only when on. */
+static const struct {
+  const char *key;
+  size_t offset;
+} bc_show_keys[] = {
+    {"show_console", offsetof(BC_Project, show_console)},
+    {"show_framerate", offsetof(BC_Project, show_framerate)},
+    {"show_profile", offsetof(BC_Project, show_profile)},
+    {"show_physics", offsetof(BC_Project, show_physics)},
+    {"show_properties", offsetof(BC_Project, show_properties)},
+};
+#define BC_SHOW_KEY_COUNT (int)(sizeof(bc_show_keys) / sizeof(bc_show_keys[0]))
+
+static bool *bc_show_flag(BC_Project *p, const int i)
+{
+  return (bool *)((char *)p + bc_show_keys[i].offset);
+}
+
+static bool bc_show_get(const BC_Project *p, const int i)
+{
+  return *(const bool *)((const char *)p + bc_show_keys[i].offset);
+}
+
+static int bc_show_key(const char *key)
+{
+  for (int i = 0; i < BC_SHOW_KEY_COUNT; i++) {
+    if (strcmp(key, bc_show_keys[i].key) == 0) {
+      return i;
+    }
+  }
+  return -1;
+}
+
 const char *bc_project_player(const BC_Project *p)
 {
   return p->upbge_dir[0] != '\0' ? BC_RUNTIME_DIR "/" BC_RUNTIME_PLAYER : p->player;
@@ -385,6 +419,10 @@ bool bc_project_load(BC_Project *p, const char *file_path, char *err, size_t err
       ok = value[0] >= '0' && value[0] <= '9' && *end == '\0' && update >= 1 && update <= 0xFFFFFFFFul;
       p->key_update = (uint32_t)update;
     }
+    else if (bc_show_key(key) >= 0) {
+      ok = (value[0] == '0' || value[0] == '1') && value[1] == '\0';
+      *bc_show_flag(p, bc_show_key(key)) = value[0] == '1';
+    }
     else if (strcmp(key, "integrity") == 0) {
       ok = true;
       if (strcmp(value, "player") == 0) {
@@ -530,6 +568,11 @@ bool bc_project_save(const BC_Project *p, const char *file_path, char *err, size
   fprintf(f,
           "integrity = %s\n",
           p->integrity == BC_INTEGRITY_PLAYER ? "player" : p->integrity == BC_INTEGRITY_PYTHON ? "python" : "native");
+  for (int i = 0; i < BC_SHOW_KEY_COUNT; i++) {
+    if (bc_show_get(p, i)) {
+      fprintf(f, "%s = 1\n", bc_show_keys[i].key);
+    }
+  }
   if (p->upbge_dir[0] != '\0') {
     bc_write_path(f, "upbge_dir", project_dir, p->upbge_dir);
   }

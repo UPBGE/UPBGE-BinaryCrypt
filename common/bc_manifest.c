@@ -99,7 +99,8 @@ size_t bc_manifest_encode(const BC_Manifest *m,
   bc_store_u16(out + 56, (uint16_t)key_count);
   bc_store_u16(out + 58, (uint16_t)lengths[2]);
   bc_store_u16(out + 60, (uint16_t)lengths[3]);
-  /* Optional features, extension size and reserved bytes stay zero: no feature uses them yet. */
+  bc_store_u16(out + 62, m->options);
+  /* Extension size and reserved bytes stay zero: no feature uses them yet. */
   size_t size = BC_MANIFEST_FIXED_SIZE;
   for (int i = 0; i < 4; i++) {
     memcpy(out + size, fields[i], lengths[i]);
@@ -177,6 +178,7 @@ BC_ManifestResult bc_manifest_decode(const uint8_t *buffer,
 
   memset(r_manifest, 0, sizeof(*r_manifest));
   r_manifest->flags = flags;
+  r_manifest->options = bc_load_u16(buffer + 62);
   memcpy(r_manifest->player_hash, buffer + 24, BC_PLAYER_HASH_SIZE);
   const uint8_t *text = buffer + BC_MANIFEST_FIXED_SIZE;
   char *fields[4] = {r_manifest->player_path, r_manifest->main_path, r_manifest->provider_path, r_manifest->key_url};

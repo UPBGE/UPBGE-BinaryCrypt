@@ -220,8 +220,16 @@ launcher needs no Visual C++ redistributable on the player's computer.
         name.
       - *UPBGE player*: the player inside the game folder; `engine/blenderplayer(.exe)` by default,
         and the copy of the UPBGE folder's player when that is set.
-   3. *Windows appearance*: *Icon*, *Version*, *Company*, *Copyright*, all optional; see below.
-      Disabled in Linux and macOS builds of `bc_tool`, which make no Windows games.
+   3. *Appearance and debug*:
+      - *Icon*, *Version*, *Company*, *Copyright*, all optional; see below. Disabled in Linux and
+        macOS builds of `bc_tool`, which make no Windows games.
+      - *Show*: what the game shows while you test it, all off by default. *Console*: on Windows,
+        a console window next to the game, with Python errors and prints (off, the player runs
+        without one). *Framerate*, *Profile* (time per frame of logic, physics, rendering...),
+        *Physics* (collision shapes and contacts) and *Properties* (the debug properties) are
+        drawn over the game. The game executable passes them to the player (`-g show_framerate = 1`
+        and so on) from its manifest; arguments given to the game executable itself never reach
+        the player. Exporting with any of them on warns: turn them off before shipping.
    4. *Protection*:
       - *Key*: per project (default), online from a key server (*Online types*: *Always online* or
         *Offline after 1st launch*), or the build key (*only for tests*: every game of the same
@@ -512,6 +520,8 @@ key_cache = none                # online: none | permanent (offline after the fi
 key_rotation = off              # online: off (one key) | per_update (a new key per update)
 key_update = 1                  # online, per_update: number of the update being exported
 integrity = python              # player | native (+ libraries) | python (default, + Python files)
+show_framerate = 1              # debug displays, 0 (default) or 1: show_console (Windows),
+                                #   show_framerate, show_profile, show_physics, show_properties
 upbge_dir = C:/UPBGE/bin/Release   # optional: copied into engine/ by every export
 player = engine/blenderplayer.exe   # relative to the game folder; ignored with upbge_dir
 main = src/game.blend

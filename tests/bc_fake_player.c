@@ -89,13 +89,22 @@ static bool bc_leaked(void)
 
 int main(int argc, char **argv)
 {
-  /* Exactly what the launcher passes: -t <game name> <main file>. */
-  if (argc != 4 || strcmp(argv[1], "-t") != 0) {
-    fprintf(stderr, "fake player: expected -t <title> <file>, got %d argument(s)\n", argc - 1);
+  /* Exactly what the launcher passes: -t <game name>, "-g <name> = 1" per debug display, then the
+   * main file. Anything else fails: no argument of the launcher's own may reach the player. */
+  if (argc < 4 || strcmp(argv[1], "-t") != 0 || (argc - 4) % 4 != 0) {
+    fprintf(stderr, "fake player: expected -t <title> [-g <name> = 1]... <file>, got %d argument(s)\n", argc - 1);
     return 13;
   }
+  char shown[256] = "";
+  for (int i = 3; i + 1 < argc; i += 4) {
+    if (strcmp(argv[i], "-g") != 0 || strcmp(argv[i + 2], "=") != 0 || strcmp(argv[i + 3], "1") != 0) {
+      fprintf(stderr, "fake player: unexpected argument '%s'\n", argv[i]);
+      return 13;
+    }
+    snprintf(shown + strlen(shown), sizeof(shown) - strlen(shown), " %s", argv[i + 1]);
+  }
   const char *title = argv[2];
-  const char *main_file = argv[3];
+  const char *main_file = argv[argc - 1];
   const char *pipe_value = getenv(BC_KEY_PIPE_ENV);
   if (pipe_value == NULL) {
     return 10;
@@ -140,10 +149,11 @@ int main(int argc, char **argv)
     fprintf(stderr, "fake player: inherited a handle of the launcher's parent\n");
     return 15;
   }
-  printf("fake player: '%s' decrypted correctly (%llu bytes, %d key(s)) in the window '%s'\n",
+  printf("fake player: '%s' decrypted correctly (%llu bytes, %d key(s)) in the window '%s', showing:%s\n",
          main_file,
          (unsigned long long)plain_size,
          key_count,
-         title);
+         title,
+         shown[0] ? shown : " nothing");
   return 0;
 }

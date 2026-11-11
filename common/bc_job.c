@@ -113,6 +113,8 @@ struct BC_Job {
 
   /* Windows branding (bc_brand.h); strings copied so the project may change while running. */
   bool branding;
+  /** Debug displays (BC_MANIFEST_SHOW_*), for the manifest. */
+  uint16_t show;
   BC_Branding brand;
   uint8_t *ico;
   char brand_product[BC_GAME_NAME_MAX];
@@ -901,6 +903,23 @@ BC_Job *bc_job_create(const BC_Project *p,
          job->file_count,
          (double)encrypt_bytes / (1024.0 * 1024.0),
          job->dist_root);
+  /* Debug displays: right for a test build, a warning so none ships by accident. */
+  job->show = (uint16_t)((p->show_console ? BC_MANIFEST_SHOW_CONSOLE : 0) |
+                         (p->show_framerate ? BC_MANIFEST_SHOW_FRAMERATE : 0) |
+                         (p->show_profile ? BC_MANIFEST_SHOW_PROFILE : 0) |
+                         (p->show_physics ? BC_MANIFEST_SHOW_PHYSICS : 0) |
+                         (p->show_properties ? BC_MANIFEST_SHOW_PROPERTIES : 0));
+  if (job->show != 0) {
+    /* In BC_MANIFEST_SHOW_* bit order. */
+    static const char *const shown[] = {"a console", "the frame rate", "the profile", "the physics shapes", "the debug properties"};
+    char what[128] = "";
+    for (int i = 0; i < 5; i++) {
+      if (job->show & (1 << i)) {
+        snprintf(what + strlen(what), sizeof(what) - strlen(what), "%s%s", what[0] ? ", " : "", shown[i]);
+      }
+    }
+    bc_log(job, BC_LOG_WARNING, "The game shows %s: fine for testing, turn them off before shipping", what);
+  }
   if (job->runtime_on) {
     const BC_RuntimeCopy *c = &job->runtime;
     if (c->record_bad) {
@@ -1310,6 +1329,7 @@ static void bc_job_write_game_exe(BC_Job *job)
   /* Lengths validated by bc_job_create. */
   memcpy(manifest.player_path, job->player_rel, strlen(job->player_rel) + 1);
   memcpy(manifest.main_path, job->main_out_rel, strlen(job->main_out_rel) + 1);
+  manifest.options = job->show;
   char err[BC_PATH_MAX + 128];
   if (job->integrity != BC_INTEGRITY_PLAYER) {
     /* Last step before the executable itself, so every file the export wrote is in place. The

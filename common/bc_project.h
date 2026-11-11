@@ -28,6 +28,9 @@
  *                                 # player | native (+ every .dll, .so, .dylib, .pyd, .exe of the
  *                                 # game folder) | python (default: + .py, .pyw, .pth, .zip;
  *                                 # Python bytecode removed) (bc_native.h)
+ *   show_framerate = 1            # debug displays for test builds, each 0 (default) or 1:
+ *                                 # show_console (Windows), show_framerate, show_profile,
+ *                                 # show_physics, show_properties
  *   upbge_dir = C:/UPBGE/bin/Release  # optional: copied into engine/ at every export, only what
  *                                 # changed (bc_runtime.h); the player is then engine/blenderplayer
  *   player = engine/blenderplayer.exe  # relative to the distribution root, hashed by the tool;
@@ -127,6 +130,10 @@ typedef struct BC_Project {
   uint32_t key_update;
   /** What the game executable checks before every launch (bc_native.h). */
   BC_Integrity integrity;
+  /** Debug displays the player shows, for test builds: a console window (Windows only; without
+   * it the player runs with none), the frame rate, the profile, the physics shapes, the debug
+   * properties. */
+  bool show_console, show_framerate, show_profile, show_physics, show_properties;
   /** UPBGE folder copied into engine/ by every export; empty: the runtime is copied by hand. */
   char upbge_dir[BC_PATH_MAX];
   char player[BC_PATH_MAX];

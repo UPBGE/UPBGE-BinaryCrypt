@@ -98,7 +98,7 @@ set(ENV{BC_TEST_EXPECTED} "${SRC}/game.blend")
 bc_run(TRUE "${DIST}/${game}")
 bc_expect_output("decrypted correctly")
 # The player's window shows the game's name (a space in it survives the Windows command line).
-bc_expect_output("in the window 'My Game'")
+bc_expect_output("in the window 'My Game', showing: nothing")
 # A handle left inheritable by whoever starts the game (a store client, a script) must not reach
 # the player: the launcher passes the key pipe and its standard streams, nothing else.
 bc_run(TRUE "${BC_TESTS}" --spawn-leaking "${DIST}/${game}")
@@ -156,6 +156,12 @@ bc_expect_output("was changed, added or removed")
 file(REMOVE "${DIST}/engine/version.dll")
 file(REMOVE_RECURSE "${DIST}/engine/__pycache__" "${DIST}/engine/scripts")
 file(REMOVE "${DIST}/engine/startup.pth")
+# Debug displays reach the player as -g options, nothing else (none by default, see above).
+file(WRITE "${BC_WORK}/shows.bcproj" "${checked}show_framerate = 1\nshow_physics = 1\nshow_console = 1\n")
+bc_run(TRUE "${BC_TOOL}" --batch "${BC_WORK}/shows.bcproj")
+bc_expect_output("The game shows a console, the frame rate, the physics shapes")
+bc_run(TRUE "${DIST}/${game}")
+bc_expect_output("showing: show_framerate show_physics")
 # Player level: only the player.
 file(WRITE "${BC_WORK}/unchecked.bcproj" "${checked}integrity = player\n")
 bc_run(TRUE "${BC_TOOL}" --batch "${BC_WORK}/unchecked.bcproj")

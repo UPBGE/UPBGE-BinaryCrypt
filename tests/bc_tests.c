@@ -307,11 +307,13 @@ static void test_manifest(void)
   }
   snprintf(m.player_path, sizeof(m.player_path), "engine/blenderplayer.exe");
   snprintf(m.main_path, sizeof(m.main_path), "game.blend");
+  m.options = BC_MANIFEST_SHOW_FRAMERATE | BC_MANIFEST_SHOW_PROPERTIES;
 
   uint8_t data[BC_MANIFEST_MAX_SIZE];
   const size_t size = bc_manifest_encode(&m, bc_build_key(), data);
   CHECK(size > 0);
   CHECK(bc_manifest_decode(data, size, bc_build_key(), &r) == BC_MANIFEST_OK);
+  CHECK(r.options == m.options);
   CHECK_STR(r.player_path, m.player_path);
   CHECK_STR(r.main_path, m.main_path);
   CHECK(memcmp(r.player_hash, m.player_hash, BC_PLAYER_HASH_SIZE) == 0);
@@ -1434,18 +1436,23 @@ static void test_project(void)
   CHECK_STR(q.key_url, p.key_url);
   bc_project_free(&q);
   bc_project_free(&p);
-  write_text("proj/build.bcproj", "version = 1\nkey = build\nintegrity = python\n");
+  write_text("proj/build.bcproj", "version = 1\nkey = build\nintegrity = python\nshow_console = 1\nshow_profile = 1\nshow_physics = 0\n");
   work_path(path, "proj/build.bcproj");
   CHECK(bc_project_load(&p, path, err, sizeof(err)) && p.key_mode == BC_KEY_BUILD);
   CHECK(p.integrity == BC_INTEGRITY_PYTHON);
+  CHECK(p.show_console && p.show_profile && !p.show_physics && !p.show_framerate && !p.show_properties);
   CHECK(bc_project_save(&p, saved, err, sizeof(err)) && bc_project_load(&q, saved, err, sizeof(err)));
   CHECK(q.key_mode == BC_KEY_BUILD && q.integrity == BC_INTEGRITY_PYTHON);
+  CHECK(q.show_console && q.show_profile && !q.show_physics && !q.show_framerate && !q.show_properties);
   bc_project_free(&q);
   bc_project_free(&p);
   /* A project never saved has no place for its key file until one is chosen. */
   CHECK(p.key_mode == BC_KEY_PROJECT && !bc_project_key_file(&p, key_path, sizeof(key_path)));
   write_text("proj/bad_key.bcproj", "version = 1\nkey = cloud\n");
   work_path(path, "proj/bad_key.bcproj");
+  CHECK(!bc_project_load(&p, path, err, sizeof(err)));
+  write_text("proj/bad_show.bcproj", "version = 1\nshow_framerate = yes\n");
+  work_path(path, "proj/bad_show.bcproj");
   CHECK(!bc_project_load(&p, path, err, sizeof(err)));
   write_text("proj/bad_integrity.bcproj", "version = 1\nintegrity = everything\n");
   work_path(path, "proj/bad_integrity.bcproj");
