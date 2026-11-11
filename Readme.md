@@ -118,10 +118,11 @@ cmake --build build --config Release --target package   # optional: the two zips
 ```
 
 Packages: two parts, each in a folder of its own with its license. `UPBGE-BinaryCrypt/` holds
-`bc_tool` and `bc_launcher` (GPL-3.0; `licenses/` holds the notices of the code built
-into them: zstd, Montserrat); `UPBGE-BinaryCrypt-keyserver/` holds the key server and the providers
-of this build (MIT), each store provider with its library. The `package` target zips each folder
-into the build folder (`UPBGE-BinaryCrypt-<version>-<platform>.zip` and
+`bc_tool` and `bc_launcher` (GPL-3.0; `licenses/` holds the licenses of the code built into them:
+Monocypher, BLAKE3, zstd, raylib, GLFW, raygui, Montserrat); `UPBGE-BinaryCrypt-keyserver/` holds
+the key server and the providers of this build (MIT), each store provider with its library. The
+`package` target zips each folder into the build folder
+(`UPBGE-BinaryCrypt-<version>-<platform>.zip` and
 `UPBGE-BinaryCrypt-keyserver-<version>-<platform>.zip`); `cmake --install build --config Release
 --prefix <folder>` installs both folders there.
 

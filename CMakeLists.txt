@@ -235,6 +235,9 @@ if(BINARYCRYPT_BUILD_GUI)
   if(TARGET raylib)
     set(BC_RAYLIB raylib)
   elseif(TARGET raylib::raylib)
+    if(RAYLIB_INCLUDE_DIR)
+      get_filename_component(bc_raylib_root ${RAYLIB_INCLUDE_DIR} DIRECTORY) # Its license, if any.
+    endif()
     set(BC_RAYLIB raylib::raylib)
     if(WIN32)
       list(APPEND BC_RAYLIB opengl32 gdi32 winmm)
@@ -250,6 +253,7 @@ if(BINARYCRYPT_BUILD_GUI)
     )
     FetchContent_MakeAvailable(raylib)
     set_property(DIRECTORY ${raylib_SOURCE_DIR} PROPERTY EXCLUDE_FROM_ALL TRUE)
+    set(bc_raylib_root ${raylib_SOURCE_DIR})
     set(BC_RAYLIB raylib)
   else()
     message(FATAL_ERROR "raylib not found: install it, enable BINARYCRYPT_FETCH_RAYLIB or set BINARYCRYPT_BUILD_GUI=OFF")
@@ -380,7 +384,7 @@ endif()
 
 # ---------------------------------------------------------------------------------------------
 # Packages. Two parts, each in a folder of its own with its license:
-#   UPBGE-BinaryCrypt/            bc_tool, bc_launcher (GPL-3.0; licenses/: notices of the code
+#   UPBGE-BinaryCrypt/            bc_tool, bc_launcher (GPL-3.0; licenses/: those of the code
 #                                 built into them)
 #   UPBGE-BinaryCrypt-keyserver/  key server and the providers built here (MIT)
 # cmake --install build [--prefix <dir>] installs both folders; cpack --config build/CPackConfig.cmake
@@ -388,14 +392,24 @@ endif()
 
 install(TARGETS bc_tool bc_launcher RUNTIME DESTINATION ${BC_PACKAGE_TOOLS} COMPONENT tools)
 install(FILES LICENSE.txt Readme.md DESTINATION ${BC_PACKAGE_TOOLS} COMPONENT tools)
-# Licenses that ask for their notice in binary copies: zstd (BSD-3-Clause, when built here) and the
-# editor's font (SIL OFL 1.1). Monocypher and BLAKE3 are used under CC0, raylib and raygui under
-# zlib, which asks it of source copies only.
+# The licenses of the code built into them, whether or not they ask for it in binary copies.
+set(bc_licenses ${BC_PACKAGE_TOOLS}/licenses)
+install(FILES common/monocypher/LICENCE.md DESTINATION ${bc_licenses} RENAME Monocypher-LICENSE.txt COMPONENT tools)
+install(FILES common/blake3/LICENSE_CC0 DESTINATION ${bc_licenses} RENAME BLAKE3-LICENSE_CC0.txt COMPONENT tools)
+install(FILES common/blake3/LICENSE_A2 DESTINATION ${bc_licenses} RENAME BLAKE3-LICENSE_A2.txt COMPONENT tools)
 if(zstd_SOURCE_DIR)
-  install(FILES ${zstd_SOURCE_DIR}/LICENSE DESTINATION ${BC_PACKAGE_TOOLS}/licenses RENAME zstd-LICENSE.txt COMPONENT tools)
+  install(FILES ${zstd_SOURCE_DIR}/LICENSE DESTINATION ${bc_licenses} RENAME zstd-LICENSE.txt COMPONENT tools)
 endif()
 if(BINARYCRYPT_BUILD_GUI)
-  install(FILES tool/fonts/OFL.txt DESTINATION ${BC_PACKAGE_TOOLS}/licenses RENAME Montserrat-OFL.txt COMPONENT tools)
+  install(FILES tool/third_party/raygui-LICENSE DESTINATION ${bc_licenses} RENAME raygui-LICENSE.txt COMPONENT tools)
+  install(FILES tool/fonts/OFL.txt DESTINATION ${bc_licenses} RENAME Montserrat-OFL.txt COMPONENT tools)
+  # raylib and the GLFW it builds in: from its sources, or beside a prebuilt one.
+  if(EXISTS "${bc_raylib_root}/LICENSE")
+    install(FILES ${bc_raylib_root}/LICENSE DESTINATION ${bc_licenses} RENAME raylib-LICENSE.txt COMPONENT tools)
+  endif()
+  if(EXISTS "${bc_raylib_root}/src/external/glfw/LICENSE.md")
+    install(FILES ${bc_raylib_root}/src/external/glfw/LICENSE.md DESTINATION ${bc_licenses} RENAME GLFW-LICENSE.txt COMPONENT tools)
+  endif()
 endif()
 install(FILES keyserver/bc_keyserver.py keyserver/keyserver.example.json keyserver/README.md keyserver/LICENSE
         DESTINATION ${BC_PACKAGE_KEYSERVER} COMPONENT keyserver)
